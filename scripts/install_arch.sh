@@ -454,11 +454,11 @@ fi
 # desktop since taken away): marked as installed for itself, or
 # "pacman -Rns" of that something, or pacman -Qdtq, would take it too.
 touch "$tmp/keep"
-deps=$(pacman -Qdq 2>/dev/null | grep -Fx -f "$tmp/keep" | tr '\n' ' ' || true)
-if [ -n "$deps" ]; then
-	say "Kept for DEsk (marked as installed explicitly):$(printf ' %s' $deps)"
+keepdeps=$(pacman -Qdq 2>/dev/null | grep -Fx -f "$tmp/keep" | tr '\n' ' ' || true)
+if [ -n "$keepdeps" ]; then
+	say "Kept for DEsk (marked as installed explicitly):$(printf ' %s' $keepdeps)"
 	# shellcheck disable=SC2086
-	as_root pacman -D --asexplicit $deps >/dev/null || say "Note: pacman -D could not (above)."
+	as_root pacman -D --asexplicit $keepdeps >/dev/null || say "Note: pacman -D could not (above)."
 fi
 # what Arch has only in the AUR, which is not for a script to build: said,
 # and done without
