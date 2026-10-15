@@ -211,6 +211,7 @@ build|X11 programs: window hints (xcb-icccm)|libxcb-icccm4-dev
 build|X11 programs: wlroots wants it (xcb-ewmh)|libxcb-ewmh-dev
 apt|wlroots 0.18|libwlroots-0.18-dev
 source|wlroots: fetching its release|curl
+source|wlroots: applying the nested keyboard fix|patch
 source|wlroots: fetching its release (certificates)|ca-certificates
 source|wlroots: unpacking Wayland|xz-utils
 source|wlroots: the seat (libseat)|libseat-dev
@@ -552,6 +553,9 @@ if [ "$wlroots" = source ]; then
 		printf '%s|%s|%s|%s|%s\n' "$what" "$ver" "$url" "$sum" "$opts" >> "$tmp/sources"
 	done < "$tmp/table"
 	todo=$(cut -d'|' -f1,2 "$tmp/sources" | tr '|' ' ')
+	# Rebuild an existing private copy when the parent-keymap patch changes.
+	todo="$todo
+nested-keymap $(sh "$root/scripts/wlroots-keymap.sh" --fingerprint)"
 	if [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$todo" ] \
 		&& PKG_CONFIG_PATH=$pcpath pkg-config --exact-version="$wlrver" wlroots-0.18 2>/dev/null; then
 		say "  $(printf '%s' "$todo" | tr '\n' ',' | sed 's/,/, /g'): built before, kept"
@@ -565,6 +569,11 @@ if [ "$wlroots" = source ]; then
 			src="$deps/$what-$ver"
 			as_builder rm -rf "$src"
 			as_builder tar -xf "$deps/${url##*/}" -C "$deps"
+			if [ "$what" = wlroots ]; then
+				as_builder sh "$root/scripts/wlroots-keymap.sh" "$src" \
+					> "$tmp/wlroots-patch.log" 2>&1 \
+					|| { cat "$tmp/wlroots-patch.log"; die "wlroots parent-keymap patch did not apply"; }
+			fi
 			say "  building $what $ver"
 			# the run path, for what has libraries (the protocols are only XML)
 			[ "$what" = wayland-protocols ] || opts="$opts -Dc_link_args=-Wl,-rpath,$wlr/lib"

@@ -1,0 +1,2 @@
+# A patch stores unified-diff context, including whitespace-only context lines.
+*.patch -whitespace

@@ -1,0 +1,44 @@
+--- a/backend/wayland/seat.c
++++ b/backend/wayland/seat.c
+@@ -2,6 +2,8 @@
+ #include <stdint.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <sys/mman.h>
++#include <sys/stat.h>
+ #include <time.h>
+ #include <unistd.h>
+ 
+@@ -20,6 +22,32 @@
+ 
+ static void keyboard_handle_keymap(void *data, struct wl_keyboard *wl_keyboard,
+ 		uint32_t format, int32_t fd, uint32_t size) {
++	struct wlr_keyboard *keyboard = data;
++	struct stat info;
++	if (format != WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1 || size == 0 ||
++			fstat(fd, &info) < 0 || info.st_size < (off_t)size) {
++		goto out;
++	}
++	char *map = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
++	if (map == MAP_FAILED) {
++		goto out;
++	}
++	if (map[size - 1] == '\0') {
++		struct xkb_context *context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
++		if (context) {
++			struct xkb_keymap *keymap = xkb_keymap_new_from_string(context,
++				map, XKB_KEYMAP_FORMAT_TEXT_V1, XKB_KEYMAP_COMPILE_NO_FLAGS);
++			if (keymap) {
++				/* Nested input uses the parent's keycodes and modifiers, so
++				 * its keymap must follow every parent layout change too. */
++				wlr_keyboard_set_keymap(keyboard, keymap);
++				xkb_keymap_unref(keymap);
++			}
++			xkb_context_unref(context);
++		}
++	}
++	munmap(map, size);
++out:
+ 	close(fd);
+ }
+ 

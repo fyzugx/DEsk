@@ -397,6 +397,9 @@ meson compile -C build
 ## Run
 
 Inside your current session, as a window:
+See [nested Wayland compatibility](docs/NESTED-WAYLAND.md) for parent-keymap
+requirements and a repeatable input/cursor check.
+
 
 ```sh
 ./build/desk -s foot
