@@ -25,6 +25,7 @@
  * ================================================================ */
 
 #include "compat.h"
+#include "shortcuts.h"
 #include "i18n.h"
 #include "memo.h"
 #include "session.h"
@@ -203,6 +204,8 @@ struct desk_sheet {
 
 /* The shell's own settings (shell.conf): see "the shell's own settings". */
 struct shell_conf {
+	struct desk_shortcuts shortcuts;
+	bool super_opens_apps;
 	bool paper_all;             /* programs with frames of their own on paper too */
 	bool throw_closed;          /* a closed window screwed up and thrown away */
 	bool corner_hover;          /* a corner turns up when the hand rests on it */
@@ -512,6 +515,8 @@ struct desk_popup {
 };
 
 struct desk_keyboard {
+	bool shortcut_down[KEY_MAX + 1];
+	struct desk_super_tap super_tap;
 	struct wl_list link;
 	struct desk_server *server;
 	struct wlr_keyboard *wlr_keyboard;
@@ -9991,11 +9996,18 @@ static char *conf_trim(char *s)
 	return s;
 }
 
+static uint32_t shortcut_resolve(const char *name)
+{
+	return xkb_keysym_to_lower(xkb_keysym_from_name(name, XKB_KEYSYM_CASE_INSENSITIVE));
+}
+
 static void shell_conf_defaults(struct shell_conf *c)
 {
 	for (int i = 0; i < DESK_STD_COUNT; i++) {
 		desk_apps_set_std(i, "");
 	}
+	desk_shortcuts_defaults(&c->shortcuts, shortcut_resolve);
+	c->super_opens_apps = true;
 	c->paper_all = true;
 	c->throw_closed = true;
 	c->corner_hover = true;
@@ -10031,6 +10043,11 @@ static void shell_conf_defaults(struct shell_conf *c)
 /* The settings that are not yes or no. False if the key is not one. */
 static bool conf_other(struct shell_conf *c, const char *path, const char *key, const char *val)
 {
+	if (!strncmp(key, "shortcut.", 9)) {
+		const char *error = desk_shortcut_set(&c->shortcuts, key + 9, val, shortcut_resolve);
+		if (error) wlr_log(WLR_ERROR, "%s: %s: %s", path, key, error);
+		return true;
+	}
 	if (!strcmp(key, "graphics")) {
 		static const char *const LEVEL[DESK_GFX_COUNT] = { "2d", "low", "medium", "high",
 			"ultra" };
@@ -10302,7 +10319,9 @@ static void shell_conf_read_file(struct shell_conf *c, const char *path)
 			wlr_log(WLR_ERROR, "%s: %s is yes or no, not \"%s\"", path, key, val);
 			continue;
 		}
-		if (!strcmp(key, "paper_for_all_windows")) {
+		if (!strcmp(key, "super_opens_apps")) {
+		c->super_opens_apps = b;
+		} else if (!strcmp(key, "paper_for_all_windows")) {
 			c->paper_all = b;
 		} else if (!strcmp(key, "throw_closed_windows")) {
 			c->throw_closed = b;
@@ -16010,6 +16029,26 @@ static bool window_under(struct desk_server *server)
 		|| pointer_over(server, server->layer_xover);
 }
 
+/* Rotate eligible windows without selecting hidden sheets or X11 menus. */
+static void window_switch(struct desk_server *server, bool reverse)
+{
+ struct desk_toplevel *first = NULL, *target = NULL, *v;
+ wl_list_for_each(v, &server->toplevels, link) {
+  if (!v->scene_tree || !v->scene_tree->node.enabled || v->unmanaged
+   || v->sheet.phase != SHEET_IDLE || !view_takes_keys(v)) continue;
+  if (!first) { first = v; continue; }
+  target = v;
+  if (!reverse) break;
+ }
+ if (!target) return;
+ if (!reverse) {
+  wl_list_remove(&first->link);
+  wl_list_insert(server->toplevels.prev, &first->link);
+ }
+ focus_toplevel(target);
+ server_schedule_frames(server);
+}
+
 static bool handle_keybinding(struct desk_server *server, xkb_keysym_t sym, uint32_t mods)
 {
 	/* Once the lamp starts going out there is nothing to press, nothing to
@@ -16089,63 +16128,34 @@ static bool handle_keybinding(struct desk_server *server, xkb_keysym_t sym, uint
 			}
 		}
 	}
-	if (mods & WLR_MODIFIER_LOGO) {
-		switch (sym) {
-		case XKB_KEY_Return:
-			terminal_open();
-			return true;
-		case XKB_KEY_l:
-		case XKB_KEY_L:
-			lock_request(server);
-			return true;
-		case XKB_KEY_q:
-		case XKB_KEY_Q:
-			if (!wl_list_empty(&server->toplevels)) {
-				struct desk_toplevel *view = wl_container_of(server->toplevels.next, view, link);
-				view_close(view);
-			}
-			return true;
-		case XKB_KEY_Tab:
-			if (wl_list_length(&server->toplevels) >= 2) {
-				struct desk_toplevel *next = wl_container_of(server->toplevels.prev, next, link);
-				focus_toplevel(next);
-			}
-			return true;
-		case XKB_KEY_m:
-		case XKB_KEY_M:
-			if (!wl_list_empty(&server->toplevels)) {
-				struct desk_toplevel *view = wl_container_of(server->toplevels.next, view, link);
-				view_fold_toggle(view);
-			}
-			return true;
-		case XKB_KEY_d:
-		case XKB_KEY_D:
-			if (!shelf_up(server)) {
-				drawer_toggle(server);
-			}
-			return true;
-		case XKB_KEY_a:
-		case XKB_KEY_A:
-			if (!console_up(server) && !post_up(server)) {
-				shelf_toggle(server);
-			}
-			return true;
-		case XKB_KEY_c:
-		case XKB_KEY_C:
-			if (!shelf_up(server) && !post_up(server)) {
-				console_toggle(server);
-			}
-			return true;
-		case XKB_KEY_n:
-		case XKB_KEY_N:
-			if (!shelf_up(server) && !console_up(server)) {
-				post_toggle(server);
-			}
-			return true;
-		default:
-			break;
-		}
+	uint32_t sc_mods = (mods & WLR_MODIFIER_LOGO ? DESK_SC_SUPER : 0)
+		| (mods & WLR_MODIFIER_ALT ? DESK_SC_ALT : 0)
+		| (mods & WLR_MODIFIER_CTRL ? DESK_SC_CTRL : 0)
+		| (mods & WLR_MODIFIER_SHIFT ? DESK_SC_SHIFT : 0);
+	int action = desk_shortcut_match(&server->conf.shortcuts, xkb_keysym_to_lower(sym == XKB_KEY_Tab && (mods & WLR_MODIFIER_SHIFT)
+		? XKB_KEY_ISO_Left_Tab : sym), sc_mods);
+	struct desk_toplevel *view = NULL;
+	if (!wl_list_empty(&server->toplevels))
+		view = wl_container_of(server->toplevels.next, view, link);
+	switch (action) {
+	case DESK_SC_TERMINAL: terminal_open(); break;
+	case DESK_SC_LOCK: lock_request(server); break;
+	case DESK_SC_CLOSE: if (view) view_close(view); break;
+	case DESK_SC_CYCLE:
+	case DESK_SC_SWITCH: window_switch(server, false); break;
+	case DESK_SC_SWITCH_REVERSE: window_switch(server, true); break;
+	case DESK_SC_MINIMIZE: if (view) view_fold_toggle(view); break;
+	case DESK_SC_MAXIMIZE: if (view) view_toggle_max(view); break;
+	case DESK_SC_SETTINGS: settings_open(); break;
+	case DESK_SC_DRAWER: if (!shelf_up(server)) drawer_toggle(server); break;
+	case DESK_SC_APPS: if (!console_up(server) && !post_up(server)) shelf_toggle(server); break;
+	case DESK_SC_CONTROLS: if (!shelf_up(server) && !post_up(server)) console_toggle(server); break;
+	case DESK_SC_NOTIFICATIONS:
+		if (!shelf_up(server) && !console_up(server)) post_toggle(server);
+		break;
+	default: break;
 	}
+	if (action >= 0) return true;
 	if ((mods & WLR_MODIFIER_ALT) && sym == XKB_KEY_F4) {
 		if (!wl_list_empty(&server->toplevels)) {
 			struct desk_toplevel *view = wl_container_of(server->toplevels.next, view, link);
@@ -18915,6 +18925,12 @@ static void keyboard_handle_key(struct wl_listener *listener, void *data)
 	struct desk_server *server = keyboard->server;
 	struct wlr_keyboard_key_event *event = data;
 	struct wlr_seat *seat = server->seat;
+	/* Consume releases even if focus, modifiers or the lock changed. */
+	if (event->keycode <= KEY_MAX && keyboard->shortcut_down[event->keycode]) {
+		if (event->state == WL_KEYBOARD_KEY_STATE_RELEASED)
+			keyboard->shortcut_down[event->keycode] = false;
+		return;
+	}
 	uint32_t keycode = event->keycode + 8;
 	/* a key that wakes the screen, or comes before it can have been seen,
 	 * is the waking's, down and up */
@@ -18935,6 +18951,24 @@ static void keyboard_handle_key(struct wl_listener *listener, void *data)
 	xkb_keysym_t sym0 = nsyms > 0 ? syms[0] : XKB_KEY_NoSymbol;
 	bool handled = false;
 	uint32_t modifiers = wlr_keyboard_get_modifiers(keyboard->wlr_keyboard);
+	bool pressed = event->state == WL_KEYBOARD_KEY_STATE_PRESSED;
+	if (pressed) {
+		struct desk_keyboard *other;
+		wl_list_for_each(other, &server->keyboards, link)
+			if (other != keyboard) other->super_tap.pending = false;
+	}
+	bool super_key = sym0 == XKB_KEY_Super_L || sym0 == XKB_KEY_Super_R;
+	bool open_apps = desk_super_tap_event(&keyboard->super_tap, keycode, super_key,
+		pressed, server->conf.super_opens_apps && !locked(server)
+		&& !console_dying(server)
+		&& !(modifiers & (WLR_MODIFIER_ALT | WLR_MODIFIER_CTRL | WLR_MODIFIER_SHIFT)));
+	if (open_apps) {
+		if (!console_up(server) && !post_up(server)) shelf_toggle(server);
+		/* The Super press reached its original receiver; forward its release
+		 * before changing keyboard focus on a later shell frame. */
+		wlr_seat_keyboard_notify_key(seat, event->time_msec, event->keycode, event->state);
+		return;
+	}
 	/* Ctrl+Alt+F1 and so on: another VT, whatever is going on here, the
 	 * screen lock included */
 	if (sym0 >= XKB_KEY_XF86Switch_VT_1 && sym0 <= XKB_KEY_XF86Switch_VT_12) {
@@ -19023,6 +19057,19 @@ static void keyboard_handle_key(struct wl_listener *listener, void *data)
 		return;
 	}
 #endif
+	if (pressed && (sym0 == XKB_KEY_Tab || sym0 == XKB_KEY_ISO_Left_Tab)) {
+		uint32_t sm = (modifiers & WLR_MODIFIER_ALT ? DESK_SC_ALT : 0)
+			| (modifiers & WLR_MODIFIER_SHIFT ? DESK_SC_SHIFT : 0)
+			| (modifiers & WLR_MODIFIER_CTRL ? DESK_SC_CTRL : 0)
+			| (modifiers & WLR_MODIFIER_LOGO ? DESK_SC_SUPER : 0);
+		int action = desk_shortcut_match(&server->conf.shortcuts,
+			shortcut_resolve(sm & DESK_SC_SHIFT ? "ISO_Left_Tab" : "Tab"), sm);
+		if (action == DESK_SC_SWITCH || action == DESK_SC_SWITCH_REVERSE || action == DESK_SC_CYCLE) {
+			window_switch(server, action == DESK_SC_SWITCH_REVERSE);
+			if (event->keycode <= KEY_MAX) keyboard->shortcut_down[event->keycode] = true;
+			return;
+		}
+	}
 	if (agd_has_keys(server) && shelf_up(server)) {
 		/* the binder of notes is in: the keys are its */
 		agd_key(server, keyboard->wlr_keyboard->xkb_state, event->keycode,
@@ -19052,6 +19099,8 @@ static void keyboard_handle_key(struct wl_listener *listener, void *data)
 			}
 		}
 	}
+	if (handled && event->keycode <= KEY_MAX)
+		keyboard->shortcut_down[event->keycode] = true;
 	if (!handled) {
 		wlr_seat_set_keyboard(seat, keyboard->wlr_keyboard);
 		if (ti_key_in(server, event->keycode, event->state == WL_KEYBOARD_KEY_STATE_PRESSED,
@@ -22111,7 +22160,9 @@ static void usage(const char *argv0)
 		"  Super+Enter     terminal\n"
 		"  Super+Q         close window\n"
 		"  Super/Alt+Esc   quit\n"
-		"  Super+Tab       cycle windows\n"
+		"  Alt+Tab         next window (Super+Tab also works)\n"
+		"  Alt+Shift+Tab   previous window\n"
+		"  Super           open / close apps on release\n"
 		"  Super+D         open / close drawer\n"
 		"  Super+M         fold / unfold paper\n", argv0);
 }

@@ -168,3 +168,68 @@ For development and testing:
 - The traced room: delete `~/.cache/desk/` and it is traced again at the next
   start.
 - Notes and memo: `~/.local/share/desk/`.
+
+## Custom keyboard shortcuts
+
+Add `shortcut.<action> = <binding>` to `shell.conf`; changes take effect
+on its usual reload, without restarting. Bindings use `Super`, `Alt`,
+`Ctrl`, `Shift`, joined with `+`, followed by an XKB keysym name. Names
+are case insensitive; spaces inside a binding are not accepted. At least
+one of Super, Alt or Ctrl is required. `none` disables a binding; removing
+an override restores the system setting or built-in default.
+
+| Action | Default |
+| --- | --- |
+| `terminal` | `Super+Return` |
+| `lock` | `Super+l` |
+| `close` | `Super+q` |
+| `cycle` | `Super+Tab` |
+| `switch` | `Alt+Tab` |
+| `switch_reverse` | `Alt+Shift+ISO_Left_Tab` (`Alt+Shift+Tab` also accepted) |
+| `minimize` | `Super+m` |
+| `drawer` | `Super+d` |
+| `apps` | `Super+a` |
+| `controls` | `Super+c` |
+| `notifications` | `Super+n` |
+| `maximize` | `Super+Up` (also restores) |
+| `settings` | `Super+comma` |
+
+```
+shortcut.terminal = Ctrl+Alt+Return
+shortcut.maximize = Super+Shift+Up
+shortcut.controls = none
+```
+
+Modifier combinations match exactly (Caps Lock and Num Lock do not affect
+them). An invalid binding or a duplicate combination logs an error and
+keeps the preceding value. Files are processed in order, system before
+user: disable an existing binding first when reassigning its combination.
+The graphical Settings application preserves these keys, but editing
+shortcuts currently requires editing the file.
+
+Existing Alt+F4 and Alt+F1 aliases remain available. Session safety keys,
+screenshots, hardware keys, and navigation in shell views retain their
+existing precedence. Avoid assigning those combinations: this first
+version detects conflicts between the configurable actions only. Shortcuts
+do not bypass the lock screen, the IME, or shell text entry. Maximize uses
+the existing window animation and output work area; fullscreen behavior is
+unchanged.
+
+### Familiar desktop navigation
+
+- `Alt+Tab`: rotate through visible windows that accept keyboard focus.
+- `Alt+Shift+Tab`: rotate in the opposite direction.
+- `Super` / Windows key alone: open or close the application bookshelf
+  when released. Any intervening key press cancels the tap, including
+  keys on another keyboard, so `Super+L`, `Super+D`, etc. do not also open
+  the menu. Set `super_opens_apps = no` to disable this behavior.
+- `Super+A`: the existing application menu shortcut.
+- `Alt+F4`: close the current window; `Super+Q` remains configurable.
+- `Super+Up`: maximize/restore; `Super+M`: minimize/unfold.
+- `Super+L`: lock; `Print` / `Alt+Print`: screen/window screenshot.
+
+The application bookshelf is DEsk's existing launcher, rather than a new
+Start menu design. Super taps respect the lock and active system views.
+Window switching has no visual chooser yet and skips minimized/hidden
+windows. The default Tab combinations also work during shell text entry;
+other remapped keys keep the existing shell text-entry precedence.

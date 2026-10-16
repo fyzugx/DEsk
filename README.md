@@ -462,7 +462,9 @@ GPU's to trace.
 | `Super+A` | look up at the bookshelf |
 | `Super+C` | the Control Panel |
 | `Super+N` | the post box |
-| `Super+Tab` / `Alt+F1` | cycle windows |
+| `Alt+Tab` / `Super+Tab` / `Alt+F1` | cycle windows |
+| `Alt+Shift+Tab` | cycle windows in reverse |
+| `Super` (Windows key, tap) | open / close the application bookshelf |
 | `Esc` | back to the desk |
 | brightness keys | the screen's backlight (or, with none, the lamp) |
 | volume, mute and media keys | the mixer and the player playing (as the clock's MEDIA page) |

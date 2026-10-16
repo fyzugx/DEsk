@@ -141,7 +141,7 @@ executable('desk-preview',
   install: true,
 )
 
-wm_sources = proto_headers + ['src/wm.c', 'src/power.c', 'src/session.c', 'src/lock.c',
+wm_sources = proto_headers + ['src/wm.c', 'src/shortcuts.c', 'src/power.c', 'src/session.c', 'src/lock.c',
   'src/camera.c', 'src/occasion.c']
 wm_deps = [wlroots, wayland_server, xkbcommon, cairo, fontconfig, pixman, libdrm, math, threads]
 # the screen lock checks the password as login does
@@ -352,3 +352,7 @@ install_data('session/desk.png',
 test('words', import('python').find_installation(),
   args: [files('scripts/check-words.py'), meson.project_source_root()],
 )
+
+shortcut_test = executable('test-shortcuts', ['tests/shortcuts.c', 'src/shortcuts.c'],
+  include_directories: include_directories('include'))
+test('shortcuts', shortcut_test)
