@@ -10772,9 +10772,18 @@ static cairo_surface_t *view_app(const struct desk_toplevel *view, char *name, s
 		snprintf(name, n, "%s", app->name);
 		icon = desk_app_icon(app);
 	} else if (app_id && *app_id) {
-		/* org.example.Thing is Thing */
+		/* org.example.Thing is Thing; mintwelcome.py is mintwelcome,
+		 * not the extension "py". */
 		const char *dot = strrchr(app_id, '.');
-		snprintf(name, n, "%s", dot && dot[1] ? dot + 1 : app_id);
+		if (dot && dot > app_id && strcmp(dot, ".py") == 0) {
+			const char *base = dot;
+			while (base > app_id && base[-1] != '.') {
+				base--;
+			}
+			snprintf(name, n, "%.*s", (int)(dot - base), base);
+		} else {
+			snprintf(name, n, "%s", dot && dot[1] ? dot + 1 : app_id);
+		}
 	} else if (cls && *cls) {
 		snprintf(name, n, "%s", cls);
 	} else {
