@@ -99,6 +99,9 @@
 #include <wlr/types/wlr_output_management_v1.h>
 #include <wlr/types/wlr_output_power_management_v1.h>
 #include <wlr/types/wlr_pointer.h>
+#include <wlr/types/wlr_pointer_constraints_v1.h>
+#include <wlr/types/wlr_relative_pointer_v1.h>
+#include <wlr/util/region.h>
 #include <wlr/types/wlr_touch.h>
 #include <wlr/types/wlr_primary_selection.h>
 #include <wlr/types/wlr_primary_selection_v1.h>
@@ -546,6 +549,13 @@ struct agd_flight {
 enum { AGD_FLY_NONE, AGD_FLY_TO_CAL, AGD_FLY_TO_BINDER, AGD_FLY_OFF };
 enum { AGD_ON_BINDER, AGD_ON_CAL };
 
+/* Keep destruction handlers for client-owned pointer constraints. */
+struct desk_game_constraint {
+    struct desk_server *server;
+    struct wlr_pointer_constraint_v1 *constraint;
+    struct wl_listener destroy;
+};
+
 struct desk_server {
 	struct wl_display *wl_display;
 	struct wlr_backend *backend;
@@ -629,6 +639,11 @@ struct desk_server {
 	struct wl_listener new_input;
 	struct wl_listener request_cursor;
 	struct wl_listener pointer_focus_change;
+	/* Wayland games use relative motion and pointer constraints to look around. */
+	struct wlr_relative_pointer_manager_v1 *relative_pointer_manager;
+	struct wlr_pointer_constraints_v1 *pointer_constraints;
+	struct wlr_pointer_constraint_v1 *active_constraint;
+	struct wl_listener new_pointer_constraint;
 	/* Typing into programs' windows through the input method (text-input,
 	 * ti_*): the windows' text inputs, the one the input method is typing
 	 * into, and for each key whether it is waiting on the input method's
@@ -12441,6 +12456,27 @@ static int work_clamp_y(struct desk_server *server, int x, int y)
 	return y < wa.y ? wa.y : y;
 }
 
+/* Fullscreen must cover the desk UI but never the lock screen / idle cover. */
+static void fullscreen_layer_order(struct desk_server *server)
+{
+	bool any = false;
+	struct desk_toplevel *v;
+	wl_list_for_each(v, &server->toplevels, link) {
+		if (v->fullscreen && v->scene_tree) {
+			any = true;
+			break;
+		}
+	}
+	if (any) {
+		wlr_scene_node_place_below(&server->layer_full->node, &server->layer_lock->node);
+		/* Keep Xwayland popup menus available over fullscreen games. */
+		wlr_scene_node_place_below(&server->layer_xover->node, &server->layer_lock->node);
+	} else {
+		wlr_scene_node_place_above(&server->layer_full->node, &server->layer_win->node);
+		wlr_scene_node_place_above(&server->layer_xover->node, &server->layer_full->node);
+	}
+}
+
 /* The whole screen: off the desk altogether, over everything on it, with
  * no frame and no shadow -- a film, a game, a slide show. And back to the
  * sheet it was, where it was, after. */
@@ -12479,6 +12515,7 @@ static void view_set_fullscreen(struct desk_toplevel *view, bool on)
 		view_set_size(view, view->fs_inner_w, view->fs_inner_h);
 	}
 	wlr_scene_node_raise_to_top(&view->scene_tree->node);
+	fullscreen_layer_order(server);
 tell:
 #ifdef DESK_HAVE_XWAYLAND
 	if (view->xsurface) {
@@ -16010,6 +16047,32 @@ static bool window_under(struct desk_server *server)
 		|| pointer_over(server, server->layer_xover);
 }
 
+/* A game may occupy the fullscreen layer above the whole desk. On an
+ * explicit application switch, return it to its sheet before raising the
+ * next app, or the new window would remain hidden under the game. */
+static void desk_switch_application(struct desk_server *server)
+{
+    if (wl_list_length(&server->toplevels) < 2) {
+        return;
+    }
+    struct desk_toplevel *current = view_of_surface(server,
+        server->seat->keyboard_state.focused_surface);
+    if (!current && !wl_list_empty(&server->toplevels)) {
+        current = wl_container_of(server->toplevels.next, current, link);
+    }
+    struct desk_toplevel *next;
+    wl_list_for_each_reverse(next, &server->toplevels, link) {
+        if (next != current && next->scene_tree && !next->unmanaged
+            && next->sheet.phase == SHEET_IDLE && view_takes_keys(next)) {
+            if (current && current->fullscreen) {
+                view_set_fullscreen(current, false);
+            }
+            focus_toplevel(next);
+            return;
+        }
+    }
+}
+
 static bool handle_keybinding(struct desk_server *server, xkb_keysym_t sym, uint32_t mods)
 {
 	/* Once the lamp starts going out there is nothing to press, nothing to
@@ -16020,6 +16083,11 @@ static bool handle_keybinding(struct desk_server *server, xkb_keysym_t sym, uint
 	}
 	if ((mods & (WLR_MODIFIER_ALT | WLR_MODIFIER_LOGO)) && sym == XKB_KEY_Escape) {
 		end_begin(server, END_LOG_OUT);
+		return true;
+	}
+	/* Alt+Tab should be a compositor shortcut even when a game has focus. */
+	if ((mods & WLR_MODIFIER_ALT) && sym == XKB_KEY_Tab) {
+		desk_switch_application(server);
 		return true;
 	}
 	if (card_keys(server, sym)) {
@@ -16106,15 +16174,33 @@ static bool handle_keybinding(struct desk_server *server, xkb_keysym_t sym, uint
 			}
 			return true;
 		case XKB_KEY_Tab:
-			if (wl_list_length(&server->toplevels) >= 2) {
-				struct desk_toplevel *next = wl_container_of(server->toplevels.prev, next, link);
-				focus_toplevel(next);
+			desk_switch_application(server);
+			return true;
+		case XKB_KEY_f:
+		case XKB_KEY_F:
+			/* Super+F gives games without a fullscreen setting one anyway. */
+			if (!shelf_up(server) && !console_up(server) && !post_up(server)) {
+				struct desk_toplevel *v = view_of_surface(server,
+					server->seat->keyboard_state.focused_surface);
+				if (!v && !wl_list_empty(&server->toplevels)) {
+					v = wl_container_of(server->toplevels.next, v, link);
+				}
+				if (v && v->scene_tree && v->sheet.phase == SHEET_IDLE && !v->unmanaged) {
+					view_set_fullscreen(v, !v->fullscreen);
+				}
 			}
 			return true;
 		case XKB_KEY_m:
 		case XKB_KEY_M:
 			if (!wl_list_empty(&server->toplevels)) {
-				struct desk_toplevel *view = wl_container_of(server->toplevels.next, view, link);
+				struct desk_toplevel *view = view_of_surface(server,
+					server->seat->keyboard_state.focused_surface);
+				if (!view) {
+					view = wl_container_of(server->toplevels.next, view, link);
+				}
+				if (view->fullscreen) {
+					view_set_fullscreen(view, false);
+				}
 				view_fold_toggle(view);
 			}
 			return true;
@@ -16154,10 +16240,7 @@ static bool handle_keybinding(struct desk_server *server, xkb_keysym_t sym, uint
 		return true;
 	}
 	if ((mods & WLR_MODIFIER_ALT) && sym == XKB_KEY_F1) {
-		if (wl_list_length(&server->toplevels) >= 2) {
-			struct desk_toplevel *next = wl_container_of(server->toplevels.prev, next, link);
-			focus_toplevel(next);
-		}
+		desk_switch_application(server);
 		return true;
 	}
 	return false;
@@ -18658,11 +18741,15 @@ static void server_new_text_input(struct wl_listener *listener, void *data)
 	}
 }
 
+/* Pointer capture follows keyboard focus too, so switching apps releases a game. */
+static void desk_constraint_refresh(struct desk_server *server);
+
 /* the keyboard has gone to another surface: the text inputs follow it */
 static void seat_kb_focus_change(struct wl_listener *listener, void *data)
 {
 	struct desk_server *server = wl_container_of(listener, server, kb_focus_change);
 	struct wlr_seat_keyboard_focus_change_event *ev = data;
+	desk_constraint_refresh(server);
 	if (server->ti_ime && server->ti_ime->ti->focused_surface != ev->new_surface) {
 		ti_detach(server);
 	}
@@ -19376,11 +19463,82 @@ static void server_new_input(struct wl_listener *listener, void *data)
 	wlr_seat_set_capabilities(server->seat, caps);
 }
 
+/* ---- Game pointer support ------------------------------------------------
+ * This intentionally handles only the focused surface. On keyboard focus
+ * changes and pointer leave, a lock is relinquished. No game receives raw
+ * mouse events while another program has focus.
+ */
+static void desk_constraint_set(struct desk_server *server,
+    struct wlr_pointer_constraint_v1 *next)
+{
+    struct wlr_pointer_constraint_v1 *old = server->active_constraint;
+    if (next == old) {
+        return;
+    }
+    server->active_constraint = NULL;
+    if (old) {
+        /* A one-shot constraint can be destroyed by deactivation. */
+        wlr_pointer_constraint_v1_send_deactivated(old);
+    }
+    if (next) {
+        server->active_constraint = next;
+        wlr_pointer_constraint_v1_send_activated(next);
+        if (next->type == WLR_POINTER_CONSTRAINT_V1_LOCKED) {
+            wlr_cursor_unset_image(server->cursor);
+        }
+    } else {
+        wlr_cursor_set_xcursor(server->cursor, server->cursor_mgr, "default");
+    }
+}
+
+static void desk_constraint_refresh(struct desk_server *server)
+{
+    struct wlr_surface *under = server->seat->pointer_state.focused_surface;
+    struct wlr_surface *keys = server->seat->keyboard_state.focused_surface;
+    struct wlr_pointer_constraint_v1 *want = NULL;
+    if (!locked(server) && under && keys == under
+        && server->cursor_mode == DESK_CUR_PASSTHROUGH && server->pointer_constraints) {
+        want = wlr_pointer_constraints_v1_constraint_for_surface(
+            server->pointer_constraints, under, server->seat);
+    }
+    desk_constraint_set(server, want);
+}
+
+static void desk_constraint_destroy(struct wl_listener *listener, void *data)
+{
+    (void)data;
+    struct desk_game_constraint *entry = wl_container_of(listener, entry, destroy);
+    if (entry->server->active_constraint == entry->constraint) {
+        entry->server->active_constraint = NULL;
+        wlr_cursor_set_xcursor(entry->server->cursor, entry->server->cursor_mgr, "default");
+    }
+    wl_list_remove(&entry->destroy.link);
+    free(entry);
+}
+
+static void desk_new_pointer_constraint(struct wl_listener *listener, void *data)
+{
+    struct desk_server *server = wl_container_of(listener, server, new_pointer_constraint);
+    struct wlr_pointer_constraint_v1 *constraint = data;
+    struct desk_game_constraint *entry = calloc(1, sizeof *entry);
+    if (!entry) {
+        return;
+    }
+    entry->server = server;
+    entry->constraint = constraint;
+    entry->destroy.notify = desk_constraint_destroy;
+    wl_signal_add(&constraint->events.destroy, &entry->destroy);
+    desk_constraint_refresh(server);
+}
+
 static void seat_request_cursor(struct wl_listener *listener, void *data)
 {
 	struct desk_server *server = wl_container_of(listener, server, request_cursor);
 	struct wlr_seat_pointer_request_set_cursor_event *event = data;
 	struct wlr_seat_client *focused_client = server->seat->pointer_state.focused_client;
+	if (server->active_constraint && server->active_constraint->type == WLR_POINTER_CONSTRAINT_V1_LOCKED) {
+		return;  /* hide the hardware cursor while the game has it locked */
+	}
 	if (focused_client == event->seat_client) {
 		wlr_cursor_set_surface(server->cursor, event->surface, event->hotspot_x, event->hotspot_y);
 	}
@@ -19390,7 +19548,8 @@ static void seat_pointer_focus_change(struct wl_listener *listener, void *data)
 {
 	struct desk_server *server = wl_container_of(listener, server, pointer_focus_change);
 	struct wlr_seat_pointer_focus_change_event *event = data;
-	if (event->new_surface == NULL) {
+	desk_constraint_refresh(server);
+	if (event->new_surface == NULL && !server->active_constraint) {
 		wlr_cursor_set_xcursor(server->cursor, server->cursor_mgr, "default");
 	}
 }
@@ -19754,8 +19913,31 @@ static void server_cursor_motion(struct wl_listener *listener, void *data)
 {
 	struct desk_server *server = wl_container_of(listener, server, cursor_motion);
 	struct wlr_pointer_motion_event *event = data;
-	wlr_cursor_move(server->cursor, &event->pointer->base, event->delta_x, event->delta_y);
+	/* Relative events are required by Wayland and XWayland game clients. */
+	if (server->relative_pointer_manager) {
+		wlr_relative_pointer_manager_v1_send_relative_motion(server->relative_pointer_manager,
+			server->seat, (uint64_t)event->time_msec * 1000,
+			event->delta_x, event->delta_y, event->unaccel_dx, event->unaccel_dy);
+	}
 	input_seen(server, "the pointer");
+	struct wlr_pointer_constraint_v1 *c = server->active_constraint;
+	if (c && c->type == WLR_POINTER_CONSTRAINT_V1_LOCKED) {
+		return; /* game gets the delta; desktop cursor stays fixed */
+	}
+	double dx = event->delta_x, dy = event->delta_y;
+	if (c && c->type == WLR_POINTER_CONSTRAINT_V1_CONFINED) {
+		double sx, sy;
+		struct wlr_surface *surface = NULL;
+		view_at(server, server->cursor->x, server->cursor->y, &surface, &sx, &sy);
+		double cx, cy;
+		if (surface != c->surface || !wlr_region_confine(&c->region,
+				sx, sy, sx + dx, sy + dy, &cx, &cy)) {
+			return;
+		}
+		dx = cx - sx;
+		dy = cy - sy;
+	}
+	wlr_cursor_move(server->cursor, &event->pointer->base, dx, dy);
 	process_cursor_motion(server, event->time_msec);
 }
 
@@ -19763,6 +19945,10 @@ static void server_cursor_motion_absolute(struct wl_listener *listener, void *da
 {
 	struct desk_server *server = wl_container_of(listener, server, cursor_motion_absolute);
 	struct wlr_pointer_motion_absolute_event *event = data;
+	if (server->active_constraint && server->active_constraint->type == WLR_POINTER_CONSTRAINT_V1_LOCKED) {
+		input_seen(server, "the pointer");
+		return;
+	}
 	wlr_cursor_warp_absolute(server->cursor, &event->pointer->base, event->x, event->y);
 	input_seen(server, "the pointer");
 	process_cursor_motion(server, event->time_msec);
@@ -21024,6 +21210,7 @@ static void xdg_toplevel_unmap(struct wl_listener *listener, void *data)
 	if (toplevel->fullscreen) {
 		toplevel->fullscreen = false;
 		wlr_scene_node_reparent(&toplevel->scene_tree->node, server->layer_win);
+		fullscreen_layer_order(server);
 	}
 	/* the frame and the shadow are ours, not the client's: they go off
 	 * the screen with it */
@@ -21609,6 +21796,7 @@ static void xview_unmap_now(struct desk_toplevel *view)
 	memset(&view->shadow, 0, sizeof view->shadow);
 	view->chrome_key = 0;
 	view->fullscreen = false;
+	fullscreen_layer_order(server);
 	view->maximized = 0;
 	view->unmanaged = false;
 	if (had_keys) {
@@ -22568,6 +22756,13 @@ int main(int argc, char **argv)
 	server.new_input.notify = server_new_input;
 	wl_signal_add(&server.backend->events.new_input, &server.new_input);
 	server.seat = wlr_seat_create(server.wl_display, "seat0");
+	server.relative_pointer_manager = wlr_relative_pointer_manager_v1_create(server.wl_display);
+	server.pointer_constraints = wlr_pointer_constraints_v1_create(server.wl_display);
+	if (server.pointer_constraints) {
+		server.new_pointer_constraint.notify = desk_new_pointer_constraint;
+		wl_signal_add(&server.pointer_constraints->events.new_constraint,
+			&server.new_pointer_constraint);
+	}
 	/* text-input: programs typing through the input method, with DEsk
 	 * as the go-between */
 	wl_list_init(&server.text_inputs);

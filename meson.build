@@ -53,6 +53,11 @@ proto_headers = []
 foreach spec : [
   ['xdg-shell-protocol.h', wp / 'stable/xdg-shell/xdg-shell.xml'],
   ['xdg-decoration-unstable-v1-protocol.h', wp / 'unstable/xdg-decoration/xdg-decoration-unstable-v1.xml'],
+  # wlroots' pointer-constraint header includes a scanner-generated enum header.
+  ['pointer-constraints-unstable-v1-protocol.h',
+    wp / 'unstable/pointer-constraints/pointer-constraints-unstable-v1.xml'],
+  ['relative-pointer-unstable-v1-protocol.h',
+    wp / 'unstable/relative-pointer/relative-pointer-unstable-v1.xml'],
   # the screens for display tools (wlr-randr, kanshi, wdisplays) and their
   # power (wlopm): wlr-protocols, which wayland-protocols does not carry,
   # kept in protocols/ -- wlroots' own header for the power one includes it
