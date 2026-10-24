@@ -122,7 +122,13 @@ there -- its material, the light on it, its shadow and the wear of use.
   levers, a fader for the room's lamp and one for the screen's own
   backlight (on a laptop, through logind; the brightness keys work too),
   a key to unlock the power buttons, and the system tray as paper slips
-  under it (more than fit, and the wheel slides the row along).
+  under it (more than fit, and the wheel slides the row along). A brass
+  **CHOOSE** button beside the wireless lever, the Bluetooth lever and the
+  knob folds up a walnut lid from the top of the set with a radio tuning
+  dial in it: the networks in range, the Bluetooth devices, or the speakers
+  and microphones. Turn its knob (wheel, drag or arrow keys) and press it
+  (or Return) to join, connect or switch; its other readout always shows
+  what is in use now. NetworkManager, BlueZ and PipeWire do the work.
 - **A desk calendar, a desk memo pad and a clock** stand on the shelf. The
   calendar has a notebook of plans and to-dos, and notes are peeled off and
   stuck onto the day. The memo pad is taken down the same way and written

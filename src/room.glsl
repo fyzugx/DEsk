@@ -27,7 +27,7 @@ uniform ivec2 u_frame;    /* the whole sheet, in samples */
 uniform vec3 u_eye, u_ww, u_uu, u_vv;
 uniform vec2 u_fov;
 uniform int u_layer;
-uniform float u_open, u_cc_out, u_pb_open;
+uniform float u_open, u_cc_out, u_pb_open, u_cc_lid;
 uniform float u_zf, u_aspect, u_sh_hx, u_hx;
 
 const float M_PI = 3.14159265358979323846;
@@ -754,6 +754,44 @@ vec3 cc_to_face(cc_face f, vec3 p)
 	return vec3(dot(q, f.fu), dot(q, f.fn), dot(q, f.fs));
 }
 
+/* draw.c's lid on the top of the tower */
+#define CC_LID_HY (RM_CC_TY1 - CC_LID_T * 0.5)
+#define CC_LID_HZ (RM_CC_ZB + 0.14)
+#define CC_EXT_WV (CC_LID_L * 0.5 + 0.02)
+
+vec3 lid_local(vec3 p, float a)
+{
+	vec3 q = p - vec3((RM_CC_X0 + RM_CC_X1) * 0.5, CC_LID_HY, CC_LID_HZ);
+	float ca = cos(a), sa = sin(a);
+	return vec3(q.x, q.y * sa + q.z * ca, -q.y * ca + q.z * sa - CC_LID_T * 0.5);
+}
+
+hit3 map_lid(vec3 p, float a)
+{
+	vec3 l = lid_local(p, a);
+	float gross = sd_box(l - vec3(0.0, CC_LID_L * 0.5, -CC_LID_T * 0.5),
+		vec3(CC_LID_HU + 0.10, CC_LID_L * 0.5 + 0.20, CC_LID_T * 0.5 + 0.20));
+	if (gross > DRAWER_NEAR) {
+		return hit3(gross, 0);
+	}
+	hit3 h = hit3(sd_round_box(l - vec3(0.0, CC_LID_L * 0.5, -CC_LID_T * 0.5),
+		vec3(CC_LID_HU, CC_LID_L * 0.5, CC_LID_T * 0.5), 0.05), MID_CC_CHEEK);
+	h = hmin3(h, hit3(sd_box(l - vec3(0.0, CC_LID_L * 0.5 + 0.02, 0.0),
+		vec3(CC_LID_HU - 0.24, CC_LID_L * 0.5 - 0.12, 0.012)), MID_CC_PANEL));
+	{
+		vec3 q = l - vec3(0.0, CC_EXT_WV, 0.03);
+		float ring = sd_round_box(q, vec3(CC_EXT_WU + 0.12, CC_EXT_WS + 0.12, 0.02), 0.03);
+		ring = max(ring, -sd_box(q, vec3(CC_EXT_WU, CC_EXT_WS, 0.20)));
+		h = hmin3(h, hit3(ring, MID_CC_BRASS));
+	}
+	for (int sgn = 0; sgn < 2; sgn++) {
+		float uc = (sgn != 0 ? 1.0 : -1.0) * (CC_LID_HU - 0.60);
+		float r = sqrt(l.y * l.y + (l.z + CC_LID_T * 0.5) * (l.z + CC_LID_T * 0.5));
+		h = hmin3(h, hit3(max(r - CC_LID_T * 0.42, abs(l.x - uc) - 0.35), MID_CC_BRASS));
+	}
+	return h;
+}
+
 hit3 map_console(vec3 p)
 {
 	hit3 h = hit3(1e9, 0);
@@ -922,9 +960,37 @@ hit3 map_console(vec3 p)
 			(i & 1) != 0 ? MID_CC_LENS_GREEN : MID_CC_LENS_AMBER));
 	}
 
+	/* the walnut top of the tower, the recess the lid lies in, and the lid */
+	{
+		float z0 = RM_CC_TZ1 - 0.10, z1 = RM_CC_ZB + 0.08;
+		h = hmin3(h, hit3(sd_round_box(p - vec3(cx, RM_CC_TY1 - 0.04, (z0 + z1) * 0.5),
+			vec3(inner + 0.02, 0.06, (z0 - z1) * 0.5), 0.03), MID_CC_CHEEK));
+		float y0 = RM_CC_TY1 - CC_LID_T - 0.03, y1 = RM_CC_TY1 + 1.5;
+		float rz0 = CC_LID_HZ - 0.20, rz1 = CC_LID_HZ + CC_LID_L + 0.05;
+		float recess = sd_box(p - vec3(cx, (y0 + y1) * 0.5, (rz0 + rz1) * 0.5),
+			vec3(CC_LID_HU + 0.03, (y1 - y0) * 0.5, (rz1 - rz0) * 0.5));
+		h.d = max(h.d, -recess);
+		h = hmin3(h, hit3(sd_box(p - vec3(cx, y0 - 0.03, (rz0 + rz1) * 0.5),
+			vec3(CC_LID_HU + 0.03, 0.03, (rz1 - rz0) * 0.5)), MID_CC_PANEL));
+		if (u_layer != 6 && u_layer != 7) {
+			h = hmin3(h, map_lid(p, 0.0));
+		}
+	}
+
 	float edge = (RM_ZF + 0.02) - (p.z + cc_dz(u_cc_out, u_aspect));
 	h.d = max(h.d, edge);
 	return h;
+}
+
+/* draw.c's map_cc_ext: the lid on its own, open as far as u_cc_lid */
+hit3 map_cc_ext(vec3 p)
+{
+	return map_lid(p - vec3(0.0, 0.0, cc_dz(u_cc_out, u_aspect)), u_cc_lid);
+}
+
+bool cc_ext_at(vec3 p)
+{
+	return map_cc_ext(p).d < 0.01;
 }
 
 int console_owner(vec3 p)
@@ -1214,6 +1280,9 @@ hit3 scene_map(vec3 p)
 		}
 		h = hmin3(h, map_console(p));
 		h = hmin3(h, map_post(p));
+		if (u_layer == 6) {
+			h = hmin3(h, map_cc_ext(p));
+		}
 	}
 
 	h = hmin3(h, hit3(sd_round_box(p - vec3(0.0, -RM_TOP_T * 0.5, (RM_ZN + RM_ZF) * 0.5),
@@ -2169,6 +2238,9 @@ int room_owner(vec3 p, int id)
 	if (u_layer == 4) {
 		return console_owner(p);
 	}
+	if (u_layer == 6 || u_layer == 7) {
+		return 0;
+	}
 	if (u_layer == 5) {
 		return (id == MID_POST_RED || id == MID_POST_DARK) ? 1 : 0;
 	}
@@ -2239,7 +2311,7 @@ void main()
 		hit3 h = scene_map(q);
 		float eps = 0.0018 * max(t * 0.06, 1.0);
 		if (h.d < eps && h.id > 0) {
-			if (!(u_layer == 2 && !room_is_drawer(h.id))) {
+			if (!(u_layer == 2 && !room_is_drawer(h.id)) && !(u_layer == 6 && !cc_ext_at(q))) {
 				id = h.id;
 				hp = q;
 			}

@@ -45,6 +45,13 @@ Three ways to see a change, from cheapest to closest to real:
 What DEsk says as it runs is in `~/.local/state/desk/session.log` (or on
 stderr when nested). `DESK_PROFILE=1` adds frame timings.
 
+`DESK_HAND=file` drives the desk from a script, for trying a change the
+same way every time (nested or `--headless`): a line at a time, `move X Y`,
+`glide X Y MS`, `press`, `release`, `click`, `key NAME` (`super+NAME` with
+Super), `choose wifi|bt|vol`, `wait MS`, `shot PATH` (the desk's screen),
+`shotall PATH` (every screen) and `quit`; see `hand_cb` in `wm.c`. With
+`DESK_SLOW=4` the screenshots catch what moves part way.
+
 ## 2. House rules
 
 - **C11**, tabs, the brace style already used, `-Wall -Wextra` clean.

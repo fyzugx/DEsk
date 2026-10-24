@@ -37,9 +37,15 @@ struct desk_meters {
 	bool bt_blocked;
 };
 
-/* Cheap enough for a tick: a handful of small reads under /proc and /sys,
- * plus the volume no more than a few times a second. */
+/* A handful of small reads under /proc and /sys, plus the volume no more
+ * than a few times a second. Small, but not always quick: a graphics
+ * card's sensors are asked through its driver, which can take twenty
+ * milliseconds to answer. */
 void desk_meters_read(struct desk_meters *out);
+/* The same without the wait, for a tick: the last reading, at once, and
+ * a new one asked for on a thread of its own if that one is older than
+ * a tick of the meters. */
+void desk_meters_latest(struct desk_meters *out);
 
 /* Returns false when the machine has no mixer to set. Both return at
  * once; the mixer is set on a thread of its own, the latest value first.

@@ -35,6 +35,7 @@
 #include "desk.h"
 #include "apps.h"
 #include "panel.h"
+#include "devices.h"
 #include "power.h"
 #include "sound.h"
 /* What a letter is, bus or no bus: without one the box is simply empty. */
@@ -1065,12 +1066,49 @@ struct desk_server {
 	struct wl_event_source *cc_timer;
 	struct wlr_scene_buffer *cc_base;   /* the traced sheet, put up once */
 	int cc_base_w, cc_base_h;
+	double cc_sprite_k[DESK_CCP_COUNT];  /* how far pulled back each piece was drawn */
+	struct wlr_scene_buffer *cc_wide;   /* the wide sheet the view pulls back over */
+	unsigned cc_wide_room;
+	unsigned cc_base_room, cc_live_room;   /* and from which room (desk_console_room) */
 	/* the instruments: a sprite a piece, each drawn only when it changes */
 	struct wlr_scene_tree *cc_live;
 	struct desk_sprite cc_sprite[DESK_CCP_COUNT];
 	int cc_live_w, cc_live_h;
 	struct wlr_scene_tree *layer_console;
 	struct wlr_scene_buffer *cc_dim;
+	/* A tuner brought out over the set: what is behind the wireless
+	 * lever, the Bluetooth lever or the knob, on a dial to pick from
+	 * (devices.c does the work). which is DESK_CC_WIFI, _BT or _VOL, or -1
+	 * when there is none; anchor is the control's box on screen. sel is
+	 * the entry under the pointer and pos where the scale has rolled to on
+	 * its way there; band, for sound, playing (0) or recording (1). */
+	int ccd_which;
+	double ccd_pull, ccd_pull_from, ccd_pull_to, ccd_pull_start;
+	bool ccd_pulling;
+	int ccd_hot, ccd_sel, ccd_band;
+	int ccd_choose_down;                /* the CHOOSE held down, or -1 */
+	/* the room the lid opened in (desk_console_room); and, when that room
+	 * has given way to another (the screen changed shape) with the lid
+	 * open, which tuner to bring up again in the new one once its lid is
+	 * traced (-1 none) */
+	unsigned ccd_room;
+	int ccd_reopen;
+	double ccd_pos, ccd_pos_at;
+	bool ccd_chose;                     /* sel has been turned by hand */
+	char ccd_sel_id[160];               /* ...to this one, by devices.c's id */
+	/* a hand on the knob: where it took hold, and what was chosen then */
+	bool ccd_grab, ccd_turned;
+	double ccd_grab_x;
+	int ccd_grab_sel;
+	/* its pictures: the lid as it is folding, and the tuner in its window */
+	struct wlr_scene_buffer *ccx_lid, *ccx_tuner;
+	/* the lid's folding, a picture a frame, put up once a room and shown
+	 * one at a time; and the tuner's picture's size */
+	struct desk_buf *ccx_frames[DESK_LID_FRAMES];
+	int ccx_frame_w, ccx_frame_h, ccx_shown;
+	int ccx_tuner_w, ccx_tuner_h;
+	unsigned ccx_room;
+	uint64_t ccx_tuner_key;
 
 	/* Turning to the post box. The same kind of look as the console: 0 at
 	 * the desk, 1 in front of the box with its door down. */
@@ -2761,6 +2799,22 @@ static void film_ensure_body(struct desk_server *server, int which,
 	wlr_scene_node_lower_to_bottom(&server->film_a[which]->node);
 }
 
+/* A view's traced sheet, put up again (a new size, a new room): where it
+ * belongs in the view's layer, over the film and under everything live
+ * that is drawn over it. Made again, it would otherwise go in on top of
+ * all of that and hide it. */
+static void view_base_under(struct desk_server *server, int which, struct wlr_scene_buffer *base)
+{
+	if (!base) {
+		return;
+	}
+	if (server->film_b[which]) {
+		wlr_scene_node_place_above(&base->node, &server->film_b[which]->node);
+	} else {
+		wlr_scene_node_lower_to_bottom(&base->node);
+	}
+}
+
 static void film_ensure(struct desk_server *server, int which,
 	struct wlr_scene_tree *tree)
 {
@@ -3396,6 +3450,11 @@ static void drawer_forget(struct desk_server *server, struct desk_sheet *sheet);
 static void console_toggle(struct desk_server *server);
 static void post_toggle(struct desk_server *server);
 static void card_gone(struct desk_server *server);
+static void ccd_gone(struct desk_server *server);
+static void ccd_hide(struct desk_server *server);
+static void ccd_prepare(struct desk_server *server);
+static double ccd_zoom_of(double pull);
+static bool ccd_out(const struct desk_server *server);
 static bool console_dying(const struct desk_server *server);
 static void console_power_reset(struct desk_server *server);
 
@@ -7552,6 +7611,8 @@ static void console_state(const struct desk_server *server,
 	st->dying = server->cc_dying;
 	st->lock_push = server->cc_lock_push;
 	st->antenna = server->cc_ant;
+	st->choose_down = server->ccd_choose_down;
+	st->choose_open = server->ccd_pull_to > 0.5 ? server->ccd_which : -1;
 }
 
 struct cc_piece_args {
@@ -7588,6 +7649,114 @@ static void cc_follow(struct desk_server *server, int dx, int dy)
 	}
 }
 
+/* One drawn rect of the set (x, y, w, h on the screen) as it was drawn
+ * pulled back as far as from, to where it is pulled back as far as to:
+ * pulling back is a scale and a move, so a picture is moved, not drawn. */
+static void cc_zoom_rect(struct desk_server *server, double from, double to, double r[4])
+{
+	double z0, x0, y0, z1, x1, y1;
+	desk_console_zoom_map(server->desk_w, server->desk_h, from, &z0, &x0, &y0);
+	desk_console_zoom_map(server->desk_w, server->desk_h, to, &z1, &x1, &y1);
+	double k = z1 / z0;
+	r[0] = (r[0] - x0) / z0 * z1 + x1;
+	r[1] = (r[1] - y0) / z0 * z1 + y1;
+	r[2] *= k;
+	r[3] *= k;
+}
+
+/* A picture pw by ph put at (x, y) on the screen, k screen pixels to its
+ * pixel, showing only what falls inside (x0, y0) .. (x1, y1): off if none
+ * of it does. The set and what comes up out of it are the desk's own
+ * screen's, and a picture bigger than that screen would otherwise go on
+ * across the screen beside it. */
+static void node_show_within(struct wlr_scene_buffer *b, int pw, int ph, double x, double y,
+	double k, double x0, double y0, double x1, double y1)
+{
+	double vx0 = fmax(x, x0), vy0 = fmax(y, y0);
+	double vx1 = fmin(x + pw * k, x1), vy1 = fmin(y + ph * k, y1);
+	if (vx1 - vx0 < 1.0 || vy1 - vy0 < 1.0 || k <= 0.0) {
+		wlr_scene_node_set_enabled(&b->node, false);
+		return;
+	}
+	/* whole pixels on the screen, and the picture's pixels under them --
+	 * never past its edge, which wlroots will not have */
+	int sx0 = (int)ceil(vx0), sy0 = (int)ceil(vy0);
+	int sx1 = (int)floor(vx1), sy1 = (int)floor(vy1);
+	if (sx1 <= sx0 || sy1 <= sy0) {
+		wlr_scene_node_set_enabled(&b->node, false);
+		return;
+	}
+	struct wlr_fbox src;
+	src.x = fmax(0.0, (sx0 - x) / k);
+	src.y = fmax(0.0, (sy0 - y) / k);
+	src.width = fmin(pw - src.x, (sx1 - sx0) / k);
+	src.height = fmin(ph - src.y, (sy1 - sy0) / k);
+	if (src.width <= 0.0 || src.height <= 0.0) {
+		wlr_scene_node_set_enabled(&b->node, false);
+		return;
+	}
+	wlr_scene_buffer_set_source_box(b, &src);
+	wlr_scene_node_set_position(&b->node, sx0, sy0);
+	wlr_scene_buffer_set_dest_size(b, sx1 - sx0, sy1 - sy0);
+	wlr_scene_node_set_enabled(&b->node, true);
+}
+
+static void cc_node_rect(struct wlr_scene_buffer *b, const double r[4])
+{
+	wlr_scene_node_set_position(&b->node, (int)lround(r[0]), (int)lround(r[1]));
+	wlr_scene_buffer_set_dest_size(b, (int)fmax(1.0, lround(r[2])), (int)fmax(1.0, lround(r[3])));
+}
+
+/* Everything of the set put where the view pulled back as far as zoom has
+ * it: the traced sheet (drawn not pulled back at all), the pieces (drawn
+ * as far back as each was, cc_sprite_k), and under them, the wide sheet the room round
+ * the set comes from. */
+static void cc_zoom_apply(struct desk_server *server, double zoom)
+{
+	int w = server->desk_w, h = server->desk_h;
+	if (server->cc_base) {
+		double r[4] = { 0, 0, w, h };
+		cc_zoom_rect(server, 0.0, zoom, r);
+		cc_node_rect(server->cc_base, r);
+		if (zoom > 0.0) {
+			wlr_scene_buffer_set_opacity(server->cc_base, (float)(1.0 - zoom));
+		}
+	}
+	for (int p = 0; p < DESK_CCP_COUNT; p++) {
+		struct desk_sprite *sp = &server->cc_sprite[p];
+		if (!sp->node || !sp->drawn) {
+			continue;
+		}
+		double r[4] = { sp->x, sp->y, sp->dw, sp->dh };
+		cc_zoom_rect(server, server->cc_sprite_k[p], zoom, r);
+		cc_node_rect(sp->node, r);
+	}
+	/* the wide sheet: up once a room, under the set's own -- put up as soon
+	 * as there is one, so the CHOOSE that wants it does not wait for it */
+	double r[4];
+	int pw, ph;
+	if (desk_console_wide_place(w, h, r, &pw, &ph)) {
+		unsigned room = desk_console_room(w, h);
+		if (!server->cc_wide || server->cc_wide_room != room) {
+			struct desk_buf *b = buf_create(pw, ph);
+			desk_draw_console_wide(b->cr, w, h);
+			scene_put(&server->cc_wide, server->layer_console, b, 0, 0, NULL);
+			server->cc_wide_room = room;
+		}
+		if (server->cc_base) {
+			wlr_scene_node_place_below(&server->cc_wide->node, &server->cc_base->node);
+		}
+		if (zoom > 0.0) {
+			node_show_within(server->cc_wide, pw, ph, r[0], r[1], r[2] / pw, 0.0, 0.0, w, h);
+		} else {
+			wlr_scene_node_set_enabled(&server->cc_wide->node, false);
+		}
+		ccd_prepare(server);
+	} else if (server->cc_wide) {
+		wlr_scene_node_set_enabled(&server->cc_wide->node, false);
+	}
+}
+
 static void paint_console_body(struct desk_server *server)
 {
 	int w = server->desk_w, h = server->desk_h;
@@ -7602,6 +7771,9 @@ static void paint_console_body(struct desk_server *server)
 		if (server->cc_base) {
 			wlr_scene_node_set_enabled(&server->cc_base->node, false);
 		}
+		if (server->cc_wide) {
+			wlr_scene_node_set_enabled(&server->cc_wide->node, false);
+		}
 		if (server->film_a[DESK_VIEW_CONSOLE]) {
 			wlr_scene_node_set_enabled(&server->film_a[DESK_VIEW_CONSOLE]->node, false);
 			wlr_scene_node_set_enabled(&server->film_b[DESK_VIEW_CONSOLE]->node, false);
@@ -7612,12 +7784,23 @@ static void paint_console_body(struct desk_server *server)
 
 	/* The traced sheet goes up once. Copying a screenful of baked steel
 	 * on every frame was most of what the set cost to look at. */
-	if (!server->cc_base || server->cc_base_w != w || server->cc_base_h != h) {
+	double zoom = ccd_zoom_of(server->ccd_pull);
+	/* the room the set is drawn from: a new one (the screen has changed
+	 * shape, and its room has landed) puts it somewhere else */
+	unsigned room = desk_console_room(w, h);
+	if (!server->cc_base || server->cc_base_w != w || server->cc_base_h != h
+		|| server->cc_base_room != room) {
+		/* drawn as it is with the view not pulled back, and moved for the
+		 * view pulled back (cc_zoom_apply): not drawn again for it */
 		struct desk_buf *bb = buf_create(w, h);
+		desk_console_set_zoom(0.0);
 		desk_draw_console_base(bb->cr, w, h);
+		desk_console_set_zoom(zoom);
 		scene_put(&server->cc_base, server->layer_console, bb, 0, 0, NULL);
+		view_base_under(server, DESK_VIEW_CONSOLE, server->cc_base);
 		server->cc_base_w = w;
 		server->cc_base_h = h;
+		server->cc_base_room = room;
 	}
 
 	/* The live half: needles, lamps and the tube, on nothing -- and only
@@ -7635,25 +7818,50 @@ static void paint_console_body(struct desk_server *server)
 		 * that moves the tube on: frames asked for in between (a knob
 		 * being turned) find nothing on it to draw again */
 		if (st.clock != server->cc_meters_clock) {
-			desk_meters_read(&server->cc_meters);
+			/* the last reading, never waited for: a card's sensors can
+			 * take longer to answer than a frame lasts */
+			desk_meters_latest(&server->cc_meters);
 			server->cc_meters_clock = st.clock;
 		}
 		struct desk_meters m = server->cc_meters;
 		desk_console_advance(&st, &m);
-		bool force = server->cc_live_w != w || server->cc_live_h != h;
+		bool force = server->cc_live_w != w || server->cc_live_h != h
+			|| server->cc_live_room != room;
 		server->cc_live_w = w;
 		server->cc_live_h = h;
+		server->cc_live_room = room;
+		/* While the view is pulling back or coming in, the pieces are left
+		 * as they were drawn and moved with it (cc_zoom_apply), and one that
+		 * changes meanwhile is drawn as far back as the rest of it was. Once
+		 * it has stopped, they are drawn again where it stopped, sharp: a
+		 * few a frame, so that no frame has to do all of it. */
+		int sharpen = 4;
 		for (int p = 0; p < DESK_CCP_COUNT; p++) {
 			struct desk_sprite *sp = &server->cc_sprite[p];
 			uint64_t key = desk_console_piece_key(p, &st, server->cc_hover, &m);
-			if (!force && sp->drawn && sp->key == key) {
+			bool stale = !server->ccd_pulling && server->cc_sprite_k[p] != zoom;
+			if (stale && sharpen > 0) {
+				sharpen--;
+				server->cc_sprite_k[p] = zoom;
+			} else {
+				stale = false;
+			}
+			if (!force && !stale && sp->drawn && sp->key == key) {
 				continue;
 			}
+			if (force) {
+				server->cc_sprite_k[p] = server->ccd_pulling ? server->cc_sprite_k[p] : zoom;
+			}
 			sp->key = key;
+			desk_console_set_zoom(server->cc_sprite_k[p]);
 			double box[4];
 			bool known = desk_console_piece_box(w, h, p, box);
 			struct cc_piece_args a = { p, &st, server->cc_hover, &m };
 			sprite_paint(server, sp, server->cc_live, known ? box : NULL, cc_piece_draw, &a);
+		}
+		desk_console_set_zoom(zoom);
+		if (sharpen == 0) {
+			server_schedule_frames(server);   /* more to sharpen next frame */
 		}
 	}
 	if (server->cc_live) {
@@ -7667,8 +7875,10 @@ static void paint_console_body(struct desk_server *server)
 		cc_follow(server, 0, 0);
 		cc_live_opacity(server, 1.0);
 		wlr_scene_buffer_set_opacity(server->cc_base, 1.0f);
+		cc_zoom_apply(server, zoom);
 		return;
 	}
+	cc_zoom_apply(server, 0.0);
 	double over;
 	int dx, dy;
 	film_play(server, DESK_VIEW_CONSOLE, t, &over, &dx, &dy);
@@ -7692,6 +7902,8 @@ static void console_toggle(struct desk_server *server)
 {
 	/* whatever was pulled out from under the Control Panel goes back */
 	card_gone(server);
+	ccd_gone(server);
+	server->ccd_reopen = -1;
 	if (server->cc_t < 0.5
 		&& !desk_scene_view_ready(server->desk_w, server->desk_h, DESK_VIEW_CONSOLE)) {
 		return;
@@ -7721,6 +7933,11 @@ static void console_toggle(struct desk_server *server)
 	if (server->cc_to > 0.5) {
 		/* the screen's light, wherever something else has left it */
 		screen_read(server);
+		/* and what is behind the levers and the knob, read now, so a
+		 * tuner brought up has its names on it already */
+		desk_devices_refresh(DESK_DEV_WIFI);
+		desk_devices_refresh(DESK_DEV_BT);
+		desk_devices_refresh(DESK_DEV_SINK);
 		/* You push the drawer in before you turn away from the desk, and
 		 * the film is traced with it shut. */
 		if (server->drawer_t > 0.004) {
@@ -8165,7 +8382,8 @@ static void console_press(struct desk_server *server, int which)
 		*flag = !*flag;
 		snd_at(server, DESK_SND_TOGGLE, server->cursor->x, 1.0);
 		bool took = desk_meters_set_radio(wifi, *flag != 0);
-		if (wifi) {
+		/* (with the lid open the aerial stays down: it is in the way) */
+		if (wifi && !ccd_out(server)) {
 			console_aerial_to(server, *flag ? 1.0 : 0.0);
 		}
 		wlr_log(WLR_INFO, "console: %s lever %s%s",
@@ -8247,6 +8465,715 @@ static void console_open_settings(struct desk_server *server, int which)
 	if (app) {
 		snd_at(server, DESK_SND_KEY_PRESS, server->cursor->x, 0.6);
 		console_toggle(server);
+	}
+}
+
+/* ---- what is behind a control, on a tuner ------------------------
+ *
+ * The CHOOSE button beside the wireless lever, the Bluetooth lever or the
+ * knob (or the word under it, or the network's meter) sends the view back
+ * a little and folds up the lid on the top of the tower, with that
+ * control's tuner in its window: the networks in range, the devices, the
+ * speakers and microphones, printed round a dial. The knob is turned --
+ * the wheel, a drag across it, the arrow keys -- to roll the one wanted
+ * under the pointer, and pressed (or Return) to take it. Another CHOOSE
+ * puts its tuner in the window instead; the same one again shuts the
+ * lid. The other mouse button on a control is still the whole
+ * program (console_open_settings), and so is the tuner's right-hand
+ * button. */
+
+#define CCD_OPEN_S 1.40
+
+/* Smoother than smoothstep: still at both ends to the second order, so a
+ * thing driven by a mechanism starts and stops without a jolt. */
+static double ccd_ease(double a, double b, double x)
+{
+	double t = clampf_d((x - a) / (b - a), 0.0, 1.0);
+	return t * t * t * (t * (6.0 * t - 15.0) + 10.0);
+}
+
+/* How far the view has pulled back, and how far the lid is open, for how
+ * far it is through opening: the view goes back first, all the way, so the
+ * set's own sheet -- with the lid lying shut in it -- is gone before the
+ * lid starts up; and back in last, after the lid has shut. */
+static double ccd_zoom_of(double pull)
+{
+	return ccd_ease(0.0, 0.42, pull);
+}
+
+static double ccd_open_of(double pull)
+{
+	return ccd_ease(0.42, 1.0, pull);
+}
+
+static bool ccd_out(const struct desk_server *server)
+{
+	return server->ccd_which >= 0 && server->ccd_pull_to > 0.5;
+}
+
+/* The list on the dial: for sound, the band's. */
+static enum desk_dev_kind ccd_kind(const struct desk_server *server)
+{
+	switch (server->ccd_which) {
+	case DESK_CC_WIFI:
+		return DESK_DEV_WIFI;
+	case DESK_CC_BT:
+		return DESK_DEV_BT;
+	default:
+		return server->ccd_band ? DESK_DEV_SOURCE : DESK_DEV_SINK;
+	}
+}
+
+/* Which entry is chosen: the one the hand turned to, found again by its
+ * id after the list has been read again (it may have moved); before the
+ * hand has turned it, the one in use. */
+static int ccd_sel_in(struct desk_server *server, const struct desk_dev_list *L)
+{
+	int n = L->n < DESK_TUNER_MAX ? L->n : DESK_TUNER_MAX;
+	if (n == 0) {
+		return 0;
+	}
+	if (server->ccd_chose) {
+		for (int i = 0; i < n; i++) {
+			if (!strcmp(L->d[i].id, server->ccd_sel_id)) {
+				return i;
+			}
+		}
+		return server->ccd_sel < n ? server->ccd_sel : n - 1;
+	}
+	for (int i = 0; i < n; i++) {
+		if (L->d[i].active) {
+			return i;
+		}
+	}
+	return 0;
+}
+
+static bool ccd_build(struct desk_server *server, struct desk_tuner *t)
+{
+	memset(t, 0, sizeof *t);
+	if (server->ccd_which < 0) {
+		return false;
+	}
+	enum desk_dev_kind kind = ccd_kind(server);
+	struct desk_dev_list L;
+	desk_devices_get(kind, &L);
+	t->busy = L.busy;
+	if (server->ccd_which == DESK_CC_VOL) {
+		struct desk_dev_list other;
+		desk_devices_get(kind == DESK_DEV_SINK ? DESK_DEV_SOURCE : DESK_DEV_SINK, &other);
+		t->busy = t->busy || other.busy;
+	}
+	const char *off = NULL;
+	switch (server->ccd_which) {
+	case DESK_CC_WIFI:
+		snprintf(t->title, sizeof t->title, "%s", TR("Wireless networks"));
+		t->left = TR("RESCAN");
+		t->band = -1;
+		off = TR("Wireless is off");
+		break;
+	case DESK_CC_BT:
+		snprintf(t->title, sizeof t->title, "%s", TR("Bluetooth devices"));
+		t->left = TR("SEARCH");
+		t->band = -1;
+		off = TR("Bluetooth is off");
+		break;
+	default:
+		snprintf(t->title, sizeof t->title, "%s", TR("Sound devices"));
+		t->band = server->ccd_band;
+		t->band_word[0] = TR("Output");
+		t->band_word[1] = TR("Input");
+		off = TR("Off");
+		break;
+	}
+	t->right = TR("Settings");
+	t->hot = server->ccd_hot;
+	t->clock = monotonic_sec();
+	bool shown = L.read && L.have && !L.off;
+	t->n = shown ? (L.n < DESK_TUNER_MAX ? L.n : DESK_TUNER_MAX) : 0;
+	for (int i = 0; i < t->n; i++) {
+		snprintf(t->name[i], sizeof t->name[i], "%s", L.d[i].label);
+		t->lit[i] = L.d[i].active;
+	}
+	int sel = ccd_sel_in(server, &L);
+	server->ccd_sel = sel;
+	if (server->ccd_pos < -0.5) {
+		/* just come out, or a new band: straight to it, not rolled */
+		server->ccd_pos = sel;
+	}
+	t->pos = server->ccd_pos;
+
+	/* the readout: the one under the pointer, and how it stands */
+	if (!L.read) {
+		snprintf(t->read1, sizeof t->read1, "...");
+	} else if (!L.have) {
+		snprintf(t->read1, sizeof t->read1, "%s", TR("Not on this machine"));
+	} else if (L.off) {
+		snprintf(t->read1, sizeof t->read1, "%s", off);
+	} else if (t->n == 0) {
+		snprintf(t->read1, sizeof t->read1, "%s", TR("Nothing in it"));
+	} else {
+		const struct desk_dev *d = &L.d[sel];
+		snprintf(t->read1, sizeof t->read1, "%s", d->label);
+		switch (kind) {
+		case DESK_DEV_WIFI:
+			snprintf(t->read2, sizeof t->read2, "%d%%  \xc2\xb7  %s", d->signal,
+				d->active ? TR("Connected") : d->known ? TR("Saved")
+				: d->secure ? TR("Password") : TR("No password"));
+			break;
+		case DESK_DEV_BT:
+			snprintf(t->read2, sizeof t->read2, "%s", d->active ? TR("Connected")
+				: d->known ? TR("Paired") : TR("Not paired"));
+			break;
+		default:
+			snprintf(t->read2, sizeof t->read2, "%s", d->active ? TR("In use") : "");
+			break;
+		}
+	}
+	if (L.read && L.failed) {
+		snprintf(t->read2, sizeof t->read2, "%s", TR("That did not work"));
+	}
+
+	/* the other readout: what is in use now, wherever the dial is turned */
+	if (L.read && L.have && !L.off) {
+		int at = -1, n = 0;
+		for (int i = 0; i < L.n; i++) {
+			if (L.d[i].active) {
+				at = at < 0 ? i : at;
+				n++;
+			}
+		}
+		switch (kind) {
+		case DESK_DEV_WIFI:
+			if (at >= 0) {
+				snprintf(t->read3, sizeof t->read3, "%s", L.d[at].label);
+				snprintf(t->read4, sizeof t->read4, "%d%%  \xc2\xb7  %s", L.d[at].signal,
+					TR("Connected"));
+			} else {
+				snprintf(t->read3, sizeof t->read3, "%s", TR("Not connected"));
+			}
+			break;
+		case DESK_DEV_BT:
+			if (at >= 0) {
+				snprintf(t->read3, sizeof t->read3, "%s", L.d[at].label);
+				snprintf(t->read4, sizeof t->read4, TR("%d connected"), n);
+			} else {
+				snprintf(t->read3, sizeof t->read3, "%s", TR("Not connected"));
+			}
+			break;
+		default: {
+			/* the other band's: playing, what records; recording, what plays */
+			bool in = kind == DESK_DEV_SOURCE;
+			struct desk_dev_list O;
+			desk_devices_get(in ? DESK_DEV_SINK : DESK_DEV_SOURCE, &O);
+			for (int i = 0; i < O.n; i++) {
+				if (O.d[i].active) {
+					snprintf(t->read3, sizeof t->read3, "%s", O.d[i].label);
+					break;
+				}
+			}
+			snprintf(t->read4, sizeof t->read4, "%s  \xc2\xb7  %s", in ? TR("Output") : TR("Input"),
+				TR("In use"));
+			break;
+		}
+		}
+	}
+	return true;
+}
+
+static void ccd_gone(struct desk_server *server)
+{
+	/* the aerial, let down for the lid, back up if the wireless is on */
+	if (server->ccd_which >= 0 && server->cc_wifi && server->cc_ant_to < 0.5) {
+		console_aerial_to(server, 1.0);
+	}
+	server->ccd_which = -1;
+	server->ccd_pull = server->ccd_pull_to = 0.0;
+	server->ccd_pulling = false;
+	server->ccd_grab = false;
+	desk_console_set_zoom(0.0);
+	ccd_hide(server);
+}
+
+/* The lid's folding, its frames each a picture of their own, put up
+ * (hidden) ahead of its being wanted, once a room. */
+static void ccd_prepare(struct desk_server *server)
+{
+	int w = server->desk_w, h = server->desk_h;
+	unsigned room = desk_console_room(w, h);
+	struct desk_lid_place pl;
+	if ((server->ccx_frames[0] && server->ccx_room == room)
+		|| !desk_console_lid_place(w, h, 0.0, &pl)) {
+		return;
+	}
+	for (int f = 0; f < DESK_LID_FRAMES; f++) {
+		if (server->ccx_frames[f]) {
+			wlr_buffer_drop(&server->ccx_frames[f]->base);
+		}
+		struct desk_buf *b = buf_create(pl.pw, pl.ph);
+		desk_draw_console_lid(b->cr, w, h, f);
+		cairo_surface_flush(b->surface);
+		server->ccx_frames[f] = b;
+	}
+	server->ccx_frame_w = pl.pw;
+	server->ccx_frame_h = pl.ph;
+	if (!server->ccx_lid) {
+		server->ccx_lid = scene_new(server->layer_console, &server->ccx_frames[0]->base);
+		server->ccx_lid->point_accepts_input = shadow_accepts;
+	} else {
+		scene_swap(server->ccx_lid, &server->ccx_frames[0]->base);
+	}
+	wlr_scene_buffer_set_source_box(server->ccx_lid, NULL);
+	wlr_scene_node_set_enabled(&server->ccx_lid->node, false);
+	server->ccx_shown = 0;
+	server->ccx_room = room;
+	server->ccx_tuner_key = 0;
+}
+
+/* The lid's pictures, off. */
+static void ccd_hide(struct desk_server *server)
+{
+	if (server->ccx_lid) {
+		wlr_scene_node_set_enabled(&server->ccx_lid->node, false);
+	}
+	if (server->ccx_tuner) {
+		wlr_scene_node_set_enabled(&server->ccx_tuner->node, false);
+	}
+}
+
+static void node_show_within(struct wlr_scene_buffer *b, int pw, int ph, double x, double y,
+	double k, double x0, double y0, double x1, double y1);
+
+/* The lid where it is now: the frame of its folding it has got to, which
+ * is a picture already up, and the tuner in its window once its window is
+ * towards you -- drawn again only when what is on it, or the frame, has
+ * changed. Both cut to the desk's own screen. */
+static void ccd_paint(struct desk_server *server)
+{
+	int w = server->desk_w, h = server->desk_h;
+	if (server->ccd_which < 0 || !console_up(server) || server->cc_t < 0.9995
+		|| server->ccd_pull <= 0.0) {
+		ccd_hide(server);
+		return;
+	}
+	static struct desk_tuner t;
+	if (!ccd_build(server, &t)) {
+		ccd_gone(server);
+		return;
+	}
+	double open = ccd_open_of(server->ccd_pull);
+	struct desk_lid_place pl;
+	ccd_prepare(server);
+	if (!server->ccx_lid || !desk_console_lid_place(w, h, open, &pl)) {
+		ccd_hide(server);
+		return;
+	}
+	unsigned room = server->ccx_room;
+	if (pl.frame != server->ccx_shown && pl.frame >= 0 && pl.frame < DESK_LID_FRAMES) {
+		scene_swap(server->ccx_lid, &server->ccx_frames[pl.frame]->base);
+		server->ccx_shown = pl.frame;
+	}
+	/* over the set's traced sheet and the wide one, under everything live
+	 * drawn on the set */
+	if (server->cc_base) {
+		wlr_scene_node_place_above(&server->ccx_lid->node, &server->cc_base->node);
+	}
+	node_show_within(server->ccx_lid, server->ccx_frame_w, server->ccx_frame_h, pl.r[0], pl.r[1],
+		pl.r[2] / server->ccx_frame_w, 0.0, 0.0, w, h);
+	/* and the tuner in its window */
+	uint64_t key = 1469598103934665603ull;
+	key = key_add(key, &room, sizeof room);
+	key = key_add(key, &pl.frame, sizeof pl.frame);
+	key = key_add(key, pl.q, sizeof pl.q);
+	key = key_add(key, &t.n, sizeof t.n);
+	key = key_add(key, &t.pos, sizeof t.pos);
+	key = key_add(key, &t.hot, sizeof t.hot);
+	key = key_add(key, &t.band, sizeof t.band);
+	key = key_add(key, &t.busy, sizeof t.busy);
+	key = key_add(key, t.title, strlen(t.title));
+	key = key_add(key, t.read1, strlen(t.read1));
+	key = key_add(key, t.read2, strlen(t.read2));
+	key = key_add(key, t.read3, strlen(t.read3));
+	key = key_add(key, t.read4, strlen(t.read4));
+	for (int i = 0; i < t.n; i++) {
+		key = key_add(key, t.name[i], strlen(t.name[i]));
+		key = key_add(key, &t.lit[i], sizeof t.lit[i]);
+	}
+	if (t.busy) {
+		/* the busy lamp flickers: a new picture a frame */
+		key = key_add(key, &t.clock, sizeof t.clock);
+	}
+	int tw = (int)pl.box[2], th = (int)pl.box[3];
+	if (!pl.face || tw < 1 || th < 1) {
+		if (server->ccx_tuner) {
+			wlr_scene_node_set_enabled(&server->ccx_tuner->node, false);
+		}
+		return;
+	}
+	if (!server->ccx_tuner || server->ccx_tuner_key != key || server->ccx_tuner_w != tw
+		|| server->ccx_tuner_h != th) {
+		struct desk_buf *b = buf_create(tw, th);
+		cairo_translate(b->cr, -pl.box[0], -pl.box[1]);
+		desk_draw_console_lid_tuner(b->cr, w, h, open, &t);
+		scene_put(&server->ccx_tuner, server->layer_console, b, 0, 0, NULL);
+		wlr_scene_buffer_set_source_box(server->ccx_tuner, NULL);
+		server->ccx_tuner->point_accepts_input = shadow_accepts;
+		server->ccx_tuner_key = key;
+		server->ccx_tuner_w = tw;
+		server->ccx_tuner_h = th;
+	}
+	wlr_scene_node_place_above(&server->ccx_tuner->node, &server->ccx_lid->node);
+	node_show_within(server->ccx_tuner, tw, th, pl.box[0], pl.box[1], 1.0, 0.0, 0.0, w, h);
+}
+
+static void ccd_pull(struct desk_server *server, double to)
+{
+	/* the catch let go, and the lid going over on its hinges */
+	desk_sound_play(DESK_SND_KEY_IN, -0.30, to > 0.5 ? 0.45 : 0.35, to > 0.5 ? 0.7 : 0.9);
+	desk_sound_play(DESK_SND_CARD_SLIDE, -0.30, to > 0.5 ? 0.8 : 0.6, to > 0.5 ? 0.25 : 1.0);
+	server->ccd_pull_from = server->ccd_pull;
+	server->ccd_pull_to = to;
+	server->ccd_pull_start = monotonic_sec();
+	server->ccd_pulling = true;
+	server_schedule_frames(server);
+}
+
+static void ccd_put_back(struct desk_server *server)
+{
+	if (ccd_out(server)) {
+		server->ccd_grab = false;
+		ccd_pull(server, 0.0);
+	}
+}
+
+/* CHOOSE for which (DESK_CC_WIFI, _BT, _VOL): the lid open with that
+ * tuner in it; with another tuner in it, this one instead; with this one
+ * in it, the lid shut. */
+static void ccd_open(struct desk_server *server, int which)
+{
+	if (server->ccd_which == which && ccd_out(server)) {
+		ccd_put_back(server);
+		return;
+	}
+	if (!desk_console_ext_ready(server->desk_w, server->desk_h)) {
+		wlr_log(WLR_INFO, "console: the lid is still being made");
+		return;
+	}
+	bool up = ccd_out(server);
+	server->ccd_which = which;
+	server->ccd_room = desk_console_room(server->desk_w, server->desk_h);
+	server->ccd_reopen = -1;
+	server->ccd_hot = -1;
+	server->ccd_band = 0;
+	server->ccd_sel = 0;
+	server->ccd_chose = false;
+	server->ccd_sel_id[0] = '\0';
+	server->ccd_pos = -1.0;
+	server->ccd_grab = false;
+	desk_devices_refresh(which == DESK_CC_WIFI ? DESK_DEV_WIFI
+		: which == DESK_CC_BT ? DESK_DEV_BT : DESK_DEV_SINK);
+	if (which == DESK_CC_WIFI) {
+		/* and the air listened to again, behind what is already known */
+		desk_devices_act(DESK_DEV_WIFI, DESK_DEV_SCAN, NULL);
+	}
+	if (!up) {
+		/* the aerial stands in front of where the lid opens: down it goes
+		 * first, quicker than it goes up */
+		console_aerial_to(server, 0.0);
+		server->cc_ant_dur *= 0.3;
+		ccd_pull(server, 1.0);
+	}
+	ccd_paint(server);
+	server_schedule_frames(server);
+}
+
+/* The knob turned to entry sel (held to the ends of the scale), with a
+ * click for each one the pointer passes. */
+static void ccd_turn_to(struct desk_server *server, int sel)
+{
+	struct desk_dev_list L;
+	desk_devices_get(ccd_kind(server), &L);
+	int n = L.n < DESK_TUNER_MAX ? L.n : DESK_TUNER_MAX;
+	if (n == 0) {
+		return;
+	}
+	sel = sel < 0 ? 0 : sel >= n ? n - 1 : sel;
+	if (sel != server->ccd_sel || !server->ccd_chose) {
+		if (sel != server->ccd_sel) {
+			snd_at(server, DESK_SND_KNOB_TICK, server->cursor->x, 0.8);
+		}
+		server->ccd_sel = sel;
+		server->ccd_chose = true;
+		snprintf(server->ccd_sel_id, sizeof server->ccd_sel_id, "%s", L.d[sel].id);
+		server_schedule_frames(server);
+	}
+}
+
+/* Pressed: take the one under the pointer -- join it, connect it, play
+ * or record through it; one already connected is let go of. */
+static void ccd_take(struct desk_server *server)
+{
+	enum desk_dev_kind kind = ccd_kind(server);
+	struct desk_dev_list L;
+	desk_devices_get(kind, &L);
+	int sel = ccd_sel_in(server, &L);
+	if (!L.read || !L.have || L.off || sel >= L.n) {
+		return;
+	}
+	const struct desk_dev *d = &L.d[sel];
+	snd_at(server, DESK_SND_KEY_PRESS, server->cursor->x, 0.8);
+	wlr_log(WLR_INFO, "console: %s, %s", d->label, kind == DESK_DEV_SINK
+		|| kind == DESK_DEV_SOURCE ? "to be the one used"
+		: d->active ? "to be let go of" : "to be joined");
+	if (kind == DESK_DEV_SINK || kind == DESK_DEV_SOURCE) {
+		if (!d->active) {
+			desk_devices_act(kind, DESK_DEV_DEFAULT, d->id);
+		}
+	} else {
+		desk_devices_act(kind, d->active ? DESK_DEV_DISCONNECT : DESK_DEV_CONNECT, d->id);
+	}
+	ccd_paint(server);
+	server_schedule_frames(server);
+}
+
+/* Once a frame: the tuner on its way out or in, the scale rolling to
+ * where the knob has been turned, and the busy lamp. */
+static void ccd_tick(struct desk_server *server)
+{
+	int w = server->desk_w, h = server->desk_h;
+	if (server->ccd_which < 0) {
+		/* open again in the new room, as soon as there is a lid traced in it */
+		if (server->ccd_reopen >= 0 && console_up(server) && server->cc_t >= 0.9995
+			&& desk_console_ext_ready(w, h)) {
+			int which = server->ccd_reopen;
+			server->ccd_reopen = -1;
+			ccd_open(server, which);
+		}
+		return;
+	}
+	/* The room the set is drawn from has changed under the lid (the
+	 * screen has changed shape and its own room has landed): the lid
+	 * and the view it pulled back to were of the old one. Shut at once,
+	 * and open again in the new one. */
+	unsigned room = desk_console_room(w, h);
+	if (room != server->ccd_room) {
+		int which = server->ccd_which;
+		bool was_up = server->ccd_pull_to > 0.5;
+		ccd_gone(server);
+		paint_console(server);
+		server->ccd_reopen = was_up ? which : -1;
+		server_schedule_frames(server);
+		return;
+	}
+	double now = monotonic_sec();
+	bool more = false;
+	if (server->ccd_pulling) {
+		double u = clampf_d((now - server->ccd_pull_start) / CCD_OPEN_S, 0.0, 1.0);
+		if (gfx_flat()) {
+			u = 1.0;
+		}
+		server->ccd_pull = server->ccd_pull_from
+			+ (server->ccd_pull_to - server->ccd_pull_from) * u;
+		/* the view goes back (or comes in again) with it: the set and
+		 * everything on it drawn again for where it is now */
+		desk_console_set_zoom(ccd_zoom_of(server->ccd_pull));
+		paint_console(server);
+		if (u >= 1.0) {
+			server->ccd_pulling = false;
+			/* home: open on its hinges, or shut in its recess */
+			desk_sound_play(DESK_SND_LOCK_CLUNK, -0.30,
+				server->ccd_pull_to > 0.5 ? 0.45 : 0.30, 1.2);
+			if (server->ccd_pull_to < 0.5) {
+				ccd_gone(server);
+				paint_console(server);
+				return;
+			}
+		} else {
+			more = true;
+		}
+	}
+	double dt = clampf_d(now - server->ccd_pos_at, 0.0, 0.1);
+	server->ccd_pos_at = now;
+	double to = server->ccd_sel;
+	if (server->ccd_pos >= -0.5 && fabs(to - server->ccd_pos) > 0.002) {
+		double k = gfx_flat() ? 1.0 : 1.0 - exp(-dt / 0.075);
+		server->ccd_pos += (to - server->ccd_pos) * k;
+		if (fabs(to - server->ccd_pos) <= 0.002) {
+			server->ccd_pos = to;
+		}
+		more = true;
+	}
+	struct desk_dev_list L;
+	desk_devices_get(ccd_kind(server), &L);
+	more = more || L.busy;
+	ccd_paint(server);
+	if (more) {
+		server_schedule_frames(server);
+	}
+}
+
+/* What of the lid is under the pointer, open as far as it is. */
+static int ccd_under(struct desk_server *server, const struct desk_tuner *t, double *at)
+{
+	return desk_console_ext_hit(server->desk_w, server->desk_h,
+		ccd_open_of(server->ccd_pull), t, server->cursor->x, server->cursor->y, at);
+}
+
+/* A hand put down with the lid open: on it, its own; anywhere else is
+ * the set's, which is all still there under it. */
+static bool ccd_press(struct desk_server *server, uint32_t button)
+{
+	if (!ccd_out(server) || server->ccd_pulling) {
+		return false;
+	}
+	static struct desk_tuner t;
+	if (!ccd_build(server, &t)) {
+		ccd_gone(server);
+		return false;
+	}
+	double at = 0.0;
+	int hit = ccd_under(server, &t, &at);
+	if (hit == DESK_TUNER_OUT) {
+		return false;
+	}
+	if (button != BTN_LEFT) {
+		return true;
+	}
+	switch (hit) {
+	case DESK_TUNER_KNOB:
+		/* turned if the hand moves across it, pressed if it does not */
+		server->ccd_grab = true;
+		server->ccd_turned = false;
+		server->ccd_grab_x = server->cursor->x;
+		server->ccd_grab_sel = server->ccd_sel;
+		break;
+	case DESK_TUNER_DIAL:
+		/* a name on the scale: the knob turned to it */
+		ccd_turn_to(server, (int)lround(at));
+		break;
+	case DESK_TUNER_LEFT:
+		snd_at(server, DESK_SND_KEY_PRESS, server->cursor->x, 0.8);
+		desk_devices_act(ccd_kind(server), DESK_DEV_SCAN, NULL);
+		ccd_paint(server);
+		server_schedule_frames(server);
+		break;
+	case DESK_TUNER_BAND:
+		snd_at(server, DESK_SND_TOGGLE, server->cursor->x, 0.9);
+		server->ccd_band = !server->ccd_band;
+		server->ccd_chose = false;
+		server->ccd_sel_id[0] = '\0';
+		server->ccd_pos = -1.0;
+		ccd_paint(server);
+		server_schedule_frames(server);
+		break;
+	case DESK_TUNER_RIGHT: {
+		int which = server->ccd_which;
+		ccd_gone(server);
+		console_open_settings(server, which);
+		break;
+	}
+	default:
+		break;
+	}
+	return true;
+}
+
+/* Let go of the knob: if it was not turned, it was pressed. */
+static bool ccd_release(struct desk_server *server)
+{
+	if (!server->ccd_grab) {
+		return false;
+	}
+	server->ccd_grab = false;
+	if (!server->ccd_turned) {
+		ccd_take(server);
+	}
+	return true;
+}
+
+/* The hand on the knob turning it, or over the tuner: what is under it
+ * lit. True when it is the tuner's. */
+static bool ccd_motion(struct desk_server *server)
+{
+	if (!ccd_out(server)) {
+		return false;
+	}
+	static struct desk_tuner t;
+	if (!ccd_build(server, &t)) {
+		return false;
+	}
+	if (server->ccd_grab) {
+		/* a name's worth of the scale for every so far across */
+		int steps = (int)lround((server->cursor->x - server->ccd_grab_x)
+			/ (0.018 * server->desk_h));
+		if (steps != 0) {
+			server->ccd_turned = true;
+		}
+		ccd_turn_to(server, server->ccd_grab_sel + steps);
+		return true;
+	}
+	int hit = server->ccd_pulling ? DESK_TUNER_OUT : ccd_under(server, &t, NULL);
+	int hot = hit >= 0 ? hit : -1;
+	if (hot != server->ccd_hot) {
+		server->ccd_hot = hot;
+		ccd_paint(server);
+		server_schedule_frames(server);
+	}
+	return hit != DESK_TUNER_OUT;
+}
+
+/* The wheel anywhere over the tuner turns its knob. */
+static bool ccd_axis(struct desk_server *server, const struct wlr_pointer_axis_event *event)
+{
+	if (!ccd_out(server) || event->orientation != WL_POINTER_AXIS_VERTICAL_SCROLL) {
+		return false;
+	}
+	static struct desk_tuner t;
+	if (!ccd_build(server, &t) || ccd_under(server, &t, NULL) == DESK_TUNER_OUT) {
+		return false;
+	}
+	if (event->delta != 0.0) {
+		ccd_turn_to(server, server->ccd_sel + (event->delta > 0.0 ? 1 : -1));
+	}
+	return true;
+}
+
+/* The keys, with the tuner out: arrows turn it, Return presses it, Esc
+ * puts it back. */
+static bool ccd_keys(struct desk_server *server, xkb_keysym_t sym)
+{
+	if (!ccd_out(server)) {
+		return false;
+	}
+	switch (sym) {
+	case XKB_KEY_Left:
+	case XKB_KEY_Up:
+		ccd_turn_to(server, server->ccd_sel - 1);
+		return true;
+	case XKB_KEY_Right:
+	case XKB_KEY_Down:
+		ccd_turn_to(server, server->ccd_sel + 1);
+		return true;
+	case XKB_KEY_Return:
+	case XKB_KEY_KP_Enter:
+	case XKB_KEY_space:
+		ccd_take(server);
+		return true;
+	case XKB_KEY_Escape:
+		ccd_put_back(server);
+		return true;
+	default:
+		return false;
+	}
+}
+
+/* devices.c has read a list again, or done what it was asked. */
+static void devices_changed(void *data)
+{
+	struct desk_server *server = data;
+	if (server->ccd_which >= 0) {
+		ccd_paint(server);
+		server_schedule_frames(server);
 	}
 }
 
@@ -8426,6 +9353,7 @@ static void paint_post_body(struct desk_server *server)
 		struct desk_buf *bb = buf_create(w, h);
 		desk_draw_post(bb->cr, w, h, NULL, 0, -1, 0.0, 0.0, NULL);
 		scene_put(&server->pb_base, server->layer_post, bb, 0, 0, NULL);
+		view_base_under(server, DESK_VIEW_POST, server->pb_base);
 		server->pb_base_w = w;
 		server->pb_base_h = h;
 	}
@@ -14484,6 +15412,7 @@ static void views_prewarm(struct desk_server *server)
 			struct desk_buf *bb = buf_create(w, h);
 			desk_draw_console_base(bb->cr, w, h);
 			scene_put(&server->cc_base, server->layer_console, bb, 0, 0, NULL);
+			view_base_under(server, DESK_VIEW_CONSOLE, server->cc_base);
 			wlr_scene_node_set_enabled(&server->cc_base->node, false);
 			server->cc_base_w = w;
 			server->cc_base_h = h;
@@ -14497,6 +15426,7 @@ static void views_prewarm(struct desk_server *server)
 			struct desk_buf *bb = buf_create(w, h);
 			desk_draw_post(bb->cr, w, h, NULL, 0, -1, 0.0, 0.0, NULL);
 			scene_put(&server->pb_base, server->layer_post, bb, 0, 0, NULL);
+			view_base_under(server, DESK_VIEW_POST, server->pb_base);
 			wlr_scene_node_set_enabled(&server->pb_base->node, false);
 			server->pb_base_w = w;
 			server->pb_base_h = h;
@@ -16279,6 +17209,10 @@ static bool handle_keybinding(struct desk_server *server, xkb_keysym_t sym, uint
 		}
 	}
 	if (console_up(server)) {
+		/* the tuner, out, has the keys first */
+		if (ccd_keys(server, sym)) {
+			return true;
+		}
 		if (sym == XKB_KEY_Escape) {
 			console_toggle(server);
 			return true;
@@ -20010,8 +20944,29 @@ static void process_cursor_motion(struct desk_server *server, uint32_t time)
 		if (server->cc_t < 0.9995) {
 			return;
 		}
+		if (ccd_motion(server)) {
+			if (server->cc_hover >= 0) {
+				server->cc_hover = -1;
+				paint_console(server);
+				server_schedule_frames(server);
+			}
+			return;
+		}
 		int hv = desk_console_hit(server->desk_w, server->desk_h,
 			server->cursor->x, server->cursor->y);
+		if (hv < 0) {
+			/* a CHOOSE button lights itself */
+			int ch = desk_console_choose_hit(server->desk_w, server->desk_h,
+				server->cursor->x, server->cursor->y);
+			if (ch >= 0) {
+				hv = DESK_CCP_CHOOSE + (ch == DESK_CC_WIFI ? 0 : ch == DESK_CC_BT ? 1 : 2);
+			}
+		}
+		if (hv < 0) {
+			/* the word under a control lights the control it names */
+			hv = desk_console_legend_hit(server->desk_w, server->desk_h,
+				server->cursor->x, server->cursor->y);
+		}
 		if (hv != server->cc_hover) {
 			server->cc_hover = hv;
 			paint_console(server);
@@ -20247,6 +21202,15 @@ static void server_cursor_button(struct wl_listener *listener, void *data)
 			paint_console(server);
 			return;
 		}
+		if (event->button == BTN_LEFT && server->ccd_choose_down >= 0) {
+			/* a CHOOSE let up again */
+			server->ccd_choose_down = -1;
+			paint_console(server);
+			return;
+		}
+		if (event->button == BTN_LEFT && ccd_release(server)) {
+			return;   /* and of the tuner's */
+		}
 		if (server->cursor_mode == DESK_CUR_RESIZE && server->grabbed
 			&& server->grabbed->sizing) {
 			/* let go of the edge: the turn of the paper settles */
@@ -20319,19 +21283,36 @@ static void server_cursor_button(struct wl_listener *listener, void *data)
 		if (server->cc_t < 0.9995) {
 			return;   /* mid move: let it land first */
 		}
+		if (ccd_press(server, event->button)) {
+			return;
+		}
 		int which = desk_console_hit(server->desk_w, server->desk_h,
 			server->cursor->x, server->cursor->y);
+		int choose = which < 0 ? desk_console_choose_hit(server->desk_w, server->desk_h,
+			server->cursor->x, server->cursor->y) : -1;
+		int named = which < 0 && choose < 0 ? desk_console_legend_hit(server->desk_w,
+			server->desk_h, server->cursor->x, server->cursor->y) : -1;
 		if (event->button == BTN_RIGHT) {
 			/* the other button: what is behind the control, in full */
-			console_open_settings(server, which);
+			console_open_settings(server, which >= 0 ? which : choose >= 0 ? choose : named);
 			return;
 		}
 		if (event->button != BTN_LEFT) {
 			return;
 		}
-		if (which == DESK_CC_NET) {
+		if (choose >= 0) {
+			/* CHOOSE: pushed down while it is held, and the tuner up */
+			server->ccd_choose_down = choose;
+			desk_sound_play(DESK_SND_POWER_PRESS, -0.55, 0.55, 1.4);
+			ccd_open(server, choose);
+			paint_console(server);
+			server_schedule_frames(server);
+		} else if (which == DESK_CC_NET) {
 			/* the network's meter: the networks themselves */
-			console_open_settings(server, which);
+			ccd_open(server, DESK_CC_WIFI);
+		} else if (named >= 0) {
+			/* the word under a control is as good as its CHOOSE */
+			ccd_open(server, named);
 		} else if (which >= 0) {
 			console_press(server, which);
 		} else if (server->cc_key > 0.999 && !server->cc_key_moving
@@ -20341,7 +21322,8 @@ static void server_cursor_button(struct wl_listener *listener, void *data)
 			console_guard_to(server, server->cc_guard_to > 0.5 ? 0.0 : 1.0);
 		} else if (!desk_console_view_hit(server->desk_w, server->desk_h,
 				server->cursor->x, server->cursor->y)) {
-			/* off the machine altogether: you have looked away */
+			/* off the machine altogether: you have looked away, and the
+			 * lid shuts with the set as you do */
 			console_toggle(server);
 		}
 		return;
@@ -20632,6 +21614,9 @@ static void server_cursor_axis(struct wl_listener *listener, void *data)
 			|| event->orientation != WL_POINTER_AXIS_VERTICAL_SCROLL) {
 			return;
 		}
+		if (ccd_axis(server, event)) {
+			return;
+		}
 		int which = desk_console_hit(server->desk_w, server->desk_h,
 			server->cursor->x, server->cursor->y);
 		if (which != DESK_CC_VOL && which != DESK_CC_BRIGHT
@@ -20909,6 +21894,7 @@ static void output_frame_work(struct desk_server *server)
 	drawer_slide_tick(server);
 	shelf_tick(server);
 	console_tick(server);
+	ccd_tick(server);
 	post_tick(server);
 	binder_tick(server);
 	cal_tick(server);
@@ -22539,6 +23525,134 @@ static int screenshot_cb(void *data)
 	return 0;
 }
 
+/* ---- a scripted hand: DESK_HAND=file ------------------------------
+ *
+ * For trying the desk without anybody at it -- nested or headless, the
+ * same hand every time -- not for using it. A line at a time:
+ *   move X Y         the pointer to X, Y on the desk's screen
+ *   glide X Y MS     there over MS milliseconds, a frame at a time
+ *   press | release  the left button; click is both
+ *   key NAME         an xkb key name (Escape, Return, Left...), with Super
+ *                    as super+NAME
+ *   wait MS          nothing for MS milliseconds
+ *   shot PATH        grim the desk's screen into PATH
+ *   shotall PATH     grim every screen, side by side, into PATH
+ *   choose WHICH     the CHOOSE for wifi, bt or vol, wherever it is
+ *   quit             the desk ends
+ * Lines starting # and empty ones are passed over. */
+struct desk_hand {
+	struct desk_server *server;
+	FILE *f;
+	struct wl_event_source *timer;
+	double gx0, gy0, gx1, gy1;   /* a glide: from, to */
+	double g_start, g_ms;
+};
+
+static void hand_move(struct desk_server *server, double x, double y)
+{
+	wlr_cursor_warp_closest(server->cursor, NULL, x, y);
+	process_cursor_motion(server, (uint32_t)(monotonic_sec() * 1000.0));
+}
+
+static void hand_button(struct desk_server *server, bool down)
+{
+	struct wlr_pointer_button_event ev = { 0 };
+	ev.time_msec = (uint32_t)(monotonic_sec() * 1000.0);
+	ev.button = BTN_LEFT;
+	ev.state = down ? WL_POINTER_BUTTON_STATE_PRESSED : WL_POINTER_BUTTON_STATE_RELEASED;
+	server->cursor_button.notify(&server->cursor_button, &ev);
+}
+
+static int hand_cb(void *data)
+{
+	struct desk_hand *hd = data;
+	struct desk_server *server = hd->server;
+	int next = 16;
+	if (hd->g_ms > 0.0) {
+		double u = clampf_d((monotonic_sec() - hd->g_start) * 1000.0 / hd->g_ms, 0.0, 1.0);
+		hand_move(server, hd->gx0 + (hd->gx1 - hd->gx0) * u, hd->gy0 + (hd->gy1 - hd->gy0) * u);
+		if (u < 1.0) {
+			wl_event_source_timer_update(hd->timer, 16);
+			return 0;
+		}
+		hd->g_ms = 0.0;
+	}
+	char line[512];
+	while (fgets(line, sizeof line, hd->f)) {
+		char cmd[32] = "", arg[400] = "";
+		double a = 0, b = 0, c = 0;
+		if (sscanf(line, "%31s", cmd) != 1 || cmd[0] == '#') {
+			continue;
+		}
+		if (!strcmp(cmd, "move") && sscanf(line, "%*s %lf %lf", &a, &b) == 2) {
+			hand_move(server, a, b);
+		} else if (!strcmp(cmd, "glide") && sscanf(line, "%*s %lf %lf %lf", &a, &b, &c) == 3) {
+			hd->gx0 = server->cursor->x;
+			hd->gy0 = server->cursor->y;
+			hd->gx1 = a;
+			hd->gy1 = b;
+			hd->g_ms = fmax(c, 1.0);
+			hd->g_start = monotonic_sec();
+		} else if (!strcmp(cmd, "press") || !strcmp(cmd, "click")) {
+			hand_button(server, true);
+			if (!strcmp(cmd, "click")) {
+				hand_button(server, false);
+			}
+		} else if (!strcmp(cmd, "release")) {
+			hand_button(server, false);
+		} else if (!strcmp(cmd, "key") && sscanf(line, "%*s %399s", arg) == 1) {
+			bool super = !strncmp(arg, "super+", 6);
+			xkb_keysym_t sym = xkb_keysym_from_name(super ? arg + 6 : arg,
+				XKB_KEYSYM_CASE_INSENSITIVE);
+			handle_keybinding(server, sym, super ? WLR_MODIFIER_LOGO : 0);
+		} else if (!strcmp(cmd, "wait") && sscanf(line, "%*s %lf", &a) == 1) {
+			next = (int)fmax(a, 1.0);
+		} else if (!strcmp(cmd, "shot") && sscanf(line, "%*s %399s", arg) == 1) {
+			struct wlr_output *out = first_output(server);
+			char *const argv[] = { (char *)"grim", (char *)"-o", out ? out->name : (char *)"",
+				arg, NULL };
+			spawn_argv(argv);
+		} else if (!strcmp(cmd, "choose") && sscanf(line, "%*s %399s", arg) == 1) {
+			ccd_open(server, !strcmp(arg, "bt") ? DESK_CC_BT : !strcmp(arg, "vol") ? DESK_CC_VOL
+				: DESK_CC_WIFI);
+		} else if (!strcmp(cmd, "shotall") && sscanf(line, "%*s %399s", arg) == 1) {
+			char *const argv[] = { (char *)"grim", arg, NULL };
+			spawn_argv(argv);
+		} else if (!strcmp(cmd, "quit")) {
+			wl_display_terminate(server->wl_display);
+			return 0;
+		} else {
+			wlr_log(WLR_ERROR, "hand: what is \"%s\"?", cmd);
+			continue;
+		}
+		wlr_log(WLR_INFO, "hand: %s", cmd);
+		server_schedule_frames(server);
+		wl_event_source_timer_update(hd->timer, hd->g_ms > 0.0 ? 16 : next);
+		return 0;
+	}
+	fclose(hd->f);
+	hd->f = NULL;
+	return 0;
+}
+
+static void hand_start(struct desk_server *server, struct wl_event_loop *loop)
+{
+	const char *path = getenv("DESK_HAND");
+	if (!path || !*path) {
+		return;
+	}
+	static struct desk_hand hd;
+	hd.server = server;
+	hd.f = fopen(path, "re");
+	if (!hd.f) {
+		wlr_log(WLR_ERROR, "hand: no %s", path);
+		return;
+	}
+	hd.timer = wl_event_loop_add_timer(loop, hand_cb, &hd);
+	wl_event_source_timer_update(hd.timer, 2000);
+	wlr_log(WLR_INFO, "hand: following %s", path);
+}
+
 static void usage(const char *argv0)
 {
 	printf("Usage: %s [options]\n"
@@ -22938,6 +24052,10 @@ int main(int argc, char **argv)
 	server.pbc_act = -1;
 	server.cc_hover = -1;
 	server.cc_grab = -1;
+	server.ccd_which = -1;
+	server.ccd_hot = -1;
+	server.ccd_choose_down = -1;
+	server.ccd_reopen = -1;
 	/* where the machine has actually left its radios, so the levers do not
 	 * start out telling a story of their own */
 	struct desk_meters m0;
@@ -23135,6 +24253,9 @@ int main(int argc, char **argv)
 	/* and what is playing, for its page */
 	desk_media_init(loop, media_changed, &server);
 #endif
+	/* what is behind the Control Panel's levers and knob, for its cards */
+	desk_devices_init(loop, devices_changed, &server);
+	hand_start(&server, loop);
 	wl_event_source_timer_update(server.tick, 1000);
 
 	if (server.screenshot_path) {

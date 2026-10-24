@@ -97,6 +97,7 @@ Logging out, restarting and powering off ask every window to close first
 | `src/lock.c`, `src/user.c` | | PAM password check (on a thread); the user's name and picture for the door. |
 | `src/power.c` | | Log out / restart / power off through logind. |
 | `src/panel.c` | ~950 | The Control Panel's readings from `/proc`, `/sys` and the mixer. |
+| `src/devices.c` | ~700 | What the Control Panel's tuners list and do: Wi-Fi networks (`nmcli`), Bluetooth devices (`bluetoothctl`), sound devices (`pactl`), on a thread of their own. |
 | `src/occasion.c` | ~530 | Dates (birthday, the new year...) and the weather at the door (open-meteo.com, opt-out). |
 | `src/agenda.c`, `src/memo.c` | | The calendar's notes and the memo pad's sheets, saved under `$XDG_DATA_HOME/desk`. |
 | `src/camera.c` | ~260 | Whether a camera or microphone is in use (the clock's two lamps). |
@@ -267,7 +268,10 @@ It is traced as **layers** (sheets): the room without the drawer, the drawer
 alone (pulled out), the bookcase seen from the desk, the Control Panel, and
 the post box. Sliding the drawer sheet over the room sheet is what lets the
 drawer open at full frame rate. The camera moves to each view are traced as
-short films.
+short films. After the views come two more for the Control Panel's lid: the
+console without its lid through a wider lens from the same place (layer 7,
+what the view pulls back over), and the lid on its own folding open, a frame
+at a time (layer 6), each cut to the lid's part of the frame.
 
 There are two tracers:
 

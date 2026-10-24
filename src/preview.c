@@ -640,7 +640,7 @@ static int write_lock(const char *path, int w, int h)
 			cairo_t *c2 = cairo_create(inside);
 			struct desk_console_state cs = { .wifi_on = true, .volume = 0.5,
 				.brightness = 0.80, .screen = 1.0, .warm = 1.0, .clock = 12.0, .pressed = -1,
-				.antenna = 1.0 };
+				.antenna = 1.0, .choose_down = -1, .choose_open = -1 };
 			desk_draw_console(c2, w, h, &cs, -1);
 			cairo_destroy(c2);
 		}
@@ -898,7 +898,8 @@ int main(int argc, char **argv)
 	} else if (console) {
 		struct desk_console_state st = { .wifi_on = true, .volume = 0.62,
 			.brightness = 0.80, .screen = 1.0, .warm = 1.0, .clock = 12.0, .pressed = -1,
-			.antenna = getenv("DESK_AERIAL") ? atof(getenv("DESK_AERIAL")) : 1.0 };
+			.antenna = getenv("DESK_AERIAL") ? atof(getenv("DESK_AERIAL")) : 1.0,
+			.choose_down = -1, .choose_open = -1 };
 		/* the guarded set has four states worth photographing, and no way
 		 * to click one up from here */
 		const char *e;
