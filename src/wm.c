@@ -1739,6 +1739,8 @@ static struct wlr_output *first_output(struct desk_server *server);
 static struct wlr_output *screen_at(struct desk_server *server, double x, double y);
 static bool screen_is_side(struct desk_server *server, const struct wlr_output *out);
 static struct wlr_box screen_area(struct desk_server *server, struct wlr_output *out);
+static bool pointer_on_side(struct desk_server *server);
+static struct wlr_output *view_screen(struct desk_toplevel *view);
 static void desk_screen_lay(struct desk_server *server, struct wlr_scene_buffer *b,
 	struct wlr_fbox src, double x, double y, double dw, double dh, int lx, int ly);
 
@@ -2322,13 +2324,29 @@ static void server_schedule_frames(struct desk_server *server)
 	}
 }
 
-static int sheet_alloc_slot(struct desk_server *server)
+/* The screen a sheet lies on, or is on its way to: the one the middle of
+ * where it comes to rest is on (x1, y1, in the paper's coordinates). */
+static struct wlr_output *sheet_screen(struct desk_server *server, const struct desk_sheet *s)
+{
+	int ow = (int)s->hit_w, oh = (int)s->hit_h, pad;
+	if (s->fold) {
+		desk_fold_extent(s->fold, 1.0, &ow, &oh, &pad);
+	}
+	return screen_at(server, s->x1 + ow * 0.5 + server->desk_dx,
+		s->y1 + oh * 0.5 + server->desk_dy + server->win_dy);
+}
+
+/* A place along the front of screen out for a sheet to be put down in:
+ * the first not held by another (not self) lying on that screen. */
+static int sheet_alloc_slot(struct desk_server *server, struct wlr_output *out,
+	const struct desk_sheet *self)
 {
 	bool used[12] = {0};
 	struct desk_toplevel *view;
 	wl_list_for_each(view, &server->toplevels, link) {
 		if (view->sheet.phase != SHEET_IDLE && !view->sheet.in_drawer
-			&& view->sheet.slot >= 0 && view->sheet.slot < 12) {
+			&& &view->sheet != self && view->sheet.slot >= 0 && view->sheet.slot < 12
+			&& sheet_screen(server, &view->sheet) == out) {
 			used[view->sheet.slot] = true;
 		}
 	}
@@ -2342,11 +2360,13 @@ static int sheet_alloc_slot(struct desk_server *server)
 
 static struct wlr_box work_area(struct desk_server *server);
 
-/* Where a folded sheet is put down: along the front of the desk, from the
- * left, a row at a time -- the next row further back, when one is full. */
-static void sheet_slot_xy(struct desk_server *server, int slot, int pw, int ph, double *x, double *y)
+/* Where a folded sheet is put down: along the front of the desk -- or of
+ * the screen beside it, out, it was folded on -- from the left, a row at a
+ * time -- the next row further back, when one is full. */
+static void sheet_slot_xy(struct desk_server *server, struct wlr_output *out, int slot,
+	int pw, int ph, double *x, double *y)
 {
-	struct wlr_box wa = work_area(server);
+	struct wlr_box wa = screen_area(server, out);
 	int per_row = (wa.width - 48) / (pw + 18);
 	if (per_row < 1) {
 		per_row = 1;
@@ -9234,7 +9254,7 @@ static void sheet_begin_unfold(struct desk_server *server, struct desk_sheet *sh
 
 static void sheet_begin_fold(struct desk_server *server, struct desk_sheet *sheet,
 	cairo_surface_t *src, double x, double y, struct wlr_scene_tree *live, void *hit,
-	cairo_surface_t *icon, const char *name)
+	cairo_surface_t *icon, const char *name, struct wlr_output *out)
 {
 	if (sheet->phase == SHEET_FOLDING) {
 		cairo_surface_destroy(src);
@@ -9271,7 +9291,7 @@ static void sheet_begin_fold(struct desk_server *server, struct desk_sheet *shee
 	if (sheet->tree && sheet->tree->node.parent != server->layer_parked) {
 		wlr_scene_node_reparent(&sheet->tree->node, server->layer_parked);
 	}
-	sheet->slot = sheet_alloc_slot(server);
+	sheet->slot = sheet_alloc_slot(server, out, sheet);
 	static unsigned sheet_seed;
 	sheet->seed = ++sheet_seed;
 	/* folded down to about a postcard, whatever size it was */
@@ -9288,7 +9308,8 @@ static void sheet_begin_fold(struct desk_server *server, struct desk_sheet *shee
 		sheet->x1 = server->desk_w * 0.5 - ow * 0.5 - server->layer_parked->node.x;
 		sheet->y1 = server->desk_h + 4 - server->layer_parked->node.y;
 	} else {
-		sheet_slot_xy(server, sheet->slot, ow, oh, &sheet->x1, &sheet->y1);
+		/* along the front of the screen it was on */
+		sheet_slot_xy(server, out, sheet->slot, ow, oh, &sheet->x1, &sheet->y1);
 	}
 	if (live) {
 		wlr_scene_node_set_enabled(&live->node, false);
@@ -10929,7 +10950,7 @@ static void view_fold_toggle(struct desk_toplevel *view)
 	bool had_keys = server->seat->keyboard_state.focused_surface == view_surface(view);
 	sheet_begin_fold(server, &view->sheet, src,
 		view->scene_tree->node.x, view->scene_tree->node.y,
-		view->scene_tree, view, icon, name);
+		view->scene_tree, view, icon, name, view_screen(view));
 	/* a sheet folded away is not the one being written on any more */
 	if (had_keys) {
 		focus_next(server);
@@ -11488,14 +11509,14 @@ static void drawer_lift_sheet(struct desk_server *server, int i)
 		return;
 	}
 	s->in_drawer = false;
-	s->slot = sheet_alloc_slot(server);
+	s->slot = sheet_alloc_slot(server, first_output(server), s);
 	int ow, oh, pad;
 	desk_fold_extent(s->fold, 1.0, &ow, &oh, &pad);
 	if (there) {
 		s->x1 = sx - server->layer_parked->node.x - ow * 0.5;
 		s->y1 = sy - server->layer_parked->node.y - oh * 0.5;
 	} else {
-		sheet_slot_xy(server, s->slot, ow, oh, &s->x1, &s->y1);
+		sheet_slot_xy(server, first_output(server), s->slot, ow, oh, &s->x1, &s->y1);
 	}
 	sheet_present(server, s, 1.0, s->x1, s->y1);
 }
@@ -11517,8 +11538,9 @@ static void drawer_put_in(struct desk_server *server, struct desk_sheet *sheet)
 	if (server->drw_n >= DRAWER_MAX || drawer_index_of(server, sheet) >= 0 || !sheet->fold) {
 		int ow, oh, pad;
 		desk_fold_extent(sheet->fold, 1.0, &ow, &oh, &pad);
-		sheet->slot = sheet_alloc_slot(server);
-		sheet_slot_xy(server, sheet->slot, ow, oh, &sheet->x1, &sheet->y1);
+		sheet->slot = sheet_alloc_slot(server, first_output(server), sheet);
+		sheet_slot_xy(server, first_output(server), sheet->slot, ow, oh,
+			&sheet->x1, &sheet->y1);
 		sheet_present(server, sheet, 1.0, sheet->x1, sheet->y1);
 		return;
 	}
@@ -11644,7 +11666,7 @@ static void drawer_carry_move(struct desk_server *server)
 	/* a packet carried to the shut drawer's pull: it comes out for it
 	 * (not for one only being moved about the desk with the right button) */
 	if (c->kind == DRAWER_SHEET && !server->drw_sprung && server->drw_button != BTN_RIGHT
-		&& cy >= h - desk_drawer_pull_h(w, h) - 6
+		&& !pointer_on_side(server) && cy >= h - desk_drawer_pull_h(w, h) - 6
 		&& !(server->drawer_moving ? server->drawer_to > 0.5 : server->drawer_t > 0.5)) {
 		server->drw_sprung = true;
 		drawer_move_to(server, 1.0);
@@ -11715,7 +11737,8 @@ static void drawer_drop(struct desk_server *server)
 		keep = true;
 		server_schedule_frames(server);
 	} else if (s) {
-		/* laid down on the desk where it was let go, inside its edges */
+		/* laid down where it was let go -- on the desk, or on the screen
+		 * beside it the hand is over -- inside that screen's edges */
 		if (c.packet) {
 			cairo_surface_destroy(c.packet);
 		}
@@ -11724,14 +11747,17 @@ static void drawer_drop(struct desk_server *server)
 		}
 		int ow, oh, pad;
 		desk_fold_extent(s->fold, 1.0, &ow, &oh, &pad);
-		struct wlr_box wa = work_area(server);
+		struct wlr_output *out = screen_at(server, cx, cy);
+		struct wlr_output *was = s->in_drawer ? NULL : sheet_screen(server, s);
+		struct wlr_box wa = screen_area(server, out);
 		double lx = cx - server->drw_gx * ow - server->layer_parked->node.x;
 		double ly = cy - server->drw_gy * oh - server->layer_parked->node.y;
 		lx = clampf_d(lx, wa.x, fmax(wa.x, wa.x + wa.width - ow));
 		ly = clampf_d(ly, wa.y, fmax(wa.y, wa.y + wa.height - oh));
 		s->in_drawer = false;
-		if (s->slot < 0) {
-			s->slot = sheet_alloc_slot(server);
+		/* a place along the front of the screen it is on now */
+		if (s->slot < 0 || was != out) {
+			s->slot = sheet_alloc_slot(server, out, s);
 		}
 		if (s->tree) {
 			wlr_scene_node_reparent(&s->tree->node, server->layer_parked);
@@ -11837,7 +11863,9 @@ static bool drawer_press(struct desk_server *server, uint32_t button)
 	if (server->drw_carrying || server->drw_press >= 0 || server->drw_press_sheet) {
 		return true;   /* already holding something */
 	}
-	if (post_up(server) || console_up(server) || shelf_up(server)) {
+	/* (a screen beside the desk's is in reach whatever the desk's is
+	 * turned to) */
+	if (!pointer_on_side(server) && (post_up(server) || console_up(server) || shelf_up(server))) {
 		return false;
 	}
 	bool right = button == BTN_RIGHT;
@@ -12545,8 +12573,39 @@ static void windows_onto_screens(struct desk_server *server)
 		} else {
 			wlr_scene_node_set_position(node, x, y);
 		}
+		/* folded, it opens out to where the window is now */
+		if (view->sheet.phase != SHEET_IDLE) {
+			view->sheet.x0 = node->x;
+			view->sheet.y0 = node->y;
+		}
 		view_sync_shadow(view);
 		view_send_position(view);
+	}
+	/* A sheet folded on a screen that has gone: along the front of the
+	 * nearest one that is there. */
+	wl_list_for_each(view, &server->toplevels, link) {
+		struct desk_sheet *s = &view->sheet;
+		if ((s->phase != SHEET_PARKED && s->phase != SHEET_FOLDING) || s->in_drawer
+			|| s->to_drawer || !s->fold
+			|| (s->tree && s->tree->node.parent == server->layer_drag)) {
+			continue;
+		}
+		int ow, oh, pad;
+		desk_fold_extent(s->fold, 1.0, &ow, &oh, &pad);
+		double mx = s->x1 + ow * 0.5 + server->desk_dx;
+		double my = s->y1 + oh * 0.5 + server->desk_dy + server->win_dy;
+		if (wlr_output_layout_output_at(server->output_layout, mx, my)) {
+			continue;
+		}
+		struct wlr_output *out = screen_at(server, mx, my);
+		if (!out) {
+			continue;
+		}
+		s->slot = sheet_alloc_slot(server, out, s);
+		sheet_slot_xy(server, out, s->slot, ow, oh, &s->x1, &s->y1);
+		if (s->phase == SHEET_PARKED) {
+			sheet_present(server, s, 1.0, s->x1, s->y1);
+		}
 	}
 }
 
@@ -20269,6 +20328,11 @@ static void server_cursor_button(struct wl_listener *listener, void *data)
 			return;
 		}
 		if (!paper_moved(server)) {
+			/* a packet folded on this screen: taken hold of, as on the desk */
+			if ((event->button == BTN_LEFT || event->button == BTN_RIGHT)
+				&& drawer_press(server, event->button)) {
+				return;
+			}
 			paper_press(server, event);
 		}
 		return;
@@ -20868,7 +20932,30 @@ static void desk_follow(struct desk_server *server)
 			&& screen_is_side(server, view_screen(view))) {
 			struct wlr_scene_node *node = &view->scene_tree->node;
 			wlr_scene_node_set_position(node, node->x - ddx, node->y - ddy);
+			/* folded, it opens out to where the window is now */
+			if (view->sheet.phase != SHEET_IDLE) {
+				view->sheet.x0 -= ddx;
+				view->sheet.y0 -= ddy;
+			}
 			view_sync_shadow(view);
+		}
+	}
+	/* and so do the sheets folded on one, lying there or on their way to
+	 * it (not one in the hand, which is where the hand is) */
+	wl_list_for_each(view, &server->toplevels, link) {
+		struct desk_sheet *s = &view->sheet;
+		if (s->phase == SHEET_IDLE || s->in_drawer || s->to_drawer
+			|| (s->tree && s->tree->node.parent == server->layer_drag)
+			|| !screen_is_side(server, sheet_screen(server, s))) {
+			continue;
+		}
+		s->x1 -= ddx;
+		s->y1 -= ddy;
+		s->hit_x -= ddx;
+		s->hit_y -= ddy;
+		if (s->tree) {
+			wlr_scene_node_set_position(&s->tree->node, s->tree->node.x - ddx,
+				s->tree->node.y - ddy);
 		}
 	}
 	bool moved = dx != server->desk_dx || dy != server->desk_dy;
