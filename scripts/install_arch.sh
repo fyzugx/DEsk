@@ -207,6 +207,7 @@ build|Wayland protocols|wayland-protocols
 build|keyboards (xkbcommon)|libxkbcommon
 build|touchpads and mice (libinput)|libinput
 build|drawing (cairo)|cairo
+build|text shaping (PangoCairo)|pango
 build|drawing: pixels (pixman)|pixman
 build|typefaces (fontconfig)|fontconfig
 build|the display (libdrm)|libdrm

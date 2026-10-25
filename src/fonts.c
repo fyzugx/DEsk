@@ -22,7 +22,10 @@
  * readable, if not joined up or set right to left, which the toy API
  * cannot do. */
 
+#define DESK_TEXT_SHAPING_IMPL
 #include "fonts.h"
+#include <pango/pangocairo.h>
+#include <math.h>
 
 #include <fontconfig/fontconfig.h>
 #include <pthread.h>
@@ -463,4 +466,122 @@ void desk_font_describe(char *buf, size_t n)
 		}
 		o += (size_t)k;
 	}
+}
+
+
+/* -------------------------------------------------------------------------
+ * Complex-script shaping for Cairo-based DEsk text.
+ * Preserve the original Cairo rendering for Latin and CJK strings; use
+ * Pango for Arabic joining, bidi runs, and font fallback when required.
+ * The current drawing transform and font selection stay in effect. */
+bool desk_text_needs_shaping(const char *text)
+{
+    if (!text) return false;
+    for (const unsigned char *q = (const unsigned char *)text; *q; q++) {
+        if (*q & 0x80) {
+            if (!g_utf8_validate(text, -1, NULL)) return false;
+            for (const char *p = text; *p; p = g_utf8_next_char(p)) {
+                gunichar u = g_utf8_get_char(p);
+                /* Hebrew, Arabic, related RTL blocks and presentation forms. */
+                if ((u >= 0x0590 && u <= 0x08ff) ||
+                    (u >= 0xfb1d && u <= 0xfeff) ||
+                    (u >= 0x10e60 && u <= 0x10e7f) ||
+                    (u >= 0x1ee00 && u <= 0x1eeff) ||
+                    /* Indic and Southeast Asian combining scripts. */
+                    (u >= 0x0900 && u <= 0x0e7f) ||
+                    (u >= 0x0f00 && u <= 0x109f) ||
+                    (u >= 0x1780 && u <= 0x17ff) ||
+                    (u >= 0x1a20 && u <= 0x1aaf)) return true;
+            }
+            return false;
+        }
+    }
+    return false;
+}
+
+static PangoLayout *desk_shaped_layout(cairo_t *cr, const char *text)
+{
+    PangoLayout *layout = pango_cairo_create_layout(cr);
+    PangoFontDescription *font = pango_font_description_new();
+    cairo_font_face_t *face = cairo_get_font_face(cr);
+    const char *family = cairo_font_face_get_type(face) == CAIRO_FONT_TYPE_TOY
+        ? cairo_toy_font_face_get_family(face) : "sans-serif";
+    cairo_matrix_t matrix;
+    cairo_get_font_matrix(cr, &matrix);
+    double size = hypot(matrix.xx, matrix.yx);
+    if (!(size > 0.0) || !isfinite(size)) size = 12.0;
+    pango_font_description_set_family(font, family);
+    pango_font_description_set_absolute_size(font, size * PANGO_SCALE);
+    if (cairo_font_face_get_type(face) == CAIRO_FONT_TYPE_TOY) {
+        pango_font_description_set_weight(font,
+            cairo_toy_font_face_get_weight(face) == CAIRO_FONT_WEIGHT_BOLD
+            ? PANGO_WEIGHT_BOLD : PANGO_WEIGHT_NORMAL);
+        pango_font_description_set_style(font,
+            cairo_toy_font_face_get_slant(face) == CAIRO_FONT_SLANT_ITALIC
+            ? PANGO_STYLE_ITALIC :
+            cairo_toy_font_face_get_slant(face) == CAIRO_FONT_SLANT_OBLIQUE
+            ? PANGO_STYLE_OBLIQUE : PANGO_STYLE_NORMAL);
+    }
+    pango_layout_set_font_description(layout, font);
+    pango_layout_set_single_paragraph_mode(layout, TRUE);
+    pango_layout_set_auto_dir(layout, TRUE);
+    pango_layout_set_text(layout, text, -1);
+    pango_font_description_free(font);
+    return layout;
+}
+
+void desk_cairo_text_extents(cairo_t *cr, const char *text, cairo_text_extents_t *ext)
+{
+    if (!desk_text_needs_shaping(text)) {
+        cairo_text_extents(cr, text, ext);
+        return;
+    }
+    PangoLayout *layout = desk_shaped_layout(cr, text);
+    PangoRectangle ink, logical;
+    pango_layout_get_extents(layout, &ink, &logical);
+    ext->x_bearing = (double)ink.x / PANGO_SCALE;
+    ext->y_bearing = (double)(ink.y - pango_layout_get_baseline(layout)) / PANGO_SCALE;
+    ext->width = (double)ink.width / PANGO_SCALE;
+    ext->height = (double)ink.height / PANGO_SCALE;
+    ext->x_advance = (double)logical.width / PANGO_SCALE;
+    ext->y_advance = 0.0;
+    g_object_unref(layout);
+}
+
+void desk_cairo_show_text(cairo_t *cr, const char *text)
+{
+    if (!desk_text_needs_shaping(text)) {
+        cairo_show_text(cr, text);
+        return;
+    }
+    PangoLayout *layout = desk_shaped_layout(cr, text);
+    int width = 0;
+    pango_layout_get_size(layout, &width, NULL);
+    double x = 0.0, y = 0.0;
+    cairo_get_current_point(cr, &x, &y);
+    cairo_save(cr);
+    cairo_move_to(cr, x, y - (double)pango_layout_get_baseline(layout) / PANGO_SCALE);
+    pango_cairo_show_layout(cr, layout);
+    cairo_restore(cr);
+    cairo_move_to(cr, x + (double)width / PANGO_SCALE, y);
+    g_object_unref(layout);
+}
+
+void desk_cairo_text_path(cairo_t *cr, const char *text)
+{
+    if (!desk_text_needs_shaping(text)) {
+        cairo_text_path(cr, text);
+        return;
+    }
+    PangoLayout *layout = desk_shaped_layout(cr, text);
+    int width = 0;
+    pango_layout_get_size(layout, &width, NULL);
+    double x = 0.0, y = 0.0;
+    cairo_get_current_point(cr, &x, &y);
+    cairo_save(cr);
+    cairo_move_to(cr, x, y - (double)pango_layout_get_baseline(layout) / PANGO_SCALE);
+    pango_cairo_layout_path(cr, layout);
+    cairo_restore(cr);
+    cairo_move_to(cr, x + (double)width / PANGO_SCALE, y);
+    g_object_unref(layout);
 }

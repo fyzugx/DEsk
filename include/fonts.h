@@ -47,3 +47,19 @@ void desk_font_set_region(enum desk_lang lang);
 
 /* What was chosen for each role, for the log: "ui=Noto Sans CJK JP/..." */
 void desk_font_describe(char *buf, size_t n);
+/* Complex-script fallback for text DEsk draws itself with Cairo. Pango
+ * supplies contextual glyph shaping and bidirectional text ordering.
+ * Does not intercept text inside other Wayland applications. */
+bool desk_text_needs_shaping(const char *text);
+void desk_cairo_show_text(cairo_t *cr, const char *text);
+void desk_cairo_text_extents(cairo_t *cr, const char *text, cairo_text_extents_t *ext);
+void desk_cairo_text_path(cairo_t *cr, const char *text);
+
+/* Preserve the original Cairo typography for ordinary Latin and CJK text.
+ * The wrappers selectively forward complex scripts to PangoCairo. */
+#ifndef DESK_TEXT_SHAPING_IMPL
+#define cairo_show_text(cr, text) desk_cairo_show_text((cr), (text))
+#define cairo_text_extents(cr, text, ext) desk_cairo_text_extents((cr), (text), (ext))
+#define cairo_text_path(cr, text) desk_cairo_text_path((cr), (text))
+#endif
+

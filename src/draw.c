@@ -12977,6 +12977,17 @@ static void gold_text(cairo_t *cr, const char *t, double cx, double base, double
 	cairo_save(cr);
 	desk_font_select(cr, DESK_FONT_DISPLAY, t, bold, false);
 	cairo_set_font_size(cr, size);
+	if (desk_text_needs_shaping(t)) {
+		/* Arabic must stay joined: don't split a word to track glyphs. */
+		cairo_text_extents_t e;
+		cairo_text_extents(cr, t, &e);
+		cairo_new_path(cr);
+		cairo_move_to(cr, cx - e.width * 0.5 - e.x_bearing, base);
+		cairo_text_path(cr, t);
+		gold_fill(cr, base - size * 0.8, base);
+		cairo_restore(cr);
+		return;
+	}
 	double w = 0.0;
 	char ch[8];
 	for (const char *p = t; *p;) {
@@ -18320,6 +18331,12 @@ static void form_caps(cairo_t *cr, const char *s, double x, double y, double siz
 	cairo_save(cr);
 	form_font(cr, size, true);
 	cairo_set_source_rgba(cr, 0.36, 0.29, 0.21, 0.80);
+	if (desk_text_needs_shaping(s)) {
+		cairo_move_to(cr, x, y);
+		cairo_show_text(cr, s);
+		cairo_restore(cr);
+		return;
+	}
 	char ch[8];
 	for (const char *p = s; *p;) {
 		p += cal_letter(p, ch);
@@ -26010,6 +26027,12 @@ static double cal_spaced_w(cairo_t *cr, const char *s, double size, double track
 	cairo_save(cr);
 	desk_font_select(cr, DESK_FONT_ENGRAVE, s, bold, false);
 	cairo_set_font_size(cr, size);
+	if (desk_text_needs_shaping(s)) {
+		cairo_text_extents_t e;
+		cairo_text_extents(cr, s, &e);
+		cairo_restore(cr);
+		return e.x_advance;
+	}
 	double x = 0.0;
 	char ch[8];
 	for (const char *p = s; *p;) {
@@ -26029,6 +26052,14 @@ static double cal_spaced(cairo_t *cr, const char *s, double x, double y, double 
 	desk_font_select(cr, DESK_FONT_ENGRAVE, s, bold, false);
 	cairo_set_font_size(cr, size);
 	cairo_set_source_rgb(cr, r, g, b);
+	if (desk_text_needs_shaping(s)) {
+		cairo_text_extents_t e;
+		cairo_text_extents(cr, s, &e);
+		cairo_move_to(cr, x, y);
+		cairo_show_text(cr, s);
+		cairo_restore(cr);
+		return x + e.x_advance;
+	}
 	char ch[8];
 	for (const char *p = s; *p;) {
 		p += cal_letter(p, ch);
