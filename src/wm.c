@@ -21270,6 +21270,12 @@ static void server_new_output(struct wl_listener *listener, void *data)
 	struct desk_server *server = wl_container_of(listener, server, new_output);
 	struct wlr_output *wlr_output = data;
 	wlr_output_init_render(wlr_output, server->allocator, server->renderer);
+	if (wlr_output_is_wl(wlr_output)) {
+		/* Keep the nested pointer in the window's rendered content. Some
+		 * parent compositors don't display the separate cursor surface. */
+		wlr_output_lock_software_cursors(wlr_output, true);
+		wlr_log(WLR_INFO, "nested Wayland output: drawing cursor in the window");
+	}
 	struct wlr_output_state state;
 	wlr_output_state_init(&state);
 	wlr_output_state_set_enabled(&state, true);
