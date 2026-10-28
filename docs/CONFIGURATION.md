@@ -12,6 +12,9 @@ unless set otherwise.
 
 ## Files
 
+It should be noted that the *shell.conf* file will not exist until settings are changed from the desktop.
+The app you'll want to run to adjust these settings is **shell settings** from the *system* or *all apps* 'book' on the bookshelf depicted in the primary interface.
+
 | File | Written by | What it holds |
 | --- | --- | --- |
 | `$XDG_CONFIG_HOME/desk/shell.conf` | Shell Settings, you | DEsk's settings (below). It is not there until you first change a setting in Shell Settings, which writes it; you can also create it yourself. Until then the machine's defaults (the next row) and the defaults below hold. |
