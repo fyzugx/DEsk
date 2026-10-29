@@ -17,7 +17,7 @@ unless set otherwise.
 | `$XDG_CONFIG_HOME/desk/shell.conf` | Shell Settings, you | DEsk's settings (below). It is not there until you first change a setting in Shell Settings, which writes it; you can also create it yourself. Until then the machine's defaults (the next row) and the defaults below hold. |
 | `/etc/xdg/desk/shell.conf` | the installer | The machine's defaults, under each user's own file; the installer writes the Graphics level it measured. |
 | `$XDG_CONFIG_HOME/desk/displays.conf` | DEsk | How a display tool last arranged each set of screens. |
-| `$XDG_CONFIG_HOME/desk/drawer` | DEsk | The programs in the drawer, in order. |
+| `$XDG_CONFIG_HOME/desk/drawer` | DEsk | The programs in the drawer, in order. With a drawer for each screen, another screen's is `drawer@SCREEN` (`drawer@HDMI-A-1`); what is under a false bottom is the same name with `.hidden` after it. |
 | `$XDG_CONFIG_HOME/desk/shelves.conf` | you | Programs filed on a shelf other than their own. |
 | `~/.config/desk-mimeapps.list` | you | Default programs inside DEsk only, before `mimeapps.list`. |
 | `$XDG_DATA_HOME/desk/calendar` | DEsk | Notes stuck on the calendar. |
@@ -97,6 +97,8 @@ or power-saving setting, or `screen_off = never`, avoids it.
 | --- | --- | --- | --- |
 | `drawer_closes` | `yes`, `no` | `yes` | Close the drawer after something in it is used. |
 | `fold_into_drawer` | `yes`, `no` | `no` | Folded windows go into the drawer instead of lying on the desk. |
+| `drawers` | `shared`, `each` | `shared` | With more than one screen: one drawer that comes out on the screen it is opened from, or a drawer for each screen with its own things in it. |
+| `false_bottom` | `off`, `all`, `desk`, `side`, or screen names (`DP-1,HDMI-A-1`) | `off` | Drawers whose felt slides back, by a brass ring in it, to a hidden compartment with things of its own. With one shared drawer, anything but `off` gives it one. |
 | `take_sheet` | `yes`, `no` | `yes` | A program taken from ALL APPS has its sheet carried down first. |
 | `app.terminal`, `app.browser`, `app.files`, `app.editor` | a desktop file id (`xfce4-terminal.desktop`) | | The standard programs, instead of DEsk's choice. |
 

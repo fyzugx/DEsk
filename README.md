@@ -109,7 +109,13 @@ there -- its material, the light on it, its shadow and the wear of use.
 - **The drawer is the dock.** Pull the brass handle (or press `Super+D`).
   It holds the things you put in it: any app, or a folded window. Out of
   the box it holds DEsk's standard programs (below) and a screwdriver that
-  opens Shell Settings.
+  opens Shell Settings. With more than one screen it comes out at the foot
+  of whichever screen you open it from: one drawer shared by all of them,
+  or a drawer for each screen with its own things in it (Shell Settings,
+  *Drawers*). A drawer can have a **false bottom**: pull the brass ring in
+  the felt and the felt slides back to show a hidden compartment with
+  things of its own; drop something on the ring to slip it through. Which
+  drawers have one is up to you (*False bottom*).
 - **The bookshelf holds your apps** (`Super+A`, or the ALL APPS plate).
   Each category is a ring binder whose sheets fan from a single ring.
   Take a sheet and it is carried down to the desk, where the app's window
@@ -493,7 +499,7 @@ GPU's to trace.
 | `Super+Enter` | terminal |
 | `Super+Q` / `Alt+F4` | close the focused window |
 | `Super+M` | fold / unfold the focused sheet |
-| `Super+D` | open / close the drawer |
+| `Super+D` | open / close the drawer (on the screen the pointer is on) |
 | `Super+A` | look up at the bookshelf |
 | `Super+C` | the Control Panel |
 | `Super+N` | the post box |

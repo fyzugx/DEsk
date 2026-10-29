@@ -219,6 +219,9 @@ struct shell_conf {
 	bool drawer_closes;         /* the drawer goes back after something is used */
 	bool take_sheet;            /* ALL APPS: the sheet is carried down for the window */
 	bool fold_drawer;           /* a folded window goes into the drawer */
+	bool drawer_each;           /* a drawer for each screen, not one shared */
+	char false_bottom[128];     /* which drawers have one: off, all, desk,
+	                             * side, or screens by name (drawer_fb_wanted) */
 	double sound;               /* how loud the desk is: 0 silent */
 	bool letter_sound;          /* a letter arriving is heard */
 	bool lights_at_login;       /* the room starts dark and the lamp comes up */
@@ -270,6 +273,23 @@ struct drawer_entry {
 	bool present;                 /* a program that is installed */
 	double x, fit;                /* where it lies along the row, and how big */
 	double x_to, fit_to;          /* and where it is on its way to */
+};
+
+/* What is in a drawer that is not the one out just now -- one at the foot
+ * of another screen (Shell Settings: drawers = each), or the other floor
+ * of this one, a false bottom's hollow or the felt over it -- kept here
+ * until it is (drawer_switch). screen is the screen's name, "" for the
+ * desk's own (or the one drawer they share). */
+#define DRAWER_KEEPS 8
+struct drawer_list {
+	struct drawer_entry e[DRAWER_MAX];
+	int n;
+	bool fresh;      /* nobody has filled it: it comes with what a new drawer does */
+};
+struct drawer_keep {
+	char screen[32];
+	struct drawer_list floor[2];   /* the felt, and the hollow under it */
+	bool read[2];                  /* each read from its file yet */
 };
 
 /* A sheet taken out of a binder and put down on the desk: the program's
@@ -366,6 +386,10 @@ struct desk_output {
 	struct wlr_box side_box;
 	unsigned side_room;
 	int side_level;
+	/* and the room under the desk's front edge there, shown as the boards
+	 * go up for the drawer coming out at its foot (side_foot_place) */
+	struct wlr_scene_buffer *side_foot;
+	int side_foot_h;
 };
 
 /* A program asking for the screen to stay lit (idle-inhibit): a film being
@@ -803,6 +827,33 @@ struct desk_server {
 	struct wlr_scene_buffer *drw_carry_node;
 	double drw_carry_ax, drw_carry_ay;
 	double drw_poof_at;        /* a program taken out of it, fading */
+	/* Which drawer is the one in drw[] (drawer_switch): whose it is (the
+	 * screen's name; "" the desk's own, or the one they all share) and
+	 * which floor -- 0 the felt, 1 a false bottom's hollow under it; and
+	 * the screen it is out on, or comes out on (drw_at, "" the desk's).
+	 * With one drawer shared, whose is always "" and drw_at is wherever
+	 * it was opened last. The rest are kept in drw_keep. */
+	char drw_key[32];
+	int drw_floor;
+	char drw_at[32];
+	struct drawer_keep drw_keep[DRAWER_KEEPS];
+	int drw_keep_n;
+	/* asked for on another screen while it is out on this one: it goes
+	 * home first, and comes out there once it is in */
+	char drw_next[32];
+	bool drw_next_on;
+	/* how far out it is, on whichever screen; drawer_t is the desk's
+	 * screen's share of that, which is what the room is laid out for */
+	double drw_open;
+	/* the paper on the screen beside the desk's it is out on, pushed up
+	 * out of its way, as drawer_lift pushes the desk's */
+	int side_lift;
+	struct wlr_output *side_lift_on;   /* the screen that is, while it is */
+	struct wlr_scene_rect *side_shade;
+	/* The false bottom's board: fb_t 0 down, 1 slid back; and the ring in
+	 * it under the hand, and held. */
+	double fb_t, fb_from, fb_to, fb_start;
+	bool fb_moving, fb_hot, fb_held;
 	int desk_w, desk_h;
 	/* Looking up at the bookcase. shelf_t runs 0 at the desk to 1 at the
 	 * shelf; while it is strictly between, the frame is one of the traced
@@ -1805,6 +1856,8 @@ static struct wlr_output *first_output(struct desk_server *server);
 static struct wlr_output *screen_at(struct desk_server *server, double x, double y);
 static bool screen_is_side(struct desk_server *server, const struct wlr_output *out);
 static struct wlr_box screen_area(struct desk_server *server, struct wlr_output *out);
+static bool pointer_on_side(struct desk_server *server);
+static struct wlr_output *view_screen(struct desk_toplevel *view);
 static void desk_screen_lay(struct desk_server *server, struct wlr_scene_buffer *b,
 	struct wlr_fbox src, double x, double y, double dw, double dh, int lx, int ly);
 
@@ -2389,13 +2442,29 @@ static void server_schedule_frames(struct desk_server *server)
 	}
 }
 
-static int sheet_alloc_slot(struct desk_server *server)
+/* The screen a sheet lies on, or is on its way to: the one the middle of
+ * where it comes to rest is on (x1, y1, in the paper's coordinates). */
+static struct wlr_output *sheet_screen(struct desk_server *server, const struct desk_sheet *s)
+{
+	int ow = (int)s->hit_w, oh = (int)s->hit_h, pad;
+	if (s->fold) {
+		desk_fold_extent(s->fold, 1.0, &ow, &oh, &pad);
+	}
+	return screen_at(server, s->x1 + ow * 0.5 + server->desk_dx,
+		s->y1 + oh * 0.5 + server->desk_dy + server->win_dy);
+}
+
+/* A place along the front of screen out for a sheet to be put down in:
+ * the first not held by another (not self) lying on that screen. */
+static int sheet_alloc_slot(struct desk_server *server, struct wlr_output *out,
+	const struct desk_sheet *self)
 {
 	bool used[12] = {0};
 	struct desk_toplevel *view;
 	wl_list_for_each(view, &server->toplevels, link) {
 		if (view->sheet.phase != SHEET_IDLE && !view->sheet.in_drawer
-			&& view->sheet.slot >= 0 && view->sheet.slot < 12) {
+			&& &view->sheet != self && view->sheet.slot >= 0 && view->sheet.slot < 12
+			&& sheet_screen(server, &view->sheet) == out) {
 			used[view->sheet.slot] = true;
 		}
 	}
@@ -2409,11 +2478,13 @@ static int sheet_alloc_slot(struct desk_server *server)
 
 static struct wlr_box work_area(struct desk_server *server);
 
-/* Where a folded sheet is put down: along the front of the desk, from the
- * left, a row at a time -- the next row further back, when one is full. */
-static void sheet_slot_xy(struct desk_server *server, int slot, int pw, int ph, double *x, double *y)
+/* Where a folded sheet is put down: along the front of the desk -- or of
+ * the screen beside it, out, it was folded on -- from the left, a row at a
+ * time -- the next row further back, when one is full. */
+static void sheet_slot_xy(struct desk_server *server, struct wlr_output *out, int slot,
+	int pw, int ph, double *x, double *y)
 {
-	struct wlr_box wa = work_area(server);
+	struct wlr_box wa = screen_area(server, out);
 	int per_row = (wa.width - 48) / (pw + 18);
 	if (per_row < 1) {
 		per_row = 1;
@@ -3466,6 +3537,23 @@ static void show_stop(struct desk_server *server, bool skipped);
 static void show_tick(struct desk_server *server);
 static void show_midnight_check(struct desk_server *server);
 static void drawer_toggle(struct desk_server *server);
+static void drawer_home(struct desk_server *server);
+static void drawer_share(struct desk_server *server);
+static void drawer_here(struct desk_server *server);
+static void drawer_open_on(struct desk_server *server, struct wlr_output *out);
+static bool drawer_side_frame(struct desk_server *server, struct wlr_box *box, double *fx,
+	double *fy);
+static bool drawer_local(struct desk_server *server, double px, double py, double *x, double *y);
+static int drawer_side_lift(struct desk_server *server);
+static bool drawer_fb_on(const struct desk_server *server);
+static struct drawer_list *drawer_list_of(struct desk_server *server, const char *screen,
+	int floor);
+static void drawer_forget_kept(struct desk_server *server, const struct desk_sheet *sheet);
+static bool fb_ring_under(struct desk_server *server, double px, double py);
+static bool drawer_side_pull_at(struct desk_server *server, double px, double py);
+static void fb_toggle(struct desk_server *server);
+static void fb_hot_to(struct desk_server *server, bool hot);
+static void fb_tick(struct desk_server *server);
 static void fullscreen_layer_order(struct desk_server *server);
 static int drawer_lift(struct desk_server *server);
 static double drawer_line(struct desk_server *server);
@@ -9232,7 +9320,7 @@ static void drawer_toggle(struct desk_server *server)
 	card_gone(server);
 	double now = monotonic_sec();
 	/* pushed back partway, it goes back from where it has got to */
-	double cur = server->drawer_t;
+	double cur = server->drw_open;
 	server->drawer_from = cur;
 	server->drawer_to = cur > 0.5 ? 0.0 : 1.0;
 	if (server->drawer_to < 0.5) {
@@ -9264,18 +9352,22 @@ static void drawer_tick(struct desk_server *server)
 		return;
 	}
 	double u = clampf_d((monotonic_sec() - server->drawer_start) / server->drawer_dur, 0, 1);
-	server->drawer_t = server->drawer_from
+	server->drw_open = server->drawer_from
 		+ (server->drawer_to - server->drawer_from) * drawer_ease(u);
 	/* at its stop, or home (the slide has been cut to end there) */
 	snd_end(&server->snd_drawer_stop, server->drawer_start, server->drawer_dur,
 		server->drawer_to > 0.5 ? DESK_SND_DRAWER_STOP_OUT : DESK_SND_DRAWER_STOP_IN,
 		0.0, 1.0, 0.0);
 	if (u >= 1.0) {
-		server->drawer_t = server->drawer_to;
+		server->drw_open = server->drawer_to;
 		server->drawer_moving = 0;
 		server->snd_drawer = 0;
 		/* home: a game on the whole screen is in front of it again */
 		fullscreen_layer_order(server);
+	}
+	drawer_share(server);
+	if (!server->drawer_moving && server->drw_open < 0.5) {
+		drawer_home(server);
 	}
 	/* Both sheets are baked, so a frame of the animation is two node
 	 * moves -- and what lies on the desk moves with it rather than being
@@ -9331,7 +9423,7 @@ static void sheet_begin_unfold(struct desk_server *server, struct desk_sheet *sh
 
 static void sheet_begin_fold(struct desk_server *server, struct desk_sheet *sheet,
 	cairo_surface_t *src, double x, double y, struct wlr_scene_tree *live, void *hit,
-	cairo_surface_t *icon, const char *name)
+	cairo_surface_t *icon, const char *name, struct wlr_output *out)
 {
 	if (sheet->phase == SHEET_FOLDING) {
 		cairo_surface_destroy(src);
@@ -9368,7 +9460,7 @@ static void sheet_begin_fold(struct desk_server *server, struct desk_sheet *shee
 	if (sheet->tree && sheet->tree->node.parent != server->layer_parked) {
 		wlr_scene_node_reparent(&sheet->tree->node, server->layer_parked);
 	}
-	sheet->slot = sheet_alloc_slot(server);
+	sheet->slot = sheet_alloc_slot(server, out, sheet);
 	static unsigned sheet_seed;
 	sheet->seed = ++sheet_seed;
 	/* folded down to about a postcard, whatever size it was */
@@ -9385,7 +9477,8 @@ static void sheet_begin_fold(struct desk_server *server, struct desk_sheet *shee
 		sheet->x1 = server->desk_w * 0.5 - ow * 0.5 - server->layer_parked->node.x;
 		sheet->y1 = server->desk_h + 4 - server->layer_parked->node.y;
 	} else {
-		sheet_slot_xy(server, sheet->slot, ow, oh, &sheet->x1, &sheet->y1);
+		/* along the front of the screen it was on */
+		sheet_slot_xy(server, out, sheet->slot, ow, oh, &sheet->x1, &sheet->y1);
 	}
 	if (live) {
 		wlr_scene_node_set_enabled(&live->node, false);
@@ -10121,6 +10214,18 @@ static void terminal_open(void)
  *                                         desk, and its window comes onto it
  *   fold_into_drawer = yes | no           a window folded away goes into
  *                                         the drawer, not onto the desk
+ *   drawers = shared | each               one drawer, coming out on the
+ *                                         screen it is opened from, or one
+ *                                         for each screen with its own
+ *                                         things in it
+ *   false_bottom = off | all | desk | side | <screen>,<screen>...
+ *                                         drawers whose felt lifts out to a
+ *                                         hidden compartment: every one, the
+ *                                         desk's screen's, the others', or
+ *                                         those of the screens named (as
+ *                                         wlr-randr names them); with one
+ *                                         drawer shared, anything but off
+ *                                         gives it one
  *   sound = off | quiet | normal          the desk's sounds
  *   letter_sound = yes | no               a letter arriving in the post box
  *                                         is heard
@@ -10224,6 +10329,8 @@ static void shell_conf_defaults(struct shell_conf *c)
 	c->drawer_closes = true;
 	c->take_sheet = true;
 	c->fold_drawer = false;
+	c->drawer_each = false;
+	snprintf(c->false_bottom, sizeof c->false_bottom, "off");
 	c->sound = 1.0;
 	c->letter_sound = true;
 	c->lights_at_login = true;
@@ -10418,6 +10525,23 @@ static bool conf_other(struct shell_conf *c, const char *path, const char *key, 
 		} else {
 			wlr_log(WLR_ERROR, "%s: keyboard_switch is alt_shift, super_space, ctrl_shift or "
 				"caps_lock, not \"%s\"", path, val);
+		}
+		return true;
+	}
+	if (!strcmp(key, "drawers")) {
+		if (!strcasecmp(val, "shared") || !strcasecmp(val, "each")) {
+			c->drawer_each = !strcasecmp(val, "each");
+		} else {
+			wlr_log(WLR_ERROR, "%s: drawers is shared or each, not \"%s\"", path, val);
+		}
+		return true;
+	}
+	if (!strcmp(key, "false_bottom")) {
+		bool b;
+		if (conf_bool(val, &b)) {
+			snprintf(c->false_bottom, sizeof c->false_bottom, "%s", b ? "all" : "off");
+		} else {
+			snprintf(c->false_bottom, sizeof c->false_bottom, "%s", val);
 		}
 		return true;
 	}
@@ -10637,6 +10761,7 @@ static void shell_conf_put_scale(struct desk_server *server, double scale)
 }
 
 static void shell_apply_all(struct desk_server *server);
+static void drawer_conf_apply(struct desk_server *server);
 static void input_apply(struct desk_server *server);
 static void desk_relayout(struct desk_server *server);
 static void idle_rearm(struct desk_server *server);
@@ -10744,6 +10869,7 @@ static void shell_conf_poll(struct desk_server *server)
 	if (first) {
 		motion_set(motion_of(c));
 		desk_set_clock_12h(c->clock_12h);
+		drawer_conf_apply(server);
 		/* before the first look at what is installed */
 		desk_lang_set(lang);
 		desk_apps_set_language(strcmp(c->language, "auto") ? desk_lang_code(lang) : "");
@@ -10930,6 +11056,7 @@ static void overlay_update(struct desk_server *server, bool force);
 
 static void shell_apply_all(struct desk_server *server)
 {
+	drawer_conf_apply(server);
 	motion_set(motion_of(&server->conf));
 	g_bounce = server->conf.bounce;
 	desk_set_clock_12h(server->conf.clock_12h);
@@ -11026,7 +11153,7 @@ static void view_fold_toggle(struct desk_toplevel *view)
 	bool had_keys = server->seat->keyboard_state.focused_surface == view_surface(view);
 	sheet_begin_fold(server, &view->sheet, src,
 		view->scene_tree->node.x, view->scene_tree->node.y,
-		view->scene_tree, view, icon, name);
+		view->scene_tree, view, icon, name, view_screen(view));
 	/* a sheet folded away is not the one being written on any more */
 	if (had_keys) {
 		focus_next(server);
@@ -11059,12 +11186,36 @@ static void drawer_path(char *out, size_t n)
 	}
 }
 
-static void drawer_save(struct desk_server *server)
+/* The file a drawer's floor is kept in: the desk's drawer's felt in
+ * "drawer", as it always was; another screen's in "drawer@NAME"; and the
+ * hollow under a false bottom in the same with ".hidden" after it. */
+static void drawer_file(const char *screen, int floor, char *out, size_t n)
+{
+	/* (short enough that the name and floor after it always fit) */
+	char base[400];
+	drawer_path(base, sizeof base);
+	if (!base[0]) {
+		out[0] = '\0';
+		return;
+	}
+	char name[32];
+	snprintf(name, sizeof name, "%s", screen);
+	for (char *c = name; *c; c++) {
+		if (*c == '/' || *c == '.') {
+			*c = '_';
+		}
+	}
+	snprintf(out, n, "%s%s%s%s", base, name[0] ? "@" : "", name, floor ? ".hidden" : "");
+}
+
+/* A drawer's floor kept in its file: what is in it but the sheets folded
+ * into it, which go when their windows do. */
+static bool drawer_write(const char *screen, int floor, const struct drawer_entry *e, int n)
 {
 	char path[512];
-	drawer_path(path, sizeof path);
+	drawer_file(screen, floor, path, sizeof path);
 	if (!path[0]) {
-		return;
+		return false;
 	}
 	conf_dirs_for(path);
 	char tmp[600];
@@ -11072,18 +11223,17 @@ static void drawer_save(struct desk_server *server)
 	FILE *f = fopen(tmp, "we");
 	if (!f) {
 		wlr_log(WLR_ERROR, "cannot keep what is in the drawer in %s", tmp);
-		return;
+		return false;
 	}
 	fprintf(f, "# DEsk's drawer (2). What is in it, in order: \"thing <terminal | browser |\n"
 		"# files | editor>\" (DEsk's standard program for it, whichever that is),\n"
 		"# \"app <desktop file id>\", or \"panel\" (the screwdriver: Shell Settings).\n");
-	for (int i = 0; i < server->drw_n; i++) {
-		const struct drawer_entry *e = &server->drw[i];
-		if (e->kind == DRAWER_APP) {
-			fprintf(f, "app %s\n", e->id);
-		} else if (e->kind == DRAWER_STD) {
-			fprintf(f, "thing %s\n", desk_std_name(e->std));
-		} else if (e->kind == DRAWER_PANEL) {
+	for (int i = 0; i < n; i++) {
+		if (e[i].kind == DRAWER_APP) {
+			fprintf(f, "app %s\n", e[i].id);
+		} else if (e[i].kind == DRAWER_STD) {
+			fprintf(f, "thing %s\n", desk_std_name(e[i].std));
+		} else if (e[i].kind == DRAWER_PANEL) {
 			fprintf(f, "panel\n");
 		}
 	}
@@ -11092,9 +11242,79 @@ static void drawer_save(struct desk_server *server)
 	if (!ok || rename(tmp, path) != 0) {
 		wlr_log(WLR_ERROR, "cannot keep what is in the drawer in %s", path);
 		unlink(tmp);
-		return;
+		return false;
 	}
-	server->drw_default = false;
+	return true;
+}
+
+/* The drawer out just now, kept. */
+static void drawer_save(struct desk_server *server)
+{
+	if (drawer_write(server->drw_key, server->drw_floor, server->drw, server->drw_n)) {
+		server->drw_default = false;
+	}
+}
+
+/* What a drawer's file says is in it, into e (n of them): false if there
+ * is no such file. two: it was written by a DEsk with standard programs. */
+static bool drawer_read(const char *path, struct drawer_entry *e, int *n, bool *two)
+{
+	*n = 0;
+	*two = false;
+	FILE *f = path[0] ? fopen(path, "re") : NULL;
+	if (!f) {
+		return false;
+	}
+	char line[256];
+	while (fgets(line, sizeof line, f) && *n < DRAWER_MAX) {
+		/* (DeskWM and [DE]sk: the names DEsk went by when it wrote some
+		 * of these) */
+		if (!strncmp(line, "# DEsk's drawer (2)", 19) || !strncmp(line, "# [DE]sk's drawer (2)", 21)
+			|| !strncmp(line, "# DeskWM's drawer (2)", 21)) {
+			*two = true;
+		}
+		char *s = line;
+		while (*s == ' ' || *s == '\t') {
+			s++;
+		}
+		size_t len = strlen(s);
+		while (len > 0 && (s[len - 1] == '\n' || s[len - 1] == '\r' || s[len - 1] == ' '
+				|| s[len - 1] == '\t')) {
+			s[--len] = '\0';
+		}
+		struct drawer_entry one = { 0 };
+		if (strcmp(s, "panel") == 0) {
+			one.kind = DRAWER_PANEL;
+			one.present = true;
+		} else if (strncmp(s, "thing", 5) == 0 && (s[5] == ' ' || s[5] == '\t')) {
+			const char *name = s + 6;
+			while (*name == ' ' || *name == '\t') {
+				name++;
+			}
+			one.std = desk_std_parse(name);
+			if (one.std < 0) {
+				continue;
+			}
+			one.kind = DRAWER_STD;
+		} else if (strncmp(s, "app", 3) == 0 && (s[3] == ' ' || s[3] == '\t')) {
+			const char *id = s + 4;
+			while (*id == ' ' || *id == '\t') {
+				id++;
+			}
+			if (!*id) {
+				continue;
+			}
+			one.kind = DRAWER_APP;
+			snprintf(one.id, sizeof one.id, "%s", id);
+		} else {
+			continue;
+		}
+		one.fit = one.fit_to = 1.0;
+		e[*n] = one;
+		(*n)++;
+	}
+	fclose(f);
+	return true;
 }
 
 static void drawer_load(struct desk_server *server)
@@ -11106,65 +11326,20 @@ static void drawer_load(struct desk_server *server)
 	server->drw_hover = -1;
 	server->drw_press = -1;
 	server->drw_carry_from = -1;
+	server->drw_key[0] = '\0';
+	server->drw_at[0] = '\0';
+	server->drw_floor = 0;
 	char path[512];
-	drawer_path(path, sizeof path);
-	FILE *f = path[0] ? fopen(path, "re") : NULL;
-	if (!f) {
+	drawer_file("", 0, path, sizeof path);
+	bool two;
+	if (!drawer_read(path, server->drw, &server->drw_n, &two)) {
 		return;
 	}
 	server->drw_default = false;
 	/* one kept before there were standard programs: its first program of
 	 * each kind was what that thing in the drawer opened, so that is what
 	 * it is turned into (drawer_match) */
-	server->drw_migrate = true;
-	char line[256];
-	while (fgets(line, sizeof line, f) && server->drw_n < DRAWER_MAX) {
-		/* (DeskWM and [DE]sk: the names DEsk went by when it wrote some
-		 * of these) */
-		if (!strncmp(line, "# DEsk's drawer (2)", 19) || !strncmp(line, "# [DE]sk's drawer (2)", 21)
-			|| !strncmp(line, "# DeskWM's drawer (2)", 21)) {
-			server->drw_migrate = false;
-		}
-		char *s = line;
-		while (*s == ' ' || *s == '\t') {
-			s++;
-		}
-		size_t len = strlen(s);
-		while (len > 0 && (s[len - 1] == '\n' || s[len - 1] == '\r' || s[len - 1] == ' '
-				|| s[len - 1] == '\t')) {
-			s[--len] = '\0';
-		}
-		struct drawer_entry e = { 0 };
-		if (strcmp(s, "panel") == 0) {
-			e.kind = DRAWER_PANEL;
-			e.present = true;
-		} else if (strncmp(s, "thing", 5) == 0 && (s[5] == ' ' || s[5] == '\t')) {
-			const char *name = s + 6;
-			while (*name == ' ' || *name == '\t') {
-				name++;
-			}
-			e.std = desk_std_parse(name);
-			if (e.std < 0) {
-				continue;
-			}
-			e.kind = DRAWER_STD;
-		} else if (strncmp(s, "app", 3) == 0 && (s[3] == ' ' || s[3] == '\t')) {
-			const char *id = s + 4;
-			while (*id == ' ' || *id == '\t') {
-				id++;
-			}
-			if (!*id) {
-				continue;
-			}
-			e.kind = DRAWER_APP;
-			snprintf(e.id, sizeof e.id, "%s", id);
-		} else {
-			continue;
-		}
-		e.fit = e.fit_to = 1.0;
-		server->drw[server->drw_n++] = e;
-	}
-	fclose(f);
+	server->drw_migrate = !two;
 }
 
 static int drawer_shown(const struct desk_server *server)
@@ -11355,7 +11530,7 @@ static void drawer_compose(struct desk_server *server)
 		return;
 	}
 	/* nothing of it shows with the drawer in: it is drawn as it comes out */
-	if (server->drawer_t <= 0.004 && !(server->drawer_moving && server->drawer_to > 0.5)) {
+	if (server->drw_open <= 0.004 && !(server->drawer_moving && server->drawer_to > 0.5)) {
 		return;
 	}
 	drawer_match(server);
@@ -11384,7 +11559,7 @@ static void drawer_compose(struct desk_server *server)
 	/* as fine as the sheet is shown: magnified to the screen, and the
 	 * screen's own pixels finer than its points */
 	double zoom, pan, t;
-	desk_room_view(server->drawer_t, &sh, &zoom, &pan, &t);
+	desk_room_view(server->drw_open, &sh, &zoom, &pan, &t);
 	int ow, oh;
 	desk_overlay_size(w, h, &ow, &oh);
 	double res = clampf_d((double)(int)(h * zoom + 0.5) / sh.h * ow / w, 1.0, 4.0);
@@ -11394,7 +11569,65 @@ static void drawer_compose(struct desk_server *server)
 	cairo_save(buf->cr);
 	cairo_scale(buf->cr, res, res);
 	cairo_translate(buf->cr, -server->drw_box[0], -server->drw_box[1]);
-	desk_drawer_paint_items(buf->cr, w, h, items, n, xs, fits, hover);
+	if (!drawer_fb_on(server)) {
+		desk_drawer_paint_items(buf->cr, w, h, items, n, xs, fits, hover);
+	} else if (server->fb_t <= 0.0 && server->drw_floor == 0) {
+		/* the board down: only its ring shows it is one, under what is on it */
+		desk_drawer_paint_board(buf->cr, w, h, 0.0, server->fb_hot);
+		desk_drawer_paint_items(buf->cr, w, h, items, n, xs, fits, hover);
+	} else {
+		/* The board going back, or back: the hollow and what is in it,
+		 * then the board, what lies on the felt going with it. One floor
+		 * is drw[] (the one the hand reaches), the other waits kept. */
+		struct drawer_list *other = drawer_list_of(server, server->drw_key,
+			1 - server->drw_floor);
+		static struct desk_drawer_item oitems[DRAWER_MAX];
+		double oxs[DRAWER_MAX], ofits[DRAWER_MAX];
+		int on = 0;
+		if (other) {
+			int shown = 0;
+			for (int i = 0; i < other->n; i++) {
+				struct drawer_entry *e = &other->e[i];
+				if (e->kind == DRAWER_APP) {
+					e->present = desk_apps_find(l, e->id) != NULL;
+				} else if (e->kind == DRAWER_STD) {
+					e->present = desk_apps_for_std(l, e->std) != NULL;
+				}
+				shown += e->present;
+			}
+			for (int i = 0; i < other->n; i++) {
+				const struct drawer_entry *e = &other->e[i];
+				if (!e->present) {
+					continue;
+				}
+				drawer_item_of(server, l, e, &oitems[on]);
+				oxs[on] = desk_drawer_slot_x(on, shown);
+				ofits[on] = desk_drawer_fit(shown);
+				on++;
+			}
+		}
+		bool below = server->drw_floor == 1;
+		desk_drawer_paint_hollow(buf->cr, w, h);
+		if (below) {
+			desk_drawer_paint_items(buf->cr, w, h, items, n, xs, fits, hover);
+		} else {
+			desk_drawer_paint_items(buf->cr, w, h, oitems, on, oxs, ofits, -1);
+		}
+		desk_drawer_paint_board(buf->cr, w, h, server->fb_t, server->fb_hot);
+		double felt[4];
+		if (desk_drawer_felt_box(w, h, felt)) {
+			cairo_save(buf->cr);
+			cairo_rectangle(buf->cr, felt[0], felt[1], felt[2], felt[3]);
+			cairo_clip(buf->cr);
+			cairo_translate(buf->cr, 0, -desk_drawer_board_shift(w, h, server->fb_t));
+			if (below) {
+				desk_drawer_paint_items(buf->cr, w, h, oitems, on, oxs, ofits, -1);
+			} else {
+				desk_drawer_paint_items(buf->cr, w, h, items, n, xs, fits, hover);
+			}
+			cairo_restore(buf->cr);
+		}
+	}
 	cairo_restore(buf->cr);
 	desk_apps_release(l);
 	scene_put(&server->drw_node, server->layer_drawer, buf, 0, 0,
@@ -11402,6 +11635,18 @@ static void drawer_compose(struct desk_server *server)
 	wlr_scene_node_raise_to_top(&server->drw_node->node);
 	prof_end();
 	room_layout(server);
+}
+
+/* The false bottom's ring under the hand, or not: it catches the light. */
+static void fb_hot_to(struct desk_server *server, bool hot)
+{
+	if (hot == server->fb_hot) {
+		return;
+	}
+	server->fb_hot = hot;
+	server->drw_dirty = true;
+	drawer_compose(server);
+	wlr_cursor_set_xcursor(server->cursor, server->cursor_mgr, hot ? "pointer" : "default");
 }
 
 static void drawer_hover_to(struct desk_server *server, int hover)
@@ -11418,10 +11663,10 @@ static void drawer_hover_to(struct desk_server *server, int hover)
  * or not. */
 static int drawer_entry_at(struct desk_server *server, double px, double py)
 {
-	double x;
+	double x, lx, ly;
 	bool row;
-	if (server->drawer_t < 0.35
-		|| !desk_drawer_at(server->desk_w, server->desk_h, server->drawer_t, px, py, &x, &row)
+	if (server->drw_open < 0.35 || server->fb_moving || !drawer_local(server, px, py, &lx, &ly)
+		|| !desk_drawer_at(server->desk_w, server->desk_h, server->drw_open, lx, ly, &x, &row)
 		|| !row) {
 		return -1;
 	}
@@ -11542,10 +11787,389 @@ static void drawer_keep_app(struct desk_server *server, const char *id, bool kee
 	drawer_save(server);
 }
 
+/* ---- more than one drawer -------------------------------------------
+ *
+ * The drawer comes out at the foot of whichever screen it is opened from:
+ * the desk's own, under the desk, or one beside it, where it is laid the
+ * way it is under the desk's (drawer_side_frame) and pushes the paper on
+ * that screen up as it comes. One drawer, shared, has the same things in
+ * it wherever it comes out; with a drawer for each screen (drawers =
+ * each) each has its own, kept by the screen's name. Any of them may have
+ * a false bottom (false_bottom): a ring in the felt slides it back, and
+ * under it is a hollow with things of its own. One is out at a time, and
+ * what is in it is drw[]; the rest wait in drw_keep. */
+
+/* Is a drawer to have a false bottom: the one shared, or the one at the
+ * foot of the screen named key ("" the desk's)? */
+static bool drawer_fb_wanted(const struct desk_server *server, const char *key)
+{
+	const char *v = server->conf.false_bottom;
+	if (!v[0] || !strcasecmp(v, "off") || !strcasecmp(v, "none")) {
+		return false;
+	}
+	if (!server->conf.drawer_each || !strcasecmp(v, "all")) {
+		return true;
+	}
+	char buf[128];
+	snprintf(buf, sizeof buf, "%s", v);
+	char *save = NULL;
+	for (char *t = strtok_r(buf, ", \t", &save); t; t = strtok_r(NULL, ", \t", &save)) {
+		if ((!strcasecmp(t, "desk") && !key[0]) || (!strcasecmp(t, "side") && key[0])
+			|| (key[0] && !strcmp(t, key))) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool drawer_fb_on(const struct desk_server *server)
+{
+	return drawer_fb_wanted(server, server->drw_key);
+}
+
+static struct drawer_keep *drawer_keep_of(struct desk_server *server, const char *screen)
+{
+	for (int i = 0; i < server->drw_keep_n; i++) {
+		if (!strcmp(server->drw_keep[i].screen, screen)) {
+			return &server->drw_keep[i];
+		}
+	}
+	if (server->drw_keep_n >= DRAWER_KEEPS) {
+		return NULL;   /* more screens than that: they share the desk's */
+	}
+	struct drawer_keep *k = &server->drw_keep[server->drw_keep_n++];
+	memset(k, 0, sizeof *k);
+	snprintf(k->screen, sizeof k->screen, "%s", screen);
+	return k;
+}
+
+/* A drawer's floor, read from its file the first time it is wanted: a new
+ * drawer at a screen's foot comes with what a new one under the desk does
+ * (drawer_match), a hollow under a false bottom comes empty. */
+static struct drawer_list *drawer_list_of(struct desk_server *server, const char *screen,
+	int floor)
+{
+	struct drawer_keep *k = drawer_keep_of(server, screen);
+	if (!k) {
+		return NULL;
+	}
+	struct drawer_list *l = &k->floor[floor];
+	if (!k->read[floor]) {
+		k->read[floor] = true;
+		char path[512];
+		bool two;
+		drawer_file(screen, floor, path, sizeof path);
+		l->fresh = !drawer_read(path, l->e, &l->n, &two) && floor == 0;
+	}
+	return l;
+}
+
+/* Make the floor of the drawer whose it is (screen) the one in drw[],
+ * the one there kept -- in its file too, for whatever was carried out of
+ * it into another. */
+static void drawer_switch(struct desk_server *server, const char *whose, int floor)
+{
+	/* (a copy: whose may be drw_key itself, which is written below) */
+	char screen[sizeof server->drw_key];
+	snprintf(screen, sizeof screen, "%s", whose);
+	if (!strcmp(screen, server->drw_key) && floor == server->drw_floor) {
+		return;
+	}
+	struct drawer_keep *from = drawer_keep_of(server, server->drw_key);
+	if (!from || !drawer_keep_of(server, screen)) {
+		return;
+	}
+	if (!server->drw_default) {
+		drawer_save(server);
+	}
+	struct drawer_list *was = &from->floor[server->drw_floor];
+	from->read[server->drw_floor] = true;
+	memcpy(was->e, server->drw, (size_t)server->drw_n * sizeof server->drw[0]);
+	was->n = server->drw_n;
+	was->fresh = server->drw_default;
+	struct drawer_list *now = drawer_list_of(server, screen, floor);
+	memcpy(server->drw, now->e, (size_t)now->n * sizeof server->drw[0]);
+	server->drw_n = now->n;
+	server->drw_default = now->fresh;
+	/* it is in drw[] now, not here: nothing of it is kept twice (a sheet's
+	 * packet least of all) */
+	now->n = 0;
+	snprintf(server->drw_key, sizeof server->drw_key, "%s", screen);
+	server->drw_floor = floor;
+	server->drw_hover = -1;
+	server->drw_press = -1;
+	server->drw_gap = -1;
+	server->drw_gen = UINT_MAX;   /* which of its programs are there, again */
+	drawer_match(server);
+	server->drw_dirty = true;
+}
+
+/* A sheet is gone: out of every drawer it is waiting in, too. */
+static void drawer_forget_kept(struct desk_server *server, const struct desk_sheet *sheet)
+{
+	for (int k = 0; k < server->drw_keep_n; k++) {
+		for (int f = 0; f < 2; f++) {
+			struct drawer_list *l = &server->drw_keep[k].floor[f];
+			for (int i = 0; i < l->n; i++) {
+				if (l->e[i].kind != DRAWER_SHEET || l->e[i].sheet != sheet) {
+					continue;
+				}
+				if (l->e[i].packet) {
+					cairo_surface_destroy(l->e[i].packet);
+				}
+				memmove(&l->e[i], &l->e[i + 1], (size_t)(l->n - i - 1) * sizeof l->e[0]);
+				l->n--;
+				i--;
+			}
+		}
+	}
+}
+
+/* The screen the drawer is out on, or comes out on next: the desk's own,
+ * or the one beside it named drw_at -- or, that one gone, the desk's. */
+static struct wlr_output *drawer_screen(struct desk_server *server)
+{
+	if (server->drw_at[0]) {
+		struct desk_output *o;
+		wl_list_for_each(o, &server->outputs, link) {
+			if (!o->off && !strcmp(o->wlr_output->name, server->drw_at)
+				&& screen_is_side(server, o->wlr_output)) {
+				return o->wlr_output;
+			}
+		}
+	}
+	return first_output(server);
+}
+
+/* Where the drawer's frame is -- the desk's screen's, which everything
+ * about the drawer is measured in -- with it at the foot of a screen
+ * beside the desk's: that screen's box, and the frame's corner, centred
+ * across it with its foot on the screen's foot. False with it under the
+ * desk, where the frame is the desk's screen. */
+static bool drawer_side_frame(struct desk_server *server, struct wlr_box *box, double *fx,
+	double *fy)
+{
+	struct wlr_output *out = drawer_screen(server);
+	if (!screen_is_side(server, out) || server->desk_w < 8 || server->desk_h < 8) {
+		return false;
+	}
+	wlr_output_layout_get_box(server->output_layout, out, box);
+	if (wlr_box_empty(box)) {
+		return false;
+	}
+	*fx = box->x + floor((box->width - server->desk_w) * 0.5);
+	*fy = box->y + box->height - server->desk_h;
+	return true;
+}
+
+/* A point in the drawer's frame; false if it is not on the screen the
+ * drawer is at. */
+static bool drawer_local(struct desk_server *server, double px, double py, double *x, double *y)
+{
+	struct wlr_box box;
+	double fx, fy;
+	if (!drawer_side_frame(server, &box, &fx, &fy)) {
+		*x = px;
+		*y = py;
+		return !screen_is_side(server, screen_at(server, px, py));
+	}
+	*x = px - fx;
+	*y = py - fy;
+	return screen_at(server, px, py) == drawer_screen(server);
+}
+
+/* How far up the paper on the screen beside the desk's the drawer is out
+ * on is pushed: as far as drawer_lift pushes the desk's. */
+static int drawer_side_lift(struct desk_server *server)
+{
+	struct wlr_box box;
+	double fx, fy;
+	int w = server->desk_w, h = server->desk_h;
+	int ox0, oy0, ox1, oy1;
+	double c0, c1;
+	if (server->drw_open <= 0.0005 || !drawer_side_frame(server, &box, &fx, &fy)
+		|| !desk_desk_place(w, h, 0.0, &ox0, &oy0, &c0)
+		|| !desk_desk_place(w, h, server->drw_open, &ox1, &oy1, &c1)) {
+		return 0;
+	}
+	return oy1 - oy0;
+}
+
+/* The desk's screen's share of how far out the drawer is: all of it with
+ * the drawer under the desk, none with it beside. */
+static void drawer_share(struct desk_server *server)
+{
+	struct wlr_box box;
+	double fx, fy;
+	server->drawer_t = drawer_side_frame(server, &box, &fx, &fy) ? 0.0 : server->drw_open;
+}
+
+/* The drawer at the foot of out from now on -- what is in it too, with a
+ * drawer for each screen. Only while it is in. */
+static void drawer_set_at(struct desk_server *server, const char *at)
+{
+	snprintf(server->drw_at, sizeof server->drw_at, "%s", at);
+	drawer_switch(server, server->conf.drawer_each ? at : "", 0);
+	drawer_share(server);
+	room_layout(server);
+	overlay_place(server);
+}
+
+/* Out at the foot of out: from there, if it is there already; home first
+ * from wherever else it is out, and then out there. */
+static void drawer_open_on(struct desk_server *server, struct wlr_output *out)
+{
+	const char *at = screen_is_side(server, out) ? out->name : "";
+	bool is_out = server->drawer_moving ? server->drawer_to > 0.5 : server->drw_open > 0.5;
+	if (!strcmp(at, server->drw_at) || (!at[0] && !screen_is_side(server, drawer_screen(server)))) {
+		if (!is_out) {
+			drawer_toggle(server);
+		}
+		return;
+	}
+	if (server->drw_open > 0.0005 || server->drawer_moving) {
+		snprintf(server->drw_next, sizeof server->drw_next, "%s", at);
+		server->drw_next_on = true;
+		if (is_out) {
+			drawer_toggle(server);
+		}
+		return;
+	}
+	drawer_set_at(server, at);
+	drawer_toggle(server);
+}
+
+/* Super+D: out on the screen the pointer is on, or in if it is out there. */
+static void drawer_here(struct desk_server *server)
+{
+	struct wlr_output *out = screen_at(server, server->cursor->x, server->cursor->y);
+	bool is_out = server->drawer_moving ? server->drawer_to > 0.5 : server->drw_open > 0.5;
+	if (is_out && out == drawer_screen(server)) {
+		drawer_toggle(server);
+		return;
+	}
+	drawer_open_on(server, out);
+}
+
+/* In at once, under the desk: its screen has gone, or which drawers there
+ * are has changed (Shell Settings). */
+static void drawer_snap_home(struct desk_server *server)
+{
+	server->drawer_moving = 0;
+	server->drw_open = 0.0;
+	server->drawer_t = 0.0;
+	server->drw_next_on = false;
+	desk_sound_stop(server->snd_drawer, 0.04);
+	server->snd_drawer = 0;
+	server->fb_t = server->fb_to = server->fb_from = 0.0;
+	server->fb_moving = false;
+	drawer_set_at(server, "");
+	server->drw_dirty = true;
+	fullscreen_layer_order(server);
+	server_schedule_frames(server);
+}
+
+/* Shell Settings changed: one drawer or one for each screen, and which
+ * have a false bottom. A drawer that has lost its false bottom has the
+ * felt's things on top (what is in the hollow waits in its file). */
+static void drawer_conf_apply(struct desk_server *server)
+{
+	static int each = -1;
+	if (each >= 0 && each != (int)server->conf.drawer_each) {
+		drawer_snap_home(server);
+		drawer_switch(server, "", 0);
+	}
+	each = server->conf.drawer_each;
+	if (server->drw_floor == 1 && !drawer_fb_on(server)) {
+		server->fb_t = server->fb_to = server->fb_from = 0.0;
+		server->fb_moving = false;
+		drawer_switch(server, server->drw_key, 0);
+	}
+	server->drw_dirty = true;
+	drawer_compose(server);
+}
+
+/* Home: the false bottom's board goes down, the felt's things on top
+ * again; and out on the screen it was asked for on meanwhile. */
+static void drawer_home(struct desk_server *server)
+{
+	server->fb_t = server->fb_to = server->fb_from = 0.0;
+	server->fb_moving = false;
+	server->fb_hot = false;
+	drawer_switch(server, server->drw_key, 0);
+	if (server->drw_next_on) {
+		server->drw_next_on = false;
+		drawer_set_at(server, server->drw_next);
+		drawer_toggle(server);
+	}
+}
+
+/* The ring pulled: the board slides back, or comes forward again. What
+ * the hand can reach is what is on top -- the hollow's things as soon as
+ * the board starts to go, the felt's as soon as it starts back. */
+#define FB_SLIDE_S 0.46
+static void fb_toggle(struct desk_server *server)
+{
+	bool up = server->fb_moving ? server->fb_to < 0.5 : server->fb_t < 0.5;
+	server->fb_from = server->fb_t;
+	server->fb_to = up ? 1.0 : 0.0;
+	server->fb_start = monotonic_sec();
+	server->fb_moving = true;
+	drawer_switch(server, server->drw_key, up ? 1 : 0);
+	snd_at(server, DESK_SND_FELT_PICK, server->cursor->x, 0.9);
+	server->drw_dirty = true;
+	drawer_compose(server);
+	server_schedule_frames(server);
+}
+
+static void fb_tick(struct desk_server *server)
+{
+	if (!server->fb_moving) {
+		return;
+	}
+	double dur = FB_SLIDE_S * fmax(fabs(server->fb_to - server->fb_from), 0.3);
+	double u = clampf_d((monotonic_sec() - server->fb_start) / dur, 0, 1);
+	server->fb_t = server->fb_from + (server->fb_to - server->fb_from) * drawer_ease(u);
+	if (u >= 1.0) {
+		server->fb_t = server->fb_to;
+		server->fb_moving = false;
+		snd_at(server, DESK_SND_FELT_DROP, server->cursor->x, 0.7);
+	}
+	server->drw_dirty = true;
+	drawer_compose(server);
+	if (server->fb_moving) {
+		server_schedule_frames(server);
+	}
+}
+
+/* Is a point on the ring of the drawer out (one with a false bottom)? */
+static bool fb_ring_under(struct desk_server *server, double px, double py)
+{
+	double x, y;
+	return drawer_fb_on(server) && server->drw_open > 0.9
+		&& drawer_local(server, px, py, &x, &y)
+		&& desk_drawer_ring_at(server->desk_w, server->desk_h, server->drw_open,
+			server->fb_t, x, y);
+}
+
+/* Is a point on the pull of a shut drawer at the foot of a screen beside
+ * the desk's (on the desk's, desk_drawer_handle_hit)? */
+static bool drawer_side_pull_at(struct desk_server *server, double px, double py)
+{
+	struct wlr_output *out = screen_at(server, px, py);
+	struct wlr_box box;
+	if (!screen_is_side(server, out) || server->desk_w < 8 || server->desk_h < 8) {
+		return false;
+	}
+	wlr_output_layout_get_box(server->output_layout, out, &box);
+	return !wlr_box_empty(&box) && py >= box.y + box.height
+		- desk_drawer_pull_h(server->desk_w, server->desk_h) && py < box.y + box.height;
+}
+
 /* In or out, from wherever it has got to. */
 static void drawer_move_to(struct desk_server *server, double to)
 {
-	bool out = server->drawer_moving ? server->drawer_to > 0.5 : server->drawer_t > 0.5;
+	bool out = server->drawer_moving ? server->drawer_to > 0.5 : server->drw_open > 0.5;
 	if (out != (to > 0.5)) {
 		drawer_toggle(server);
 	}
@@ -11577,22 +12201,30 @@ static void drawer_lift_sheet(struct desk_server *server, int i)
 {
 	struct desk_sheet *s = server->drw[i].sheet;
 	double sx = 0.0, sy = 0.0;
-	bool there = server->drawer_t > 0.05 && desk_drawer_point(server->desk_w,
-		server->desk_h, server->drawer_t, server->drw[i].x, &sx, &sy);
+	bool there = server->drw_open > 0.05 && desk_drawer_point(server->desk_w,
+		server->desk_h, server->drw_open, server->drw[i].x, &sx, &sy);
+	/* on the screen the drawer is out on: from its frame to the screens' */
+	struct wlr_output *on = drawer_screen(server);
+	struct wlr_box sbox;
+	double fx, fy;
+	if (drawer_side_frame(server, &sbox, &fx, &fy)) {
+		sx += fx;
+		sy += fy;
+	}
 	drawer_remove(server, i, NULL);
 	drawer_layout(server, false);
 	if (!s) {
 		return;
 	}
 	s->in_drawer = false;
-	s->slot = sheet_alloc_slot(server);
+	s->slot = sheet_alloc_slot(server, on, s);
 	int ow, oh, pad;
 	desk_fold_extent(s->fold, 1.0, &ow, &oh, &pad);
 	if (there) {
 		s->x1 = sx - server->layer_parked->node.x - ow * 0.5;
 		s->y1 = sy - server->layer_parked->node.y - oh * 0.5;
 	} else {
-		sheet_slot_xy(server, s->slot, ow, oh, &s->x1, &s->y1);
+		sheet_slot_xy(server, on, s->slot, ow, oh, &s->x1, &s->y1);
 	}
 	sheet_present(server, s, 1.0, s->x1, s->y1);
 }
@@ -11611,11 +12243,31 @@ static int drawer_index_of(struct desk_server *server, const struct desk_sheet *
  * drawer full, it is put down on the desk as any other.) */
 static void drawer_put_in(struct desk_server *server, struct desk_sheet *sheet)
 {
+	/* With a drawer for each screen, the one at the foot of the screen it
+	 * was folded on -- waiting kept, if it is not the one out just now. */
+	struct wlr_output *on = sheet_screen(server, sheet);
+	const char *key = server->conf.drawer_each && screen_is_side(server, on) ? on->name : "";
+	if (strcmp(key, server->drw_key) || server->drw_floor != 0) {
+		struct drawer_list *kept = drawer_list_of(server, key, 0);
+		if (kept && kept->n < DRAWER_MAX && sheet->fold) {
+			struct drawer_entry e = { .kind = DRAWER_SHEET, .sheet = sheet, .present = true,
+				.fit = 1.0, .fit_to = 1.0 };
+			e.packet = desk_fold_packet(sheet->fold);
+			kept->e[kept->n++] = e;
+			sheet->in_drawer = true;
+			sheet->slot = -1;
+			if (sheet->tree) {
+				wlr_scene_node_set_enabled(&sheet->tree->node, false);
+			}
+			return;
+		}
+	}
 	if (server->drw_n >= DRAWER_MAX || drawer_index_of(server, sheet) >= 0 || !sheet->fold) {
 		int ow, oh, pad;
 		desk_fold_extent(sheet->fold, 1.0, &ow, &oh, &pad);
-		sheet->slot = sheet_alloc_slot(server);
-		sheet_slot_xy(server, sheet->slot, ow, oh, &sheet->x1, &sheet->y1);
+		sheet->slot = sheet_alloc_slot(server, first_output(server), sheet);
+		sheet_slot_xy(server, first_output(server), sheet->slot, ow, oh,
+			&sheet->x1, &sheet->y1);
 		sheet_present(server, sheet, 1.0, sheet->x1, sheet->y1);
 		return;
 	}
@@ -11738,23 +12390,37 @@ static void drawer_carry_move(struct desk_server *server)
 	int w = server->desk_w, h = server->desk_h;
 	double cx = server->cursor->x, cy = server->cursor->y;
 	struct drawer_entry *c = &server->drw_carry;
-	/* a packet carried to the shut drawer's pull: it comes out for it
-	 * (not for one only being moved about the desk with the right button) */
+	/* a packet carried to the pull of a screen's shut drawer: it comes out
+	 * for it, at the foot of that screen (not for one only being moved
+	 * about the desk with the right button) */
+	struct wlr_output *at = screen_at(server, cx, cy);
+	struct wlr_box abox = { 0 };
+	wlr_output_layout_get_box(server->output_layout, at, &abox);
+	bool is_out = server->drawer_moving ? server->drawer_to > 0.5 : server->drw_open > 0.5;
 	if (c->kind == DRAWER_SHEET && !server->drw_sprung && server->drw_button != BTN_RIGHT
-		&& cy >= h - desk_drawer_pull_h(w, h) - 6
-		&& !(server->drawer_moving ? server->drawer_to > 0.5 : server->drawer_t > 0.5)) {
+		&& !wlr_box_empty(&abox) && cy >= abox.y + abox.height - desk_drawer_pull_h(w, h) - 6
+		&& !(is_out && at == drawer_screen(server))) {
 		server->drw_sprung = true;
-		drawer_move_to(server, 1.0);
+		drawer_open_on(server, at);
 	}
-	double x = 0.0;
+	double x = 0.0, lx, ly;
 	bool row;
-	bool over = desk_drawer_at(w, h, server->drawer_t, cx, cy, &x, &row);
+	bool over = !server->fb_moving && drawer_local(server, cx, cy, &lx, &ly)
+		&& desk_drawer_at(w, h, server->drw_open, lx, ly, &x, &row);
 	int gap = -1;
 	if (over) {
 		gap = drawer_gap_for(server, x);
 	} else if (c->kind == DRAWER_PANEL) {
 		/* the screwdriver cannot be taken out: its place stays open for it */
 		gap = server->drw_carry_from;
+	}
+	/* over the false bottom's ring, it catches the light: let go there,
+	 * what is carried goes through to the other floor */
+	bool ring = fb_ring_under(server, cx, cy);
+	fb_hot_to(server, ring);
+	if (ring) {
+		over = false;
+		gap = -1;
 	}
 	server->drw_over = over;
 	if (gap != server->drw_gap) {
@@ -11770,16 +12436,46 @@ static void drawer_drop(struct desk_server *server)
 	struct drawer_entry c = server->drw_carry;
 	int w = server->desk_w, h = server->desk_h;
 	double cx = server->cursor->x, cy = server->cursor->y;
-	double x = 0.0;
+	double x = 0.0, lx, ly;
 	bool row;
-	bool over = server->drw_over
-		&& desk_drawer_at(w, h, server->drawer_t, cx, cy, &x, &row);
+	bool over = server->drw_over && drawer_local(server, cx, cy, &lx, &ly)
+		&& desk_drawer_at(w, h, server->drw_open, lx, ly, &x, &row);
 	int gap = server->drw_gap;
 	server->drw_carrying = false;
 	server->drw_carry = (struct drawer_entry){ 0 };
 	server->drw_gap = -1;
 	bool keep = false;
 	struct desk_sheet *s = c.kind == DRAWER_SHEET ? c.sheet : NULL;
+	/* Let go on the false bottom's ring: it slips through to the other
+	 * floor -- under the felt, or up onto it from the hollow -- at the end
+	 * of what is there. */
+	struct drawer_list *through = fb_ring_under(server, cx, cy)
+		? drawer_list_of(server, server->drw_key, 1 - server->drw_floor) : NULL;
+	if (through && through->n < DRAWER_MAX) {
+		snd_at(server, DESK_SND_FELT_DROP, cx, 0.8);
+		c.x = 0.0;
+		c.fit = c.fit_to = 1.0;
+		through->e[through->n++] = c;
+		through->fresh = false;
+		if (s) {
+			s->in_drawer = true;
+			s->slot = -1;
+			if (s->tree) {
+				wlr_scene_node_set_enabled(&s->tree->node, false);
+				wlr_scene_node_reparent(&s->tree->node, server->layer_parked);
+			}
+		}
+		if (server->drw_carry_node) {
+			wlr_scene_node_set_enabled(&server->drw_carry_node->node, false);
+		}
+		drawer_write(server->drw_key, 1 - server->drw_floor, through->e, through->n);
+		/* and the floor it came off, without it */
+		drawer_save(server);
+		drawer_layout(server, false);
+		drawer_compose(server);
+		server_schedule_frames(server);
+		return;
+	}
 	/* the drawer full, a packet off the desk does not go in: it is put down
 	 * on the desk where it was let go, as any other */
 	if (over && gap >= 0 && (!s || server->drw_n < DRAWER_MAX)) {
@@ -11812,7 +12508,8 @@ static void drawer_drop(struct desk_server *server)
 		keep = true;
 		server_schedule_frames(server);
 	} else if (s) {
-		/* laid down on the desk where it was let go, inside its edges */
+		/* laid down where it was let go -- on the desk, or on the screen
+		 * beside it the hand is over -- inside that screen's edges */
 		if (c.packet) {
 			cairo_surface_destroy(c.packet);
 		}
@@ -11821,14 +12518,17 @@ static void drawer_drop(struct desk_server *server)
 		}
 		int ow, oh, pad;
 		desk_fold_extent(s->fold, 1.0, &ow, &oh, &pad);
-		struct wlr_box wa = work_area(server);
+		struct wlr_output *out = screen_at(server, cx, cy);
+		struct wlr_output *was = s->in_drawer ? NULL : sheet_screen(server, s);
+		struct wlr_box wa = screen_area(server, out);
 		double lx = cx - server->drw_gx * ow - server->layer_parked->node.x;
 		double ly = cy - server->drw_gy * oh - server->layer_parked->node.y;
 		lx = clampf_d(lx, wa.x, fmax(wa.x, wa.x + wa.width - ow));
 		ly = clampf_d(ly, wa.y, fmax(wa.y, wa.y + wa.height - oh));
 		s->in_drawer = false;
-		if (s->slot < 0) {
-			s->slot = sheet_alloc_slot(server);
+		/* a place along the front of the screen it is on now */
+		if (s->slot < 0 || was != out) {
+			s->slot = sheet_alloc_slot(server, out, s);
 		}
 		if (s->tree) {
 			wlr_scene_node_reparent(&s->tree->node, server->layer_parked);
@@ -11874,6 +12574,7 @@ static void drawer_forget(struct desk_server *server, struct desk_sheet *sheet)
 		drawer_remove(server, i, NULL);
 		drawer_layout(server, false);
 	}
+	drawer_forget_kept(server, sheet);
 	sheet->in_drawer = false;
 }
 
@@ -11934,12 +12635,21 @@ static bool drawer_press(struct desk_server *server, uint32_t button)
 	if (server->drw_carrying || server->drw_press >= 0 || server->drw_press_sheet) {
 		return true;   /* already holding something */
 	}
-	if (post_up(server) || console_up(server) || shelf_up(server)) {
+	/* (a screen beside the desk's is in reach whatever the desk's is
+	 * turned to) */
+	if (!pointer_on_side(server) && (post_up(server) || console_up(server) || shelf_up(server))) {
 		return false;
 	}
 	bool right = button == BTN_RIGHT;
 	double cx = server->cursor->x, cy = server->cursor->y;
-	if (server->drawer_t > 0.004) {
+	double lx, ly;
+	if (server->drw_open > 0.004 && drawer_local(server, cx, cy, &lx, &ly)) {
+		/* the false bottom's ring: the board slides back, or forward */
+		if (!right && fb_ring_under(server, cx, cy)) {
+			fb_toggle(server);
+			server->fb_held = true;
+			return true;
+		}
 		int i = drawer_entry_at(server, cx, cy);
 		if (i >= 0 && (!right || server->drw[i].kind == DRAWER_SHEET)) {
 			server->drw_press = i;
@@ -11948,7 +12658,7 @@ static bool drawer_press(struct desk_server *server, uint32_t button)
 			server->drw_button = button;
 			return true;
 		}
-		if (cy >= drawer_line(server)) {
+		if (ly >= drawer_line(server)) {
 			return false;
 		}
 	}
@@ -11990,6 +12700,10 @@ static bool drawer_motion(struct desk_server *server)
 
 static bool drawer_release(struct desk_server *server)
 {
+	if (server->fb_held) {
+		server->fb_held = false;
+		return true;
+	}
 	bool right = server->drw_button == BTN_RIGHT;
 	server->drw_button = 0;
 	if (server->drw_carrying) {
@@ -12452,6 +13166,25 @@ static bool screens_beside(struct desk_server *server)
  * being all of its picture: cut, when there is a screen beside the desk's,
  * to what of it is on the desk's screen, so that what is beside it is not
  * drawn over. */
+/* A picture laid over x, y, dw by dh, src all of it, cut to what of it is
+ * inside clip (all in the coordinates of the layer it is in). */
+static void lay_within(struct wlr_scene_buffer *b, struct wlr_fbox src, double x, double y,
+	double dw, double dh, struct wlr_box clip)
+{
+	double x0 = fmax(x, clip.x), y0 = fmax(y, clip.y);
+	double x1 = fmin(x + dw, clip.x + clip.width), y1 = fmin(y + dh, clip.y + clip.height);
+	if (dw < 1.0 || dh < 1.0 || x1 - x0 < 1.0 || y1 - y0 < 1.0) {
+		wlr_scene_node_set_enabled(&b->node, false);
+		return;
+	}
+	double kx = src.width / dw, ky = src.height / dh;
+	struct wlr_fbox cut = { src.x + (x0 - x) * kx, src.y + (y0 - y) * ky,
+		(x1 - x0) * kx, (y1 - y0) * ky };
+	scene_source(b, &cut);
+	wlr_scene_buffer_set_dest_size(b, (int)lround(x1 - x0), (int)lround(y1 - y0));
+	wlr_scene_node_set_position(&b->node, (int)lround(x0), (int)lround(y0));
+}
+
 static void desk_screen_lay(struct desk_server *server, struct wlr_scene_buffer *b,
 	struct wlr_fbox src, double x, double y, double dw, double dh, int lx, int ly)
 {
@@ -12495,6 +13228,11 @@ static struct wlr_box screen_area(struct desk_server *server, struct wlr_output 
 		wlr_output_layout_get_box(server->output_layout, out, &box);
 		box.x -= server->desk_dx;
 		box.y -= server->desk_dy + server->win_dy;
+		/* clear of its drawer's pull along the foot, as on the desk's */
+		int pull = desk_drawer_pull_h(server->desk_w, server->desk_h);
+		if (box.height - pull >= 160) {
+			box.height -= pull;
+		}
 	}
 	return wlr_box_empty(&box) ? work_area(server) : box;
 }
@@ -12503,7 +13241,8 @@ static struct wlr_box screen_area(struct desk_server *server, struct wlr_output 
  * its place (desk_follow): nothing to reach for until it is back. */
 static bool paper_moved(const struct desk_server *server)
 {
-	return server->desk_dx != 0 || server->desk_dy != 0 || server->win_dy != 0;
+	return server->desk_dx != 0 || server->desk_dy != 0 || server->win_dy != 0
+		|| server->side_lift != 0;
 }
 
 /* The bare desk on each screen beside the desk's own (layer_side), cut
@@ -12512,6 +13251,30 @@ static bool paper_moved(const struct desk_server *server)
  * changed, or whatever (force) -- as finely as the desk's own overlay is
  * drawn at the level, and as light as the lamp is up. A screen that is
  * not beside the desk any more loses its. */
+/* The room under the desk's front edge on each screen beside the desk's:
+ * on the one the drawer is out on, as much as the boards have gone up
+ * from over it; on the rest, none. */
+static void side_foot_place(struct desk_server *server)
+{
+	struct wlr_output *dout = server->side_lift ? server->side_lift_on : NULL;
+	struct desk_output *o;
+	wl_list_for_each(o, &server->outputs, link) {
+		if (!o->side_foot) {
+			continue;
+		}
+		struct wlr_box b = o->side_box;
+		int up = o->wlr_output == dout ? -server->side_lift : 0;
+		if (up <= 0 || wlr_box_empty(&b)) {
+			wlr_scene_node_set_enabled(&o->side_foot->node, false);
+			continue;
+		}
+		struct wlr_fbox src = { 0, 0, o->side_foot->buffer ? o->side_foot->buffer->width : 0,
+			o->side_foot->buffer ? o->side_foot->buffer->height : 0 };
+		wlr_scene_node_set_enabled(&o->side_foot->node, true);
+		lay_within(o->side_foot, src, b.x, b.y + b.height - up, b.width, o->side_foot_h, b);
+	}
+}
+
 static void side_desks_paint(struct desk_server *server, bool force)
 {
 	if (server->quitting) {
@@ -12534,6 +13297,10 @@ static void side_desks_paint(struct desk_server *server, bool force)
 				o->side = NULL;
 				drew = true;
 			}
+			if (o->side_foot) {
+				wlr_scene_node_destroy(&o->side_foot->node);
+				o->side_foot = NULL;
+			}
 			continue;
 		}
 		if (!force && o->side && o->side_room == room && o->side_level == level
@@ -12546,8 +13313,25 @@ static void side_desks_paint(struct desk_server *server, bool force)
 		int bw = (int)ceil(box.width * k), bh = (int)ceil(box.height * k);
 		struct desk_buf *buf = buf_create(bw, bh);
 		cairo_scale(buf->cr, (double)bw / box.width, (double)bh / box.height);
-		desk_draw_side_desk(buf->cr, box.x, box.y, box.width, box.height, dw, dh);
-		scene_put(&o->side, server->layer_side, buf, box.x, box.y, NULL);
+		desk_draw_side_desk(buf->cr, box.x, box.y, box.width, box.height, dw, dh, true);
+		scene_put(&o->side, server->layer_side, buf, box.x,
+			box.y + (o->wlr_output == server->side_lift_on ? server->side_lift : 0), NULL);
+		/* as much of what is under it as the drawer ever lifts it by */
+		int ox0, oy0, ox1, oy1;
+		double c0, c1;
+		int foot = desk_desk_place(dw, dh, 0.0, &ox0, &oy0, &c0)
+			&& desk_desk_place(dw, dh, 1.08, &ox1, &oy1, &c1) ? abs(oy1 - oy0) + 4 : 0;
+		if (foot > 0) {
+			int fw = (int)ceil(box.width * k), fh = (int)ceil(foot * k);
+			struct desk_buf *fb = buf_create(fw, fh);
+			cairo_scale(fb->cr, (double)fw / box.width, (double)fh / foot);
+			desk_draw_side_foot(fb->cr, box.x, box.width, foot, dw, dh);
+			scene_put(&o->side_foot, server->layer_side, fb, box.x, box.y + box.height, NULL);
+			o->side_foot_h = foot;
+			if (o->side_foot) {
+				wlr_scene_node_lower_to_bottom(&o->side_foot->node);
+			}
+		}
 		if (o->side) {
 			wlr_scene_buffer_set_dest_size(o->side, box.width, box.height);
 			wlr_scene_buffer_set_opacity(o->side, (float)server->side_light);
@@ -12558,6 +13342,7 @@ static void side_desks_paint(struct desk_server *server, bool force)
 		drew = true;
 	}
 	if (drew) {
+		side_foot_place(server);
 		server_schedule_frames(server);
 	}
 }
@@ -12643,8 +13428,39 @@ static void windows_onto_screens(struct desk_server *server)
 		} else {
 			wlr_scene_node_set_position(node, x, y);
 		}
+		/* folded, it opens out to where the window is now */
+		if (view->sheet.phase != SHEET_IDLE) {
+			view->sheet.x0 = node->x;
+			view->sheet.y0 = node->y;
+		}
 		view_sync_shadow(view);
 		view_send_position(view);
+	}
+	/* A sheet folded on a screen that has gone: along the front of the
+	 * nearest one that is there. */
+	wl_list_for_each(view, &server->toplevels, link) {
+		struct desk_sheet *s = &view->sheet;
+		if ((s->phase != SHEET_PARKED && s->phase != SHEET_FOLDING) || s->in_drawer
+			|| s->to_drawer || !s->fold
+			|| (s->tree && s->tree->node.parent == server->layer_drag)) {
+			continue;
+		}
+		int ow, oh, pad;
+		desk_fold_extent(s->fold, 1.0, &ow, &oh, &pad);
+		double mx = s->x1 + ow * 0.5 + server->desk_dx;
+		double my = s->y1 + oh * 0.5 + server->desk_dy + server->win_dy;
+		if (wlr_output_layout_output_at(server->output_layout, mx, my)) {
+			continue;
+		}
+		struct wlr_output *out = screen_at(server, mx, my);
+		if (!out) {
+			continue;
+		}
+		s->slot = sheet_alloc_slot(server, out, s);
+		sheet_slot_xy(server, out, s->slot, ow, oh, &s->x1, &s->y1);
+		if (s->phase == SHEET_PARKED) {
+			sheet_present(server, s, 1.0, s->x1, s->y1);
+		}
 	}
 }
 
@@ -12745,7 +13561,7 @@ static void fullscreen_layer_order(struct desk_server *server)
 			break;
 		}
 	}
-	bool drawer = server->drawer_moving || server->drawer_t > 0.004;
+	bool drawer = server->drawer_moving || server->drw_open > 0.004;
 	struct wlr_scene_tree *over = any && !drawer ? server->layer_parked : server->layer_win;
 	wlr_scene_node_place_above(&server->layer_full->node, &over->node);
 	/* X11 menus over the game they belong to */
@@ -14110,15 +14926,37 @@ static void room_layout(struct desk_server *server)
 			(struct wlr_fbox){ 0.0, 0.0, (double)sh.w, (double)sh.h }, ox, oy, dw, dh, lx, ly);
 	}
 	if (server->drawer_sheet) {
+		/* Out at the foot of a screen beside the desk's, it is laid as it
+		 * would be under the desk, in a frame the desk's screen's size put
+		 * there, and cut to that screen: the desk itself stays where it is
+		 * (it is laid for drawer_t, which is 0 then). */
+		struct wlr_box sbox;
+		double fx = 0.0, fy = 0.0;
+		bool side = drawer_side_frame(server, &sbox, &fx, &fy);
+		double open = server->drw_open;
+		if (side) {
+			double szoom, span, st;
+			desk_room_view(open, &sh, &szoom, &span, &st);
+			oy = (int)((h - dh) / 2 + span * h);
+			/* in the drawer layer's own coordinates, which go where the desk does */
+			fx -= lx;
+			fy -= ly;
+			sbox.x -= lx;
+			sbox.y -= ly;
+		}
 		double dy, clip;
-		desk_room_drawer_offset(h, server->drawer_t, scale, oy,
+		desk_room_drawer_offset(h, open, scale, oy,
 			sh.dr_v0, sh.dr_v1, sh.h, &dy, &clip);
 		/* Everything above the line is still inside the desk. */
 		double ny = oy + dy;
 		double cut = clampf_d((clip - ny) / fmax(scale, 1e-6), 0.0, (double)sh.h);
 		struct wlr_fbox src = { 0.0, cut, (double)sh.w, (double)sh.h - cut };
-		if (src.height < 1.0 || server->drawer_t <= 0.004) {
+		if (src.height < 1.0 || open <= 0.004) {
 			wlr_scene_node_set_enabled(&server->drawer_sheet->node, false);
+		} else if (side) {
+			wlr_scene_node_set_enabled(&server->drawer_sheet->node, true);
+			lay_within(server->drawer_sheet, src, fx + ox, fy + (int)(ny + cut * scale + 0.5), dw,
+				(int)(src.height * scale + 0.5), sbox);
 		} else {
 			wlr_scene_node_set_enabled(&server->drawer_sheet->node, true);
 			desk_screen_lay(server, server->drawer_sheet, src, ox,
@@ -14129,15 +14967,19 @@ static void room_layout(struct desk_server *server)
 			const double *b = server->drw_box;
 			double top = ny + b[1] * scale;
 			double dcut = clampf_d((clip - top) / fmax(scale, 1e-6), 0.0, b[3]);
-			if (server->drawer_t <= 0.004 || b[3] - dcut < 1.0) {
+			if (open <= 0.004 || b[3] - dcut < 1.0) {
 				wlr_scene_node_set_enabled(&server->drw_node->node, false);
 			} else {
 				double r = server->drw_res > 0.0 ? server->drw_res : 1.0;
 				struct wlr_fbox isrc = { 0.0, dcut * r, b[2] * r, (b[3] - dcut) * r };
 				wlr_scene_node_set_enabled(&server->drw_node->node, true);
-				desk_screen_lay(server, server->drw_node, isrc,
-					(int)(ox + b[0] * scale + 0.5), (int)(top + dcut * scale + 0.5),
-					(int)(b[2] * scale + 0.5), (int)((b[3] - dcut) * scale + 0.5), lx, ly);
+				double ix = (int)(ox + b[0] * scale + 0.5), iy = (int)(top + dcut * scale + 0.5);
+				double iw = (int)(b[2] * scale + 0.5), ih = (int)((b[3] - dcut) * scale + 0.5);
+				if (side) {
+					lay_within(server->drw_node, isrc, fx + ix, fy + iy, iw, ih, sbox);
+				} else {
+					desk_screen_lay(server, server->drw_node, isrc, ix, iy, iw, ih, lx, ly);
+				}
 			}
 		}
 	}
@@ -14191,6 +15033,28 @@ static void overlay_place(struct desk_server *server)
 		wlr_scene_node_set_position(&server->shade_edge->node, 0, full);
 	}
 	wlr_scene_node_set_enabled(&server->shade_edge->node, on && part > 0.002);
+	/* and the bare desk on the screen beside it the drawer is out on, down
+	 * to the drawer's line there (to the whole pixel: it is the boards,
+	 * not the desk's sprites, it lies over) */
+	struct wlr_box sbox = { 0 };
+	double fx, fy, sclip = 0.0;
+	int sox, soy;
+	bool side = server->side_shade && server->drw_open > 0.004
+		&& drawer_side_frame(server, &sbox, &fx, &fy)
+		&& desk_desk_place(w, h, server->drw_open, &sox, &soy, &sclip);
+	double sa = side ? desk_desk_shade(server->drw_open, rgb) : 0.0;
+	int sbot = side ? (int)fmin(floor(fy + sclip), (double)(sbox.y + sbox.height)) : 0;
+	if (sa > 0.0 && sbot > sbox.y) {
+		const float color[4] = { rgb[0] * (float)sa, rgb[1] * (float)sa,
+			rgb[2] * (float)sa, (float)sa };
+		wlr_scene_rect_set_color(server->side_shade, color);
+		wlr_scene_rect_set_size(server->side_shade, sbox.width, sbot - sbox.y);
+		wlr_scene_node_set_position(&server->side_shade->node, sbox.x, sbox.y);
+		wlr_scene_node_raise_to_top(&server->side_shade->node);
+	}
+	if (server->side_shade) {
+		wlr_scene_node_set_enabled(&server->side_shade->node, sa > 0.0 && sbot > sbox.y);
+	}
 }
 
 struct ovl_args {
@@ -14231,6 +15095,8 @@ static void overlay_update(struct desk_server *server, bool force)
 		wlr_scene_node_set_enabled(&server->shade->node, false);
 		server->shade_edge = wlr_scene_rect_create(server->layer_desk, 0, 0, none);
 		wlr_scene_node_set_enabled(&server->shade_edge->node, false);
+		server->side_shade = wlr_scene_rect_create(server->layer_side, 0, 0, none);
+		wlr_scene_node_set_enabled(&server->side_shade->node, false);
 		server->ovl_over = wlr_scene_tree_create(server->layer_desk);
 	}
 	int ox = 0, oy = 0;
@@ -15779,22 +16645,12 @@ static void render_unpublish(void)
 	}
 }
 
-/* Shell Settings, from its desktop file, or by name, or from beside this. */
+/* Shell Settings: the one beside this, if there is one -- a desk run from
+ * where it was built opens the Shell Settings built with it, which knows
+ * the same settings, not an older one installed; installed, the one beside
+ * it is the installed one -- or from its desktop file, or by name. */
 static void settings_open(void)
 {
-	const struct desk_app_list *l = desk_apps_acquire();
-	const struct desk_app *app = desk_apps_find(l, "desk-settings.desktop");
-	if (app) {
-		desk_app_launch(app);
-	}
-	desk_apps_release(l);
-	if (app) {
-		return;
-	}
-	if (on_path("desk-settings")) {
-		spawn("desk-settings");
-		return;
-	}
 	char exe[512];
 	ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
 	exe[n > 0 ? n : 0] = '\0';
@@ -15804,7 +16660,17 @@ static void settings_open(void)
 		if (access(exe, X_OK) == 0) {
 			char *const argv[] = { exe, NULL };
 			spawn_argv(argv);
+			return;
 		}
+	}
+	const struct desk_app_list *l = desk_apps_acquire();
+	const struct desk_app *app = desk_apps_find(l, "desk-settings.desktop");
+	if (app) {
+		desk_app_launch(app);
+	}
+	desk_apps_release(l);
+	if (!app && on_path("desk-settings")) {
+		spawn("desk-settings");
 	}
 }
 
@@ -16490,8 +17356,10 @@ static bool handle_keybinding(struct desk_server *server, xkb_keysym_t sym, uint
 			return true;
 		case XKB_KEY_d:
 		case XKB_KEY_D:
-			if (!shelf_up(server)) {
-				drawer_toggle(server);
+			/* out on the screen the pointer is on (the desk's, looking up
+			 * at the shelf, is out of reach) */
+			if (!shelf_up(server) || pointer_on_side(server)) {
+				drawer_here(server);
 			}
 			return true;
 		case XKB_KEY_a:
@@ -19858,7 +20726,7 @@ static void desk_constraint_refresh(struct desk_server *server)
 	/* and none while you are looking up from the game: at the bookcase, the
 	 * Control Panel, the post box, or into the drawer, the hand is yours */
 	bool away = shelf_up(server) || console_up(server) || post_up(server)
-		|| server->drawer_moving || server->drawer_t > 0.004;
+		|| server->drawer_moving || server->drw_open > 0.004;
 	if (!locked(server) && !away && under && keys == under
 		&& server->cursor_mode == DESK_CUR_PASSTHROUGH && server->pointer_constraints) {
 		want = wlr_pointer_constraints_v1_constraint_for_surface(
@@ -20131,6 +20999,10 @@ static void process_cursor_motion(struct desk_server *server, uint32_t time)
 	 * let go of. */
 	if (pointer_on_side(server)) {
 		desk_hover_off(server);
+		/* the drawer out at this screen's foot: what is in it stands up
+		 * under the hand, as on the desk */
+		drawer_hover_to(server, drawer_entry_at(server, server->cursor->x, server->cursor->y));
+		fb_hot_to(server, fb_ring_under(server, server->cursor->x, server->cursor->y));
 		if (paper_moved(server)) {
 			wlr_seat_pointer_clear_focus(server->seat);
 			cursor_for_edges(server, 0);
@@ -20242,6 +21114,8 @@ static void process_cursor_motion(struct desk_server *server, uint32_t time)
 	bool on_slip = slips_track(server, !window_under(server));
 	drawer_hover_to(server, window_under(server) || on_clock || on_slip ? -1
 		: drawer_entry_at(server, server->cursor->x, server->cursor->y));
+	fb_hot_to(server, !window_under(server)
+		&& fb_ring_under(server, server->cursor->x, server->cursor->y));
 	/* with the drawer out, the paper on the desk is not in reach */
 	if (server->drawer_t > 0.004) {
 		wlr_seat_pointer_clear_focus(server->seat);
@@ -20412,17 +21286,46 @@ static void server_cursor_button(struct wl_listener *listener, void *data)
 		return;
 	}
 
-	/* On a screen beside the desk's, only paper: a hand put down there
-	 * with the drawer out pushes it back in, as anywhere on the desk above
-	 * it does; with the camera on its way, nothing yet. */
+	/* On a screen beside the desk's, paper, and the drawer at its foot.
+	 * With the drawer out there, what is in it is taken hold of, and a hand
+	 * put down above it pushes it back in, as on the desk; with it out on
+	 * another screen, a hand put down here pushes it in there; with the
+	 * camera on its way, nothing yet. */
 	if (pointer_on_side(server)) {
-		if (server->drawer_t > 0.004) {
-			if (!post_up(server) && !console_up(server) && !shelf_up(server)) {
+		double cx = server->cursor->x, cy = server->cursor->y, lx, ly;
+		bool here = drawer_local(server, cx, cy, &lx, &ly);
+		if (server->drw_open > 0.004 && here) {
+			if ((event->button == BTN_LEFT || event->button == BTN_RIGHT)
+				&& drawer_press(server, event->button)) {
+				return;
+			}
+			if (ly < drawer_line(server)) {
+				drawer_toggle(server);
+			}
+			return;
+		}
+		if (server->drw_open > 0.004) {
+			bool going = server->drawer_moving && server->drawer_to < 0.5;
+			if (!going && (server->drawer_t <= 0.004
+				|| (!post_up(server) && !console_up(server) && !shelf_up(server)))) {
 				drawer_toggle(server);
 			}
 			return;
 		}
 		if (!paper_moved(server)) {
+			/* a packet folded on this screen: taken hold of, as on the desk */
+			if ((event->button == BTN_LEFT || event->button == BTN_RIGHT)
+				&& drawer_press(server, event->button)) {
+				return;
+			}
+			/* the shut drawer's pull along the foot of this screen */
+			struct wlr_surface *surf = NULL;
+			double sx, sy;
+			if (event->button == BTN_LEFT && drawer_side_pull_at(server, cx, cy)
+				&& !view_at(server, cx, cy, &surf, &sx, &sy)) {
+				drawer_open_on(server, screen_at(server, cx, cy));
+				return;
+			}
 			paper_press(server, event);
 		}
 		return;
@@ -20433,6 +21336,14 @@ static void server_cursor_button(struct wl_listener *listener, void *data)
 	if ((event->button == BTN_LEFT || event->button == BTN_RIGHT)
 		&& drawer_press(server, event->button)) {
 		return;
+	}
+
+	/* The drawer out at the foot of a screen beside this one: a hand put
+	 * down on the desk pushes it back in there, and goes on to whatever it
+	 * was put down on. */
+	if (server->drw_open > 0.004 && server->drawer_t <= 0.004
+		&& !(server->drawer_moving && server->drawer_to < 0.5)) {
+		drawer_toggle(server);
 	}
 
 	/* With the drawer out you are looking into the drawer: a hand put down
@@ -20694,7 +21605,11 @@ static void server_cursor_button(struct wl_listener *listener, void *data)
 		if (event->button == BTN_LEFT &&
 			desk_drawer_handle_hit(server->desk_w, server->desk_h, server->cursor->x, server->cursor->y,
 				server->drawer_t)) {
-			drawer_toggle(server);
+			if (server->drawer_t > 0.004) {
+				drawer_toggle(server);
+			} else {
+				drawer_open_on(server, first_output(server));
+			}
 			return;
 		}
 	}
@@ -20977,7 +21892,8 @@ static double drawer_line(struct desk_server *server)
 {
 	int ox, oy;
 	double clip;
-	if (!desk_desk_place(server->desk_w, server->desk_h, server->drawer_t, &ox, &oy, &clip)) {
+	/* in the drawer's frame, wherever it is out */
+	if (!desk_desk_place(server->desk_w, server->desk_h, server->drw_open, &ox, &oy, &clip)) {
 		return server->desk_h;
 	}
 	return clip;
@@ -21009,21 +21925,72 @@ static void desk_follow(struct desk_server *server)
 	 * up with it. (The room and what is drawn over it are placed for the
 	 * drawer where they are drawn: room_layout, overlay_place.) */
 	int lift = drawer_lift(server);
-	if (dx == server->desk_dx && dy == server->desk_dy && lift == server->win_dy) {
+	/* and the drawer out at the foot of a screen beside it pushes up the
+	 * paper on that one, by as much */
+	int slift = drawer_side_lift(server);
+	if (dx == server->desk_dx && dy == server->desk_dy && lift == server->win_dy
+		&& slift == server->side_lift) {
 		return;
 	}
+	/* (the screen it was pushed up on, if it was: the drawer may have been
+	 * snapped home from there, and be the desk's already) */
+	struct wlr_output *dout = server->side_lift ? server->side_lift_on
+		: slift ? drawer_screen(server) : NULL;
+	int dsl = slift - server->side_lift;
 	/* the windows on a screen beside the desk's stay where they lie: the
 	 * paper is moved back by as much as the desk is moving it */
 	int ddx = dx - server->desk_dx;
 	int ddy = dy + lift - server->desk_dy - server->win_dy;
 	struct desk_toplevel *view;
 	wl_list_for_each(view, &server->toplevels, link) {
+		struct wlr_output *vs = view->scene_tree ? view_screen(view) : NULL;
 		if (view->scene_tree && view->scene_tree->node.parent == server->layer_win
-			&& screen_is_side(server, view_screen(view))) {
+			&& screen_is_side(server, vs)) {
+			int my = ddy - (vs == dout ? dsl : 0);
 			struct wlr_scene_node *node = &view->scene_tree->node;
-			wlr_scene_node_set_position(node, node->x - ddx, node->y - ddy);
+			wlr_scene_node_set_position(node, node->x - ddx, node->y - my);
+			/* folded, it opens out to where the window is now */
+			if (view->sheet.phase != SHEET_IDLE) {
+				view->sheet.x0 -= ddx;
+				view->sheet.y0 -= my;
+			}
 			view_sync_shadow(view);
 		}
+	}
+	/* and so do the sheets folded on one, lying there or on their way to
+	 * it (not one in the hand, which is where the hand is) */
+	wl_list_for_each(view, &server->toplevels, link) {
+		struct desk_sheet *s = &view->sheet;
+		struct wlr_output *ss = NULL;
+		if (s->phase == SHEET_IDLE || s->in_drawer || s->to_drawer
+			|| (s->tree && s->tree->node.parent == server->layer_drag)
+			|| !screen_is_side(server, ss = sheet_screen(server, s))) {
+			continue;
+		}
+		int my = ddy - (ss == dout ? dsl : 0);
+		s->x1 -= ddx;
+		s->y1 -= my;
+		s->hit_x -= ddx;
+		s->hit_y -= my;
+		if (s->tree) {
+			wlr_scene_node_set_position(&s->tree->node, s->tree->node.x - ddx,
+				s->tree->node.y - my);
+		}
+	}
+	/* the bare desk there goes up with it, its front edge over the drawer */
+	if (dout && dsl) {
+		struct desk_output *o;
+		wl_list_for_each(o, &server->outputs, link) {
+			if (o->wlr_output == dout && o->side) {
+				wlr_scene_node_set_position(&o->side->node, o->side_box.x,
+					o->side_box.y + slift);
+			}
+		}
+	}
+	server->side_lift = slift;
+	server->side_lift_on = slift ? dout : NULL;
+	if (dout && dsl) {
+		side_foot_place(server);
 	}
 	bool moved = dx != server->desk_dx || dy != server->desk_dy;
 	server->desk_dx = dx;
@@ -21060,6 +22027,7 @@ static void output_frame_work(struct desk_server *server)
 	unfold_tick(server);
 	throws_tick(server);
 	drawer_tick(server);
+	fb_tick(server);
 	drawer_slide_tick(server);
 	shelf_tick(server);
 	console_tick(server);
@@ -21177,6 +22145,20 @@ static void output_destroy(struct wl_listener *listener, void *data)
 	}
 	if (output->side && !server->quitting) {
 		wlr_scene_node_destroy(&output->side->node);
+	}
+	if (output->side_foot && !server->quitting) {
+		wlr_scene_node_destroy(&output->side_foot->node);
+	}
+	/* the paper on it is going with it */
+	if (server->side_lift_on == output->wlr_output) {
+		server->side_lift_on = NULL;
+		server->side_lift = 0;
+	}
+	/* the drawer out at its foot goes in at once, and is the desk's */
+	if (!server->quitting && server->drw_at[0]
+		&& !strcmp(server->drw_at, output->wlr_output->name)) {
+		server->drw_at[0] = '\0';
+		drawer_snap_home(server);
 	}
 	screen_dark_sync(server);
 	if (!server->quitting && !wl_list_empty(&server->outputs)) {
@@ -22994,6 +23976,7 @@ int main(int argc, char **argv)
 	 * first thing anybody did was click the post box and get nothing.
 	 * Super+D or the brass pull opens it. */
 	server.drawer_t = 0.0;
+	server.drw_open = 0.0;
 	server.drawer_to = 0.0;
 
 	static struct option long_opts[] = {

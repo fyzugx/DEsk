@@ -12358,6 +12358,187 @@ void desk_drawer_paint_items(cairo_t *cr, int screen_w, int screen_h,
 	cairo_restore(cr);
 }
 
+/* ---- the drawer's false bottom ---------------------------------
+ *
+ * A drawer can be made with a second floor under the felt: the felt is a
+ * board that lifts out. A brass ring let into it near the front is the
+ * only sign of it. Pulled, the board slides back under the drawer's back
+ * wall until only its front edge shows, the ring still in it, and under
+ * it is a shallow hollow of bare walnut with things of its own in it.
+ * lift runs 0, the board down, to 1, slid back. */
+/* The back third or so of the felt is under the desk's front edge with the
+ * drawer out, so the board goes back only so far that its front edge, and
+ * the ring by it, are still clear of that edge. */
+#define FB_SLIDE 0.44    /* how much of the board goes back under the wall */
+#define FB_RING_V 0.90   /* where the ring is let in, down the board */
+
+/* in the board's front right corner, clear of the row */
+static void fb_ring_at(const double felt[4], double lift, double *x, double *y, double *r)
+{
+	*r = fmax(felt[3] * 0.065, 5.0);
+	*x = felt[0] + felt[2] - *r * 3.2;
+	*y = felt[1] + felt[3] * (FB_RING_V - FB_SLIDE * lift);
+}
+
+double desk_drawer_board_shift(int screen_w, int screen_h, double lift)
+{
+	struct room_xf xf;
+	double felt[4];
+	if (!room_xform(screen_w, screen_h, 1.0, &xf) || !drawer_felt_rect(xf.rr, felt)) {
+		return 0.0;
+	}
+	return felt[3] * FB_SLIDE * clampf(lift, 0.0, 1.0);
+}
+
+/* The hollow under the board: walnut, darker towards the back, where the
+ * wall stands over it, with the grain running across the drawer. */
+void desk_drawer_paint_hollow(cairo_t *cr, int screen_w, int screen_h)
+{
+	struct room_xf xf;
+	double f[4];
+	if (!room_xform(screen_w, screen_h, 1.0, &xf) || !drawer_felt_rect(xf.rr, f)) {
+		return;
+	}
+	cairo_save(cr);
+	cairo_rectangle(cr, f[0], f[1], f[2], f[3]);
+	cairo_clip(cr);
+	cairo_pattern_t *p = cairo_pattern_create_linear(0, f[1], 0, f[1] + f[3]);
+	cairo_pattern_add_color_stop_rgb(p, 0.0, 0.085, 0.050, 0.028);
+	cairo_pattern_add_color_stop_rgb(p, 0.55, 0.200, 0.122, 0.068);
+	cairo_pattern_add_color_stop_rgb(p, 1.0, 0.255, 0.160, 0.090);
+	cairo_set_source(cr, p);
+	cairo_paint(cr);
+	cairo_pattern_destroy(p);
+	/* the grain: long thin streaks across, a little wavy, lighter and
+	 * darker than the board they are in */
+	int n = (int)fmax(f[3] / 2.5, 12.0);
+	for (int i = 0; i < n; i++) {
+		double y = f[1] + f[3] * fract(i * 0.6180339 + 0.13);
+		double a = 0.05 + 0.07 * fract(i * 0.7548776);
+		bool light = fract(i * 0.5698403) > 0.55;
+		cairo_set_source_rgba(cr, light ? 0.42 : 0.03, light ? 0.28 : 0.02,
+			light ? 0.16 : 0.01, a);
+		cairo_set_line_width(cr, 0.6 + 1.4 * fract(i * 0.3247));
+		cairo_move_to(cr, f[0], y);
+		for (int k = 1; k <= 8; k++) {
+			double x = f[0] + f[2] * k / 8.0;
+			cairo_line_to(cr, x, y + sin(k * 1.7 + i) * f[3] * 0.012);
+		}
+		cairo_stroke(cr);
+	}
+	/* the walls' shadow on it: the back's long, the sides' short */
+	cairo_pattern_t *bk = cairo_pattern_create_linear(0, f[1], 0, f[1] + f[3] * 0.45);
+	cairo_pattern_add_color_stop_rgba(bk, 0.0, 0.0, 0.0, 0.0, 0.60);
+	cairo_pattern_add_color_stop_rgba(bk, 1.0, 0.0, 0.0, 0.0, 0.0);
+	cairo_set_source(cr, bk);
+	cairo_paint(cr);
+	cairo_pattern_destroy(bk);
+	for (int side = 0; side < 2; side++) {
+		double x0 = side ? f[0] + f[2] : f[0], x1 = side ? x0 - f[2] * 0.05 : x0 + f[2] * 0.05;
+		cairo_pattern_t *sd = cairo_pattern_create_linear(x0, 0, x1, 0);
+		cairo_pattern_add_color_stop_rgba(sd, 0.0, 0.0, 0.0, 0.0, 0.45);
+		cairo_pattern_add_color_stop_rgba(sd, 1.0, 0.0, 0.0, 0.0, 0.0);
+		cairo_set_source(cr, sd);
+		cairo_paint(cr);
+		cairo_pattern_destroy(sd);
+	}
+	cairo_restore(cr);
+}
+
+/* The ring, let into the board flush: a dark cup, the brass in it, and
+ * the lamp on its near rim. Lit up a little under the hand (hot). */
+static void fb_ring(cairo_t *cr, double x, double y, double r, bool hot)
+{
+	cairo_save(cr);
+	cairo_translate(cr, x, y);
+	cairo_scale(cr, 1.0, 0.58);
+	cairo_arc(cr, 0, 0, r * 1.25, 0, 2 * M_PI);
+	cairo_set_source_rgba(cr, 0.02, 0.03, 0.015, 0.70);
+	cairo_fill(cr);
+	double k = hot ? 1.18 : 1.0;
+	cairo_pattern_t *b = cairo_pattern_create_linear(-r, -r, r, r);
+	cairo_pattern_add_color_stop_rgb(b, 0.0, fmin(0.98 * k, 1.0), fmin(0.82 * k, 1.0),
+		0.45 * k);
+	cairo_pattern_add_color_stop_rgb(b, 0.5, 0.66 * k, 0.48 * k, 0.20 * k);
+	cairo_pattern_add_color_stop_rgb(b, 1.0, 0.36 * k, 0.24 * k, 0.09 * k);
+	cairo_set_source(cr, b);
+	cairo_set_line_width(cr, r * 0.42);
+	cairo_arc(cr, 0, 0, r * 0.85, 0, 2 * M_PI);
+	cairo_stroke(cr);
+	cairo_pattern_destroy(b);
+	cairo_set_source_rgba(cr, 1.0, 0.95, 0.75, hot ? 0.75 : 0.50);
+	cairo_set_line_width(cr, r * 0.14);
+	cairo_arc(cr, 0, 0, r * 0.85, M_PI * 0.15, M_PI * 0.70);
+	cairo_stroke(cr);
+	cairo_restore(cr);
+}
+
+/* The board: the felt as it was traced, slid back by lift and cut where
+ * the back wall comes down over it, its front edge's shadow on the hollow,
+ * and the ring. With it down, only the ring: the felt under it is the
+ * traced sheet's own. */
+void desk_drawer_paint_board(cairo_t *cr, int screen_w, int screen_h, double lift, bool hot)
+{
+	struct room_xf xf;
+	double f[4];
+	if (!room_xform(screen_w, screen_h, 1.0, &xf) || !drawer_felt_rect(xf.rr, f)) {
+		return;
+	}
+	lift = clampf(lift, 0.0, 1.0);
+	double shift = f[3] * FB_SLIDE * lift;
+	cairo_save(cr);
+	cairo_rectangle(cr, f[0], f[1], f[2], f[3]);
+	cairo_clip(cr);
+	if (lift > 0.0) {
+		double front = f[1] + f[3] - shift;
+		/* the shadow it throws forward onto the hollow */
+		cairo_pattern_t *sh = cairo_pattern_create_linear(0, front, 0, front + f[3] * 0.16);
+		cairo_pattern_add_color_stop_rgba(sh, 0.0, 0.0, 0.0, 0.0, 0.55);
+		cairo_pattern_add_color_stop_rgba(sh, 1.0, 0.0, 0.0, 0.0, 0.0);
+		cairo_set_source(cr, sh);
+		cairo_rectangle(cr, f[0], front, f[2], f[3] * 0.16);
+		cairo_fill(cr);
+		cairo_pattern_destroy(sh);
+		cairo_save(cr);
+		cairo_rectangle(cr, f[0], f[1], f[2], f[3] - shift);
+		cairo_clip(cr);
+		cairo_translate(cr, 0, -shift);
+		cairo_set_source_surface(cr, xf.rr->drawer, 0, 0);
+		cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_BILINEAR);
+		cairo_paint(cr);
+		cairo_restore(cr);
+		/* and its edge, cut square: the cloth over the board's thickness */
+		double edge = fmax(f[3] * 0.025, 1.5);
+		cairo_set_source_rgba(cr, 0.05, 0.12, 0.06, 0.95);
+		cairo_rectangle(cr, f[0], front - edge, f[2], edge);
+		cairo_fill(cr);
+		cairo_set_source_rgba(cr, 0.55, 0.75, 0.50, 0.25);
+		cairo_rectangle(cr, f[0], front - edge, f[2], fmax(edge * 0.3, 0.6));
+		cairo_fill(cr);
+	}
+	double rx, ry, rr;
+	fb_ring_at(f, lift, &rx, &ry, &rr);
+	fb_ring(cr, rx, ry, rr, hot);
+	cairo_restore(cr);
+}
+
+bool desk_drawer_ring_at(int screen_w, int screen_h, double open, double lift, double px,
+	double py)
+{
+	struct room_xf xf;
+	double f[4];
+	if (open < 0.35 || !room_xform(screen_w, screen_h, open, &xf)
+		|| !drawer_felt_rect(xf.rr, f) || py < xf.clip) {
+		return false;
+	}
+	double rx, ry, rr;
+	fb_ring_at(f, lift, &rx, &ry, &rr);
+	double s = xf.scale;
+	double dx = px - (xf.ox + rx * s), dy = (py - (xf.ny + ry * s)) / 0.58;
+	/* a fair bit bigger than it is: it is small, and nothing else is there */
+	return hypot(dx, dy) <= rr * s * 2.2;
+}
+
 bool desk_drawer_at(int screen_w, int screen_h, double open, double px, double py,
 	double *x, bool *row)
 {
@@ -23330,7 +23511,8 @@ void desk_draw_room(cairo_t *cr, int w, int h, double drawer_open)
  * where the desk's screen leaves off, with no seam, at the size they are
  * on the desk. Lit less the further it is from the desk the lamp stands
  * on. Before there is any room, the bare boards' brown. */
-void desk_draw_side_desk(cairo_t *cr, int x, int y, int w, int h, int desk_w, int desk_h)
+void desk_draw_side_desk(cairo_t *cr, int x, int y, int w, int h, int desk_w, int desk_h,
+	bool pull)
 {
 	struct room_xf xf;
 	bool room = desk_w >= 64 && desk_h >= 64 && room_xform(desk_w, desk_h, 0.0, &xf);
@@ -23370,12 +23552,45 @@ void desk_draw_side_desk(cairo_t *cr, int x, int y, int w, int h, int desk_w, in
 		cairo_pattern_set_extend(pat, CAIRO_EXTEND_REFLECT);
 		cairo_pattern_set_filter(pat, CAIRO_FILTER_GOOD);
 		cairo_matrix_t m;
-		cairo_matrix_init_translate(&m, x, y - y0 + (y1 - y0));
+		/* With the desk's front edge along the foot (pull), the band ends
+		 * where that edge starts, as it does on the desk: what is just
+		 * above the edge is what is above it there, in the same light.
+		 * Laid the other way, the row over it was whichever came round,
+		 * often the shadowed back of the desk, and the edge stood out
+		 * against it a good deal lighter. */
+		int bh = (int)(y1 - y0), ph = desk_h - (int)y1;
+		cairo_matrix_init_translate(&m, x, pull && ph > 2 ? bh - (h - ph) : y - y0 + bh);
 		cairo_pattern_set_matrix(pat, &m);
 		cairo_set_source(cr, pat);
 		cairo_paint(cr);
 		cairo_pattern_destroy(pat);
 		cairo_surface_destroy(band);
+		/* A screen with a drawer of its own (Shell Settings): the desk's
+		 * front edge along its foot, over the drawer, as it is along the
+		 * foot of the desk's screen -- the strip under where the band
+		 * stops, taken across from the desk's own edge the same way. */
+		cairo_surface_t *edge = pull && ph > 2
+			? cairo_image_surface_create(CAIRO_FORMAT_RGB24, desk_w, ph) : NULL;
+		if (edge) {
+			cairo_t *ec = cairo_create(edge);
+			cairo_translate(ec, xf.ox, xf.oy - (int)y1);
+			cairo_scale(ec, xf.scale, xf.scale);
+			cairo_set_source_surface(ec, xf.rr->background, 0, 0);
+			cairo_pattern_set_filter(cairo_get_source(ec), CAIRO_FILTER_BILINEAR);
+			cairo_paint(ec);
+			cairo_destroy(ec);
+			cairo_pattern_t *ep = cairo_pattern_create_for_surface(edge);
+			cairo_pattern_set_extend(ep, CAIRO_EXTEND_REFLECT);
+			cairo_pattern_set_filter(ep, CAIRO_FILTER_GOOD);
+			cairo_matrix_t em;
+			cairo_matrix_init_translate(&em, x, -(h - ph));
+			cairo_pattern_set_matrix(ep, &em);
+			cairo_set_source(cr, ep);
+			cairo_rectangle(cr, 0, h - ph, w, ph);
+			cairo_fill(cr);
+			cairo_pattern_destroy(ep);
+			cairo_surface_destroy(edge);
+		}
 	} else {
 		cairo_pattern_t *wd = cairo_pattern_create_linear(0, 0, w * 0.35, h);
 		cairo_pattern_add_color_stop_rgb(wd, 0.0, 0.330, 0.200, 0.110);
@@ -23405,6 +23620,45 @@ void desk_draw_side_desk(cairo_t *cr, int x, int y, int w, int h, int desk_w, in
 		cairo_paint(cr);
 	}
 	cairo_restore(cr);
+}
+
+/* What is under the desk's front edge on such a screen, foot_h of it --
+ * the room below the desk, which a drawer coming out there shows as the
+ * boards go up -- taken from under the desk's own screen the same way the
+ * boards are, the band's left edge the desk screen's. */
+void desk_draw_side_foot(cairo_t *cr, int x, int w, int foot_h, int desk_w, int desk_h)
+{
+	struct room_xf xf;
+	if (desk_w < 64 || desk_h < 64 || foot_h < 1 || !room_xform(desk_w, desk_h, 0.0, &xf)) {
+		cairo_set_source_rgb(cr, 0.08, 0.05, 0.03);
+		cairo_paint(cr);
+		return;
+	}
+	cairo_surface_t *band = cairo_image_surface_create(CAIRO_FORMAT_RGB24, desk_w, foot_h);
+	cairo_t *bc = cairo_create(band);
+	cairo_set_source_rgb(bc, 0.08, 0.05, 0.03);
+	cairo_paint(bc);
+	cairo_translate(bc, xf.ox, xf.oy - desk_h);
+	cairo_scale(bc, xf.scale, xf.scale);
+	cairo_set_source_surface(bc, xf.rr->background, 0, 0);
+	cairo_pattern_set_filter(cairo_get_source(bc), CAIRO_FILTER_BILINEAR);
+	cairo_paint(bc);
+	cairo_destroy(bc);
+	cairo_pattern_t *pat = cairo_pattern_create_for_surface(band);
+	cairo_pattern_set_extend(pat, CAIRO_EXTEND_REFLECT);
+	cairo_pattern_set_filter(pat, CAIRO_FILTER_GOOD);
+	cairo_matrix_t m;
+	cairo_matrix_init_translate(&m, x, 0);
+	cairo_pattern_set_matrix(pat, &m);
+	cairo_set_source(cr, pat);
+	cairo_rectangle(cr, 0, 0, w, foot_h);
+	cairo_fill(cr);
+	cairo_pattern_destroy(pat);
+	cairo_surface_destroy(band);
+	/* as far from the lamp as the boards over it */
+	cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.25);
+	cairo_rectangle(cr, 0, 0, w, foot_h);
+	cairo_fill(cr);
 }
 
 unsigned desk_room_shown(int screen_w, int screen_h)

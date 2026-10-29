@@ -204,6 +204,12 @@ static const char *const BOUNCE_WORDS[] = { "Normal", "Low", "None", NULL };
 static const char *const BOUNCE_VALS[] = { "normal", "low", "off" };
 static const char *const CLOCK_WORDS[] = { "24-hour", "12-hour", NULL };
 static const char *const CLOCK_VALS[] = { "24h", "12h" };
+static const char *const DRAWERS_WORDS[] = { "One, shared by every screen",
+	"One for each screen", NULL };
+static const char *const DRAWERS_VALS[] = { "shared", "each" };
+static const char *const FB_WORDS[] = { "None", "Every drawer", "The desk's screen's drawer",
+	"The other screens' drawers", NULL };
+static const char *const FB_VALS[] = { "off", "all", "desk", "side" };
 static const char *const SOUND_WORDS[] = { "Off", "Quiet", "Normal", NULL };
 static const char *const SOUND_VALS[] = { "off", "quiet", "normal" };
 /* each language in its own words, as a language is always offered */
@@ -369,6 +375,14 @@ static const struct setting SETTINGS[] = {
 		"Off, it stays out until it is pushed back in.", NULL, NULL, 1, NULL },
 	{ S_CHECK, "fold_into_drawer", "Fold windows away into the drawer",
 		"Off, a folded window is put down along the front of the desk.", NULL, NULL, 0, NULL },
+	{ S_CHOICE, "drawers", "Drawers",
+		"With more than one screen: one drawer, whose things come out on whichever screen it "
+		"is opened from, or a drawer along the foot of each screen with things of its own.",
+		DRAWERS_WORDS, DRAWERS_VALS, 0, NULL },
+	{ S_CHOICE, "false_bottom", "False bottom",
+		"A brass ring in the felt: pulled, the felt slides back to show a hidden compartment "
+		"with things of its own. With a drawer for each screen it can be in some and not "
+		"others; shell.conf can name the screens one by one.", FB_WORDS, FB_VALS, 0, NULL },
 	{ S_CHECK, "take_sheet", "Carry a program's sheet down to the desk",
 		"A program taken out of ALL APPS has its sheet put down where its window will be, "
 		"and the window comes onto it.", NULL, NULL, 1, NULL },
@@ -1027,6 +1041,9 @@ static bool conf_write(const char *path, const char *key, const char *value)
 			"#   weather = yes | no                 the real weather at the front door\n"
 			"#   drawer_closes = yes | no           the drawer goes back after use\n"
 			"#   fold_into_drawer = yes | no        folded windows go into the drawer\n"
+			"#   drawers = shared | each            one drawer, or one for each screen\n"
+			"#   false_bottom = off | all | desk | side | <screen>,...\n"
+			"#                                      drawers with a hidden compartment\n"
 			"#   take_sheet = yes | no              ALL APPS carries the sheet down\n"
 			"#   sound = off | quiet | normal       the sounds of things on the desk\n"
 			"#   letter_sound = yes | no            a letter heard arriving\n", out);
