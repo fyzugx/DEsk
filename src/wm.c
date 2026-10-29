@@ -215,6 +215,7 @@ struct shell_conf {
 	double bounce;              /* how much the camera goes past and settles,
 	                             * and the head bobs walking: 1 as made, 0 none */
 	bool clock_12h;
+	double binder_ink;          /* how dark the binders' labels: 0 faded .. 1 darkest */
 	char language[16];          /* "auto", "en", "ja", "zh", ... */
 	bool drawer_closes;         /* the drawer goes back after something is used */
 	bool take_sheet;            /* ALL APPS: the sheet is carried down for the window */
@@ -10124,6 +10125,9 @@ static void terminal_open(void)
  *   sound = off | quiet | normal          the desk's sounds
  *   letter_sound = yes | no               a letter arriving in the post box
  *                                         is heard
+ *   binder_ink = faded | normal | dark | darkest, or 0 to 1
+ *                                         how dark the binders' labels are
+ *                                         typed (normal)
  *   camera_bounce = normal | low | off    how far the camera goes past where
  *                                         it is looking and settles back, and
  *                                         how the head bobs walking up to the
@@ -10220,6 +10224,7 @@ static void shell_conf_defaults(struct shell_conf *c)
 	c->motion = 1.0;
 	c->bounce = 1.0;
 	c->clock_12h = false;
+	c->binder_ink = 0.4;
 	snprintf(c->language, sizeof c->language, "auto");
 	c->drawer_closes = true;
 	c->take_sheet = true;
@@ -10280,6 +10285,26 @@ static bool conf_other(struct shell_conf *c, const char *path, const char *key, 
 			c->scale = c->scale < 0.5 ? 0.5 : (c->scale > 4.0 ? 4.0 : c->scale);
 		} else {
 			wlr_log(WLR_ERROR, "%s: scale is auto or a number, not \"%s\"", path, val);
+		}
+		return true;
+	}
+	if (!strcmp(key, "binder_ink")) {
+		/* a word, as Shell Settings writes it, or a depth 0..1 by hand */
+		char *end = NULL;
+		double v = strtod(val, &end);
+		if (!strcasecmp(val, "faded")) {
+			c->binder_ink = 0.0;
+		} else if (!strcasecmp(val, "normal")) {
+			c->binder_ink = 0.4;
+		} else if (!strcasecmp(val, "dark")) {
+			c->binder_ink = 0.7;
+		} else if (!strcasecmp(val, "darkest")) {
+			c->binder_ink = 1.0;
+		} else if (end != val && !*end && v >= 0.0 && v <= 1.0) {
+			c->binder_ink = v;
+		} else {
+			wlr_log(WLR_ERROR, "%s: binder_ink is faded, normal, dark, darkest or 0 to 1, "
+				"not \"%s\"", path, val);
 		}
 		return true;
 	}
@@ -10744,6 +10769,7 @@ static void shell_conf_poll(struct desk_server *server)
 	if (first) {
 		motion_set(motion_of(c));
 		desk_set_clock_12h(c->clock_12h);
+		desk_set_binder_ink(c->binder_ink);
 		/* before the first look at what is installed */
 		desk_lang_set(lang);
 		desk_apps_set_language(strcmp(c->language, "auto") ? desk_lang_code(lang) : "");
@@ -10933,6 +10959,11 @@ static void shell_apply_all(struct desk_server *server)
 	motion_set(motion_of(&server->conf));
 	g_bounce = server->conf.bounce;
 	desk_set_clock_12h(server->conf.clock_12h);
+	if (desk_set_binder_ink(server->conf.binder_ink)) {
+		/* the labels typed again: the bookcase's pictures with them */
+		pictures_forget(server);
+		server_schedule_frames(server);
+	}
 	overlay_update(server, true);
 	/* a new size for things: the room is traced again for it, as for a
 	 * new screen */

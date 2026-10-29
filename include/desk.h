@@ -894,6 +894,10 @@ void desk_set_gfx(enum desk_gfx g);
 enum desk_gfx desk_gfx_level(void);
 /* The desk's clock and the times on letters: 24-hour, or 12 with AM/PM. */
 void desk_set_clock_12h(bool on);
+/* How dark the binders' labels are typed, 0 the tired ribbon they were
+ * designed with .. 1 as dark as it goes (shell.conf binder_ink). True if
+ * that is a change, and what was drawn with the labels is to be again. */
+bool desk_set_binder_ink(double depth);
 double desk_ui_scale(void);
 /* what a point is on a screen this wide, for things drawn flat over the
  * desk (less than the scale where the screen is too narrow for the desk) */

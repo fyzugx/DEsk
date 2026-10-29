@@ -12837,6 +12837,24 @@ static const char *shelf_label(const struct desk_shelf_info *si)
 	return si->label_en;
 }
 
+/* How dark the binders' labels are typed (shell.conf binder_ink): 0 with
+ * the tired ribbon they were designed with, 1 a fresh one pressed hard.
+ * A pale label on a dim shelf is hard to read, so the default is already
+ * a little past the tired ribbon. */
+static double g_binder_ink = 0.4;
+
+bool desk_set_binder_ink(double depth)
+{
+	depth = clampf(depth, 0.0, 1.0);
+	if (fabs(depth - g_binder_ink) < 1e-6) {
+		return false;
+	}
+	g_binder_ink = depth;
+	/* the labels are printed into the case, which is kept: print it again */
+	desk_draw_forget_words();
+	return true;
+}
+
 static void binder_label_face(cairo_t *cr, double w, double h,
 	const char *name, int count, unsigned seed)
 {
@@ -12845,6 +12863,7 @@ static void binder_label_face(cairo_t *cr, double w, double h,
 	 * bottom corner every time the binder came down, and one corner has
 	 * stopped lying flat. */
 	double years = 0.62 + hash21(seed, 41.3) * 0.34;
+	double ink = g_binder_ink;
 	cairo_save(cr);
 	cairo_set_source_rgb(cr, 0.874, 0.840, 0.758);
 	cairo_paint(cr);
@@ -12855,30 +12874,33 @@ static void binder_label_face(cairo_t *cr, double w, double h,
 	cairo_rotate(cr, (hash21(seed, 3.7) - 0.5) * 0.030);
 	cairo_translate(cr, -w * 0.5, -h * 0.5);
 
-	cairo_set_source_rgba(cr, 0.24, 0.18, 0.12, 0.52);
+	cairo_set_source_rgba(cr, 0.24, 0.18, 0.12, 0.52 + 0.30 * ink);
 	cairo_set_line_width(cr, 1.2);
 	cairo_rectangle(cr, w * 0.10, h * 0.09, w * 0.80, h * 0.82);
 	cairo_stroke(cr);
 
 	/* typed smaller for a long name (Développement): the card is no wider */
 	show_text_fit_to(cr, DESK_FONT_TYPE, name, w * 0.5, h * 0.42, h * 0.125, true,
-		0.16, 0.12, 0.09, 0.95, 0, w * 0.72, 0.35);
+		0.16 - 0.11 * ink, 0.12 - 0.08 * ink, 0.09 - 0.06 * ink, 0.95 + 0.05 * ink, 0,
+		w * 0.72, 0.35);
 
 	wobble_line(cr, w * 0.20, h * 0.60, w * 0.80, h * 0.60, seed, 3, 0.5, 1.0,
-		0.30, 0.22, 0.15, 0.55);
+		0.30, 0.22, 0.15, 0.55 + 0.30 * ink);
 
 	char buf[16];
 	snprintf(buf, sizeof buf, "%d", count);
 	show_text_as(cr, DESK_FONT_TYPE, buf, w * 0.5, h * 0.80, h * 0.155, true,
-		0.42, 0.14, 0.10, 0.92, 0);
+		0.42 - 0.10 * ink, 0.14 - 0.06 * ink, 0.10 - 0.05 * ink, 0.92 + 0.08 * ink, 0);
 
 	cairo_identity_matrix(cr);
 
-	/* the ribbon, over everything that was typed with it */
+	/* the ribbon, over everything that was typed with it -- missing less of
+	 * it the fresher the ribbon is */
+	double fresh = 1.0 - 0.9 * ink;
 	ink_skip(cr, w * 0.10, h * 0.16, w * 0.80, h * 0.44, seed + 3,
-		0.30 + years * 0.26, 0.876, 0.842, 0.762);
+		(0.30 + years * 0.26) * fresh, 0.876, 0.842, 0.762);
 	ink_skip(cr, w * 0.30, h * 0.66, w * 0.40, h * 0.24, seed + 9,
-		0.20 + years * 0.18, 0.876, 0.842, 0.762);
+		(0.20 + years * 0.18) * fresh, 0.876, 0.842, 0.762);
 
 	/* the thumb that takes this binder down, always in the same place */
 	double tx = hash21(seed, 19.7) > 0.5 ? w * 0.26 : w * 0.74;

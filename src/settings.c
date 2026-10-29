@@ -202,6 +202,8 @@ static const char *const MOTION_WORDS[] = { "Brisk", "Normal", "Gentle", NULL };
 static const char *const MOTION_VALS[] = { "brisk", "normal", "gentle" };
 static const char *const BOUNCE_WORDS[] = { "Normal", "Low", "None", NULL };
 static const char *const BOUNCE_VALS[] = { "normal", "low", "off" };
+static const char *const INK_WORDS[] = { "Faded", "Normal", "Dark", "Darkest", NULL };
+static const char *const INK_VALS[] = { "faded", "normal", "dark", "darkest" };
 static const char *const CLOCK_WORDS[] = { "24-hour", "12-hour", NULL };
 static const char *const CLOCK_VALS[] = { "24h", "12h" };
 static const char *const SOUND_WORDS[] = { "Off", "Quiet", "Normal", NULL };
@@ -327,6 +329,9 @@ static const struct setting SETTINGS[] = {
 		LANG_WORDS, LANG_VALS, 0, NULL },
 	{ S_CHOICE, "clock", "Clock", "The clock on the desk, and the times on letters.",
 		CLOCK_WORDS, CLOCK_VALS, 0, NULL },
+	{ S_CHOICE, "binder_ink", "Binder labels",
+		"How dark the names on the binders in the bookcase are typed.",
+		INK_WORDS, INK_VALS, 1, NULL },
 	{ S_CHECK, "lights_at_login", "Bring the lamp up slowly at login",
 		"The room starts dark and the lamp comes up as it is made; the clock counts how far. "
 		"Off, it is lit at once.", NULL, NULL, 1, NULL },
