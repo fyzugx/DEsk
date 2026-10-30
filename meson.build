@@ -25,6 +25,7 @@ add_project_arguments(meson.get_compiler('c').get_supported_arguments('-Winit-se
 math = meson.get_compiler('c').find_library('m', required: true)
 threads = dependency('threads')
 cairo = dependency('cairo')
+pangocairo = dependency('pangocairo')
 # the faces text is set in are chosen from what is installed (src/fonts.c)
 fontconfig = dependency('fontconfig')
 pixman = dependency('pixman-1')
@@ -75,7 +76,7 @@ endforeach
 
 draw_sources = ['src/draw.c', 'src/apps.c', 'src/panel.c', 'src/agenda.c', 'src/fonts.c', 'src/i18n.c',
   'src/memo.c', 'src/user.c']
-draw_deps = [cairo, fontconfig, math, threads]
+draw_deps = [cairo, pangocairo, fontconfig, math, threads]
 # The room is a distance field marched once per pixel, which is what
 # graphics hardware is for. Without EGL we simply do not build that path
 # and the C tracer -- which stays the reference either way -- is all there

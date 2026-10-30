@@ -34,6 +34,7 @@
 #include "apps.h"
 #include "panel.h"
 #include "post.h"
+#include <pango/pangocairo.h>
 
 #include <strings.h>
 
@@ -22144,6 +22145,92 @@ static int wrap_lines(cairo_t *cr, const char *s, double w, char out[][256], int
 	return n;
 }
 
+
+/* Notification-only PangoCairo text: font fallback handles emoji while the
+ * rest of the desktop continues to use its existing Cairo text painter. */
+static PangoLayout *post_emoji_layout(cairo_t *cr, const char *s, double size, bool bold)
+{
+    PangoLayout *pl = pango_cairo_create_layout(cr);
+    PangoFontDescription *fd = pango_font_description_new();
+    pango_font_description_set_family(fd, desk_font_family(DESK_FONT_TYPE, NULL));
+    pango_font_description_set_weight(fd, bold ? PANGO_WEIGHT_BOLD : PANGO_WEIGHT_NORMAL);
+    pango_font_description_set_absolute_size(fd, size * PANGO_SCALE);
+    pango_layout_set_font_description(pl, fd);
+    pango_layout_set_text(pl, s ? s : "", -1); /* plain text, not Pango markup */
+    pango_font_description_free(fd);
+    return pl;
+}
+
+static void post_emoji_resize(PangoLayout *pl, double size)
+{
+    PangoFontDescription *fd = pango_font_description_copy(pango_layout_get_font_description(pl));
+    pango_font_description_set_absolute_size(fd, size * PANGO_SCALE);
+    pango_layout_set_font_description(pl, fd);
+    pango_font_description_free(fd);
+}
+
+/* Fit a one-line notification heading or sender to the available paper. */
+static void post_emoji_fit(cairo_t *cr, const char *s, double x, double y, double size,
+    bool bold, double r, double g, double b, double a, int align, double max_w)
+{
+    if (!s || !*s || max_w <= 0) return;
+    cairo_save(cr);
+    PangoLayout *pl = post_emoji_layout(cr, s, size, bold);
+    pango_layout_set_single_paragraph_mode(pl, TRUE);
+    double use = size;
+    PangoRectangle box;
+    for (int i = 0; i < 24; i++) {
+        post_emoji_resize(pl, use);
+        pango_layout_get_extents(pl, NULL, &box);
+        if ((double)box.width / PANGO_SCALE <= max_w || use < size * 0.55) break;
+        use *= 0.94;
+    }
+    if ((double)box.width / PANGO_SCALE > max_w) {
+        pango_layout_set_width(pl, (int)(max_w * PANGO_SCALE));
+        pango_layout_set_ellipsize(pl, PANGO_ELLIPSIZE_END);
+        pango_layout_get_extents(pl, NULL, &box);
+    }
+    double width = (double)box.width / PANGO_SCALE;
+    double dx = align == 0 ? -width * 0.5 : align > 0 ? -width : 0;
+    cairo_set_source_rgba(cr, r, g, b, a);
+    cairo_move_to(cr, x + dx, y - (double)pango_layout_get_baseline(pl) / PANGO_SCALE);
+    pango_cairo_show_layout(cr, pl);
+    g_object_unref(pl);
+    cairo_restore(cr);
+}
+
+/* Wrap notification bodies at grapheme and word boundaries without splitting
+ * emoji sequences. The paper's existing geometry and ink colour are retained. */
+static void post_emoji_body(cairo_t *cr, const char *s, double x, double first_baseline,
+    double width, double size, double remaining_h, int max_lines,
+    double r, double g, double b, double alpha)
+{
+    if (!s || !*s || width <= 0 || remaining_h <= 0 || max_lines < 1) return;
+    cairo_save(cr);
+    PangoLayout *pl = post_emoji_layout(cr, s, size, false);
+    pango_layout_set_width(pl, (int)(width * PANGO_SCALE));
+    pango_layout_set_wrap(pl, PANGO_WRAP_WORD_CHAR);
+    double use = size;
+    for (int i = 0; i < 6; i++) {
+        PangoRectangle box;
+        post_emoji_resize(pl, use);
+        pango_layout_get_extents(pl, NULL, &box);
+        if ((double)box.height / PANGO_SCALE <= remaining_h + use * 0.25
+            && pango_layout_get_line_count(pl) <= max_lines) break;
+        use *= 0.95;
+    }
+    pango_layout_set_height(pl, -max_lines);
+    pango_layout_set_ellipsize(pl, PANGO_ELLIPSIZE_END);
+    cairo_rectangle(cr, x, first_baseline - use * 1.15,
+        width, remaining_h + use * 1.15);
+    cairo_clip(cr);
+    cairo_set_source_rgba(cr, r, g, b, alpha);
+    cairo_move_to(cr, x, first_baseline - (double)pango_layout_get_baseline(pl) / PANGO_SCALE);
+    pango_cairo_show_layout(cr, pl);
+    g_object_unref(pl);
+    cairo_restore(cr);
+}
+
 /* A letter as it stands in the box: letter paper, who it is from at the
  * top, what it is about under that, and the writing. */
 static void post_card_face(cairo_t *cr, double w, double h, const struct desk_note *note,
@@ -22202,7 +22289,7 @@ static void post_card_face(cairo_t *cr, double w, double h, const struct desk_no
 	double right = w - mx - w * 0.05;
 	show_text_as(cr, DESK_FONT_TYPE, when, right, l1, u * 0.048, false, 0.42, 0.37, 0.31,
 		0.85, 1);
-	show_text_fit_as(cr, DESK_FONT_TYPE, note->summary[0] ? note->summary : "", tx, l1,
+	post_emoji_fit(cr, note->summary[0] ? note->summary : "", tx, l1,
 		u * 0.072, true,
 		0.15, 0.12, 0.09, 0.96, -1, right - tx - u * 0.16);
 	cairo_save(cr);
@@ -22217,7 +22304,7 @@ static void post_card_face(cairo_t *cr, double w, double h, const struct desk_no
 	snprintf(from_sp, sizeof from_sp, "%s ", from);
 	cairo_text_extents(cr, from_sp, &fe);
 	cairo_restore(cr);
-	show_text_fit_as(cr, DESK_FONT_TYPE, note->app[0] ? note->app : "\xe2\x80\x94",
+	post_emoji_fit(cr, note->app[0] ? note->app : "\xe2\x80\x94",
 		tx + fe.x_advance, l2,
 		u * 0.052, true, 0.14, 0.18, 0.34, 0.92, -1, w - mx - tx - fe.x_advance);
 	/* a hand-ruled line under the heading */
@@ -22229,19 +22316,10 @@ static void post_card_face(cairo_t *cr, double w, double h, const struct desk_no
 
 	/* and what it says, on the lines */
 	if (note->body[0]) {
-		cairo_save(cr);
-		desk_font_select(cr, DESK_FONT_TYPE, note->body, false, false);
-		cairo_set_font_size(cr, u * 0.064);
-		char lines[5][256];
-		int room = (int)((h * 0.97 - u * 0.27) / (u * 0.095)) + 1;
-		int nl = wrap_lines(cr, note->body, w - mx * 2.0, lines, room < 5 ? (room > 0 ? room : 1) : 5);
-		cairo_set_source_rgba(cr, 0.26, 0.23, 0.30, 0.88);
-		for (int l = 0; l < nl; l++) {
-			cairo_move_to(cr, mx, u * 0.27 + l * u * 0.095);
-			cairo_show_text(cr, lines[l]);
-		}
-		cairo_restore(cr);
-	}
+        double body_h = h * 0.97 - u * 0.27;
+        post_emoji_body(cr, note->body, mx, u * 0.27, w - mx * 2.0,
+            u * 0.064, body_h, 5, 0.26, 0.23, 0.30, 0.88);
+    }
 	if (note->urgency >= DESK_URGENCY_CRITICAL) {
 		/* a red band down the edge: this one was sent express */
 		cairo_set_source_rgba(cr, 0.68, 0.12, 0.09, 0.55);
@@ -22737,7 +22815,7 @@ cairo_surface_t *desk_letter_sheet(const struct desk_note *note,
 		show_text_as(cr, DESK_FONT_TYPE, initial, ix + is * 0.5, iy + is * 0.74, is * 0.66, true,
 			0.26, 0.19, 0.14, 0.88, 0);
 	}
-	show_text_fit_as(cr, DESK_FONT_TYPE, note->app[0] ? note->app : "\xe2\x80\x94",
+	post_emoji_fit(cr, note->app[0] ? note->app : "\xe2\x80\x94",
 		ix + is + w * 0.030, iy + is * 0.70, h * 0.055, true,
 		0.17, 0.14, 0.11, 0.95, -1, w * 0.60);
 
@@ -22756,36 +22834,16 @@ cairo_surface_t *desk_letter_sheet(const struct desk_note *note,
 		0.28, 0.22, 0.16, 0.55);
 
 	/* what it says */
-	show_text_fit_as(cr, DESK_FONT_TYPE, note->summary[0] ? note->summary : "",
+	post_emoji_fit(cr, note->summary[0] ? note->summary : "",
 		w * 0.075, h * 0.320, h * 0.072, true, 0.14, 0.12, 0.10, 0.96,
 		-1, w * 0.85);
 
 	/* the body, broken across the lines the way a typed letter breaks --
 	 * at spaces, and anywhere in writing that has none */
 	if (note->body[0]) {
-		/* typed a little smaller when it is too long for the sheet (the
-		 * same in Spanish runs a third longer than in English) */
-		char lines[12][256];
-		int nl = 0;
-		double size = h * 0.050;
-		cairo_save(cr);
-		desk_font_select(cr, DESK_FONT_TYPE, note->body, false, false);
-		for (int k = 0; k < 6; k++) {
-			cairo_set_font_size(cr, size);
-			nl = wrap_lines(cr, note->body, w * 0.85, lines, 12);
-			int room = (int)((h * 0.92 - h * 0.435) / (size * 1.24)) + 1;
-			if (nl <= room) {
-				break;
-			}
-			size *= 0.95;
-		}
-		cairo_restore(cr);
-		double ly = h * 0.435, lh = size * 1.24;
-		for (int l = 0; l < nl && ly < h * 0.92; l++, ly += lh) {
-			show_text_as(cr, DESK_FONT_TYPE, lines[l], w * 0.075, ly, size, false,
-				0.30, 0.27, 0.24, 0.90, -1);
-		}
-	}
+        post_emoji_body(cr, note->body, w * 0.075, h * 0.435, w * 0.85,
+            h * 0.050, h * (0.92 - 0.435), 12, 0.30, 0.27, 0.24, 0.90);
+    }
 
 	paper_crease(cr, w, h, seed + 3, 0.05);
 	paper_edge(cr, w, h, seed, 0.65);
