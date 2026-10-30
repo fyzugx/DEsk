@@ -221,6 +221,13 @@ struct shell_conf {
 	bool fold_drawer;           /* a folded window goes into the drawer */
 	double sound;               /* how loud the desk is: 0 silent */
 	bool letter_sound;          /* a letter arriving is heard */
+	bool termites_enabled;      /* Wood Maintenance, by default on */
+	bool termites_damage_persistent; /* false: clear when insects leave */
+	long long termites_restore_ms; /* one-shot Restore Desk token */
+	int termites_wait;          /* seconds idle before first visitor */
+	int termites_level;         /* curious, colony, infestation */
+	bool termites_chew_windows, termites_chew_folded;
+	time_t termites_preview_stamp;
 	bool lights_at_login;       /* the room starts dark and the lamp comes up */
 	int gfx;                    /* how much is drawn: DESK_GFX_* (graphics) */
 	bool gfx_own;               /* and chosen in the user's own file, not the machine's */
@@ -551,6 +558,23 @@ struct agd_flight {
 enum { AGD_FLY_NONE, AGD_FLY_TO_CAL, AGD_FLY_TO_BINDER, AGD_FLY_OFF };
 enum { AGD_ON_BINDER, AGD_ON_CAL };
 
+/* Wood Maintenance v0.1.5: one independent state machine per termite. */
+struct termite_agent {
+    double x, y, tx, ty, heading, pace, legs, event_at, bite;
+    uint32_t rng, mark_seed;
+    int target_edge, stage, bursts;
+    bool target_paper;
+};
+
+/* Saved nibble marks are separate from the agents who made them. */
+#define TERMITES_SCAR_LIMIT 2048
+struct termite_scar {
+    double x, y, bite;
+    uint32_t seed;
+    int edge;
+    bool paper;
+};
+
 /* Keep destruction handlers for client-owned pointer constraints. */
 struct desk_game_constraint {
 	struct desk_server *server;
@@ -683,6 +707,24 @@ struct desk_server {
 	struct wl_listener start_drag;
 	struct wl_listener drag_icon_gone;
 	struct wlr_scene_tree *layer_drag;
+	struct wlr_scene_tree *layer_termites;
+	struct wlr_scene_buffer *termite_node;
+	struct wlr_scene_buffer *termites_scar_node;
+	bool termites_scars_loaded, termites_scars_dirty;
+	int termites_scar_w, termites_scar_h;
+	long long termites_restore_seen;
+	bool termites_active;
+	bool termites_preview_active, termites_preview_mode;
+	double termites_preview_at, termites_scatter_start, termites_scatter_until;
+	time_t termites_preview_seen;
+	uint64_t termites_session_key;
+	uint32_t termites_seed;
+	int termites_count, termites_level_seen;
+	double termites_last;
+	struct termite_agent termites_agents[18];
+	struct termite_scar termites_scars[TERMITES_SCAR_LIMIT];
+	int termites_scar_count, termites_scar_next;
+
 	/* how far the desk and everything on it is moved with the camera, at
 	 * the desk end of a move */
 	int desk_dx, desk_dy;
@@ -10226,6 +10268,14 @@ static void shell_conf_defaults(struct shell_conf *c)
 	c->fold_drawer = false;
 	c->sound = 1.0;
 	c->letter_sound = true;
+	c->termites_enabled = true;
+	c->termites_damage_persistent = true;
+	c->termites_restore_ms = 0;
+	c->termites_wait = 60;
+	c->termites_level = 1;
+	c->termites_chew_windows = true;
+	c->termites_chew_folded = true;
+	c->termites_preview_stamp = 0;
 	c->lights_at_login = true;
 	c->gfx = DESK_GFX_HIGH;
 	c->gfx_own = false;
@@ -10248,6 +10298,30 @@ static void shell_conf_defaults(struct shell_conf *c)
 /* The settings that are not yes or no. False if the key is not one. */
 static bool conf_other(struct shell_conf *c, const char *path, const char *key, const char *val)
 {
+	if (!strcmp(key, "termites_restore")) {
+		char *end = NULL;
+		long long stamp = strtoll(val, &end, 10);
+		if (end != val && *end == '\0' && stamp > 0) c->termites_restore_ms = stamp;
+		return true;
+	}
+	if (!strcmp(key, "termites_wait")) {
+		int sec = atoi(val);
+		if (sec == 30 || sec == 60 || sec == 120 || sec == 300) c->termites_wait = sec;
+		return true;
+	}
+	if (!strcmp(key, "termites_level")) {
+		if (!strcmp(val, "curious")) c->termites_level = 0;
+		else if (!strcmp(val, "colony")) c->termites_level = 1;
+		else if (!strcmp(val, "infestation")) c->termites_level = 2;
+		return true;
+	}
+	if (!strcmp(key, "termites_preview")) {
+		/* Seconds since epoch, valid only for a few seconds after clicking. */
+		char *end = NULL;
+		long long stamp = strtoll(val, &end, 10);
+		if (end != val && !*end && stamp > 0) c->termites_preview_stamp = (time_t)stamp;
+		return true;
+	}
 	if (!strcmp(key, "graphics")) {
 		static const char *const LEVEL[DESK_GFX_COUNT] = { "2d", "low", "medium", "high",
 			"ultra" };
@@ -10533,6 +10607,14 @@ static void shell_conf_read_file(struct shell_conf *c, const char *path)
 			c->fold_drawer = b;
 		} else if (!strcmp(key, "letter_sound")) {
 			c->letter_sound = b;
+		} else if (!strcmp(key, "termites_enabled")) {
+			c->termites_enabled = b;
+		} else if (!strcmp(key, "termites_damage_persistent")) {
+			c->termites_damage_persistent = b;
+		} else if (!strcmp(key, "termites_chew_windows")) {
+			c->termites_chew_windows = b;
+		} else if (!strcmp(key, "termites_chew_folded")) {
+			c->termites_chew_folded = b;
 		} else if (!strcmp(key, "lights_at_login")) {
 			c->lights_at_login = b;
 		} else if (!strcmp(key, "celebrations")) {
@@ -10710,6 +10792,9 @@ static int gfx_wanted(const struct desk_server *server)
 	return server->on_cpu && !c->gfx_own ? DESK_GFX_2D : c->gfx;
 }
 
+/* Wood Maintenance uses compositor-internal scene geometry and state. */
+#include "wood_maintenance.inc"
+
 /* Once a second: read again if it has changed since it was last read. */
 static void shell_conf_poll(struct desk_server *server)
 {
@@ -10731,6 +10816,32 @@ static void shell_conf_poll(struct desk_server *server)
 	bool first = !c->loaded;
 	enum desk_lang was = desk_lang_get();
 	shell_conf_load(c);
+	/* Restore Desk is a one-shot button, not an on/off setting. */
+	if (c->termites_restore_ms != server->termites_restore_seen) {
+		struct timespec ts;
+		clock_gettime(CLOCK_REALTIME, &ts);
+		long long wall_ms = (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+		if (c->termites_restore_ms > 0 && wall_ms >= c->termites_restore_ms
+			&& wall_ms - c->termites_restore_ms < 10000)
+			termites_damage_clear(server);
+		server->termites_restore_seen = c->termites_restore_ms;
+	}
+	/* Turning persistence off immediately clears previously stored damage. */
+	if (!c->termites_damage_persistent && !first &&
+		(server->termites_scar_count > 0 || !server->termites_scars_loaded))
+		termites_damage_clear(server);
+	/* A fresh Preview click starts an unbounded session. Only mouse motion stops it. */
+	if (c->termites_preview_stamp > 0
+		&& c->termites_preview_stamp != server->termites_preview_seen) {
+		time_t wall = time(NULL);
+		if (wall >= c->termites_preview_stamp && wall - c->termites_preview_stamp < 8) {
+			server->termites_preview_active = true;
+			server->termites_preview_at = real_sec();
+			server->termites_scatter_until = 0.0;
+			server->termites_session_key = 0;
+		}
+		server->termites_preview_seen = c->termites_preview_stamp;
+	}
 	c->loaded = true;
 	idle_rearm(server);
 	desk_sound_set_level(c->sound);
@@ -16222,6 +16333,7 @@ static int tick_cb(void *data)
 	clock_tick(server);
 	base_timeouts(server);
 	shell_conf_poll(server);
+	termites_tick(server);
 	/* The clock and the calendar live on the bookcase shelf now, and the
 	 * shelf is only repainted when something about it changes -- and while
 	 * you are looking at it, ten times a second. The seconds hand is
@@ -16242,6 +16354,7 @@ static int tick_cb(void *data)
 		} else if (shelf) {
 			ms = 100;
 		}
+		if (server->termites_active) ms = 120;
 		wl_event_source_timer_update(server->tick, ms);
 	}
 	return 0;
@@ -17554,6 +17667,12 @@ static int idle_cb(void *data)
 	struct desk_server *server = data;
 	int ms = idle_ms(server);
 	if (ms <= 0 || screen_all_dark(server)) {
+		return 0;
+	}
+	/* Preview is an explicit test; keep the screen awake until mouse movement. */
+	if (server->termites_preview_active) {
+		server->idle_at = real_sec();
+		idle_rearm(server);
 		return 0;
 	}
 	double idle = real_sec() - server->idle_at;
@@ -20295,6 +20414,8 @@ static void pointer_moved(struct desk_server *server, struct wlr_input_device *d
 			server->seat, (uint64_t)time_msec * 1000, dx, dy, udx, udy);
 	}
 	input_seen(server, "the pointer");
+	if (hypot(dx, dy) > 0.5)
+		termites_disturb(server);
 	/* the bookcase or the drawer may have come up, or gone, since */
 	desk_constraint_refresh(server);
 	struct wlr_pointer_constraint_v1 *c = server->active_constraint;
@@ -23202,6 +23323,8 @@ int main(int argc, char **argv)
 	server.cc_pressed = -1;
 	server.layer_top = wlr_scene_tree_create(&server.scene->tree);
 	server.layer_drag = wlr_scene_tree_create(&server.scene->tree);
+	/* Cosmetic termites draw over paper but under the screen lock. */
+	server.layer_termites = wlr_scene_tree_create(&server.scene->tree);
 	/* and over all of it, the front door when the screen is locked */
 	server.layer_lock = wlr_scene_tree_create(&server.scene->tree);
 	wlr_scene_node_set_enabled(&server.layer_lock->node, false);

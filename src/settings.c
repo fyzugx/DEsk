@@ -175,7 +175,7 @@ struct opens {
 /* What is on the form, in order: the key in shell.conf, what is printed,
  * for a choice its words and the values they are written as, and for an
  * action what it opens. */
-enum { S_SECTION, S_CHECK, S_CHOICE, S_DATE, S_ACTION };
+enum { S_SECTION, S_CHECK, S_CHOICE, S_DATE, S_ACTION, S_PREVIEW };
 struct setting {
 	int kind;
 	const char *key;
@@ -204,6 +204,11 @@ static const char *const BOUNCE_WORDS[] = { "Normal", "Low", "None", NULL };
 static const char *const BOUNCE_VALS[] = { "normal", "low", "off" };
 static const char *const CLOCK_WORDS[] = { "24-hour", "12-hour", NULL };
 static const char *const CLOCK_VALS[] = { "24h", "12h" };
+/* DEsk Wood Maintenance settings v0.1 */
+static const char *const TERM_WAIT_WORDS[] = { "30 sec", "1 min", "2 min", "5 min", NULL };
+static const char *const TERM_WAIT_VALS[] = { "30", "60", "120", "300" };
+static const char *const TERM_LEVEL_WORDS[] = { "One curious guest", "Small colony", "Call the exterminator", NULL };
+static const char *const TERM_LEVEL_VALS[] = { "curious", "colony", "infestation" };
 static const char *const SOUND_WORDS[] = { "Off", "Quiet", "Normal", NULL };
 static const char *const SOUND_VALS[] = { "off", "quiet", "normal" };
 /* each language in its own words, as a language is always offered */
@@ -306,6 +311,29 @@ static const struct setting SETTINGS[] = {
 		"Off, it turns up only when it is clicked. For windows, letters and binder sheets.",
 		NULL, NULL, 1, NULL },
 	{ S_SECTION, NULL, "DESK", NULL, NULL, NULL, 0, NULL },
+	{ S_CHECK, "termites_enabled", "Wood Maintenance (termites)",
+		"Visitors appear on the desk when it is left alone. Visual only.",
+		NULL, NULL, 1, NULL },
+	{ S_CHOICE, "termites_wait", "Termites start after",
+		"Time without activity before the first termite arrives.",
+		TERM_WAIT_WORDS, TERM_WAIT_VALS, 1, NULL },
+	{ S_CHOICE, "termites_level", "Infestation",
+		"Choose one termite, a small colony or a busy infestation.",
+		TERM_LEVEL_WORDS, TERM_LEVEL_VALS, 1, NULL },
+	{ S_CHECK, "termites_chew_windows", "Nibble open window corners",
+		"Pretend to chew paper edges; applications and files stay untouched.",
+		NULL, NULL, 1, NULL },
+	{ S_CHECK, "termites_chew_folded", "Nibble folded applications",
+		"Folded paper packets can be inspected too.", NULL, NULL, 1, NULL },
+	{ S_CHECK, "termites_damage_persistent", "Keep termite damage until restored",
+		"On by default. Chewed marks stay between idle visits and logins; turn off to "
+		"clear them automatically when the insects leave.", NULL, NULL, 1, NULL },
+	{ S_PREVIEW, "termites_restore", "Restore Desk",
+		"Repair all cosmetic termite damage now, including marks from earlier sessions.",
+		NULL, NULL, 1, NULL },
+	{ S_PREVIEW, NULL, "Preview Wood Maintenance",
+		"Preview runs until the mouse moves, without waiting for idle.",
+		NULL, NULL, 1, NULL },
 	{ S_CHOICE, "scale", "Size of things on the desk",
 		"Automatic follows the screen. Bigger things leave less desk; the room is traced "
 		"again for it, which takes a moment.", SCALE_WORDS, SCALE_VALS, 0, NULL },
@@ -745,6 +773,8 @@ static void conf_read_file(const char *path, struct desk_form_row *rows)
 				rows[i].value = date_read(val);
 				continue;
 			}
+			/* Restore Desk is a one-shot command, not a choice. */
+			if (st->kind == S_PREVIEW) continue;
 			rows[i].value = st->kind == S_CHECK ? val_yes(val, st->def) : val_choice(st, val);
 		}
 	}
@@ -934,6 +964,11 @@ static void words_apply(struct app *a)
 				a->opt[i][n] = TR(st->words[n]);
 			}
 			a->opt[i][n] = NULL;
+			rows[i].options = a->opt[i];
+		}
+		if (st->kind == S_PREVIEW) {
+			a->opt[i][0] = TR(st->key ? "Restore now ›" : "Preview now ›");
+			a->opt[i][1] = NULL;
 			rows[i].options = a->opt[i];
 		}
 		if (st->kind == S_DATE) {
@@ -2536,6 +2571,18 @@ static void use_row(struct app *a, int i, int opt)
 		return;
 	}
 	const struct setting *st = &SETTINGS[i];
+	if (st->kind == S_PREVIEW && st->key && !strcmp(st->key, "termites_restore")) {
+		struct timespec ts;
+		clock_gettime(CLOCK_REALTIME, &ts);
+		char stamp[32];
+		snprintf(stamp, sizeof stamp, "%lld",
+			(long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+		if (conf_write(a->path, "termites_restore", stamp)) {
+			desk_sound_play(DESK_SND_PENCIL_TICK, 0.0, 1.0, 0.0);
+			draw(a);
+		}
+		return;
+	}
 	if (st->kind == S_CHECK) {
 		set_value(a, i, !a->rows[i].value);
 	} else if (st->kind == S_CHOICE) {
@@ -2546,6 +2593,13 @@ static void use_row(struct app *a, int i, int opt)
 		set_value(a, i, opt >= 0 ? opt : (a->rows[i].value + 1 + n) % n);
 	} else if (st->kind == S_DATE) {
 		date_step(a, i, opt);
+	} else if (st->kind == S_PREVIEW) {
+		char stamp[48];
+		snprintf(stamp, sizeof stamp, "%lld", (long long)time(NULL));
+		if (conf_write(a->path, "termites_preview", stamp)) {
+			desk_sound_play(DESK_SND_PENCIL_TICK, 0.0, 1.0, 0.0);
+			draw(a);
+		}
 	} else if (st->kind == S_ACTION) {
 		open_row(a, i);
 	}
@@ -2671,7 +2725,7 @@ static void ptr_button(void *data, struct wl_pointer *p, uint32_t serial, uint32
 		} else if (at >= 0 && at == a->pressed) {
 			int i = a->pg_first[a->page] + at;
 			int kind = SETTINGS[i].kind;
-			if (kind == S_CHECK || kind == S_ACTION) {
+			if (kind == S_CHECK || kind == S_ACTION || kind == S_PREVIEW) {
 				use_row(a, i, -1);
 			} else if (opt >= 0 && opt == a->pressed_opt) {
 				use_row(a, i, opt);
@@ -3006,7 +3060,8 @@ int main(int argc, char **argv)
 			st->kind == S_SECTION ? DESK_FORM_SECTION
 				: st->kind == S_CHECK ? DESK_FORM_CHECK
 				: st->kind == S_DATE ? DESK_FORM_DATE
-				: st->kind == S_ACTION ? DESK_FORM_ACTION : DESK_FORM_CHOICE,
+				: (st->kind == S_ACTION || st->kind == S_PREVIEW)
+					? DESK_FORM_ACTION : DESK_FORM_CHOICE,
 			st->label, st->note, st->words, st->def, NULL, NULL };
 		a.found[i] = -2;
 	}
