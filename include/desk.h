@@ -53,8 +53,14 @@ void desk_draw_room_placeholder(cairo_t *cr, int w, int h);
  * nothing on them and no drawer, run on from the desk's screen and lit
  * less further from it. x, y, w, h: that screen, in the coordinates the
  * desk's screen (desk_w by desk_h) has its top left at 0,0 in; cr draws
- * its w by h from 0,0. */
-void desk_draw_side_desk(cairo_t *cr, int x, int y, int w, int h, int desk_w, int desk_h);
+ * its w by h from 0,0. pull: the screen has a drawer of its own (Shell
+ * Settings), and the desk's front edge over it runs along its foot. */
+void desk_draw_side_desk(cairo_t *cr, int x, int y, int w, int h, int desk_w, int desk_h,
+	bool pull);
+/* And what is under its foot, foot_h of it from the screen's foot down: the
+ * room below the desk, which its drawer coming out shows as the boards go
+ * up; x and w as for the boards. */
+void desk_draw_side_foot(cairo_t *cr, int x, int w, int foot_h, int desk_w, int desk_h);
 /* The textures paper, wood and grain are cut from, made on a thread of
  * their own now rather than by the first painter that asks for them: the
  * first window's paper was a third of a second late on an old machine,
@@ -790,6 +796,16 @@ bool desk_drawer_felt_box(int screen_w, int screen_h, double box[4]);
 void desk_drawer_paint_items(cairo_t *cr, int screen_w, int screen_h,
 	const struct desk_drawer_item *items, int n, const double *x, const double *fit,
 	int hover);
+/* A false bottom (Shell Settings): the felt a board that slides back by
+ * lift (0 down, 1 back) to show a hollow under it. The hollow, opaque over
+ * the felt; the board over it with its ring (only the ring, lift 0); how
+ * far up the sheet the board has gone, to lay what lies on it with it; and
+ * whether a point on the screen, the drawer out by open, is on the ring. */
+void desk_drawer_paint_hollow(cairo_t *cr, int screen_w, int screen_h);
+void desk_drawer_paint_board(cairo_t *cr, int screen_w, int screen_h, double lift, bool hot);
+double desk_drawer_board_shift(int screen_w, int screen_h, double lift);
+bool desk_drawer_ring_at(int screen_w, int screen_h, double open, double lift, double px,
+	double py);
 /* A point on the screen with the drawer out by open: false unless it is
  * over the felt; then where along the row it is, and whether it is level
  * with the things lying there (row). */

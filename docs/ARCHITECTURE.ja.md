@@ -208,7 +208,7 @@ libsystemd がある（`-Dpost=enabled`）と、DEsk はイベントループの
 | --- | --- |
 | 設定 | `$XDG_CONFIG_HOME/desk/shell.conf`（機械の既定は `/etc/xdg/desk/shell.conf`） |
 | 画面の配置 | `$XDG_CONFIG_HOME/desk/displays.conf` |
-| 引き出しの中身 | `$XDG_CONFIG_HOME/desk/drawer` |
+| 引き出しの中身 | `$XDG_CONFIG_HOME/desk/drawer`（ほかの画面の引き出しは `drawer@画面名`、二重底の下は同じ名前に `.hidden`） |
 | 棚の指定 | `$XDG_CONFIG_HOME/desk/shelves.conf` |
 | 既定のプログラム | `~/.config/desk-mimeapps.list`、それから freedesktop.org の一覧 |
 | カレンダーの付箋、メモ帳 | `$XDG_DATA_HOME/desk/calendar`、`$XDG_DATA_HOME/desk/memo` |

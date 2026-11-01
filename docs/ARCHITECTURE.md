@@ -347,7 +347,7 @@ the desk starts; a handler is not.
 | --- | --- |
 | Settings | `$XDG_CONFIG_HOME/desk/shell.conf` (the machine's defaults in `/etc/xdg/desk/shell.conf`) |
 | Screen arrangements | `$XDG_CONFIG_HOME/desk/displays.conf` |
-| Drawer contents | `$XDG_CONFIG_HOME/desk/drawer` |
+| Drawer contents | `$XDG_CONFIG_HOME/desk/drawer`; another screen's drawer `drawer@SCREEN`; a false bottom's hollow the same with `.hidden` |
 | Shelf overrides | `$XDG_CONFIG_HOME/desk/shelves.conf` |
 | Default programs | `~/.config/desk-mimeapps.list`, then the freedesktop.org lists |
 | Calendar notes, memo pad | `$XDG_DATA_HOME/desk/calendar`, `$XDG_DATA_HOME/desk/memo` |
