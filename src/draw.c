@@ -23385,6 +23385,9 @@ void desk_draw_side_desk(cairo_t *cr, int x, int y, int w, int h, int desk_w, in
 		cairo_paint(cr);
 		cairo_pattern_destroy(wd);
 	}
+	/* a mat stretched across the screens goes on before the dark, so that
+	 * the lamp is as far from it as from the boards under it */
+	desk_draw_mat_side(cr, x, y, w, h, desk_w, desk_h);
 	/* further from the lamp: from the edge nearest the desk's screen, where
 	 * it is nearly as light, to the far edge, a good deal darker */
 	double cx = desk_w * 0.5, cy = desk_h * 0.5;
@@ -30715,6 +30718,7 @@ bool desk_mat_preset(const char *name, struct desk_mat *out)
 static pthread_mutex_t g_mat_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct desk_mat g_mat = { .size = DESK_MAT_MEDIUM };
 static uint64_t g_mat_gen = 1;          /* changes when what is shown does */
+static int g_mat_screens[4];            /* x, y, w, h of every screen together; w 0: not known */
 static cairo_surface_t *g_mat_pic;      /* the photo read for g_mat_pic_path */
 static char g_mat_pic_path[512];        /* ...even when it could not be read: not tried twice */
 static bool g_mat_busy;                 /* the thread reading it is running */
@@ -30976,7 +30980,7 @@ bool desk_set_mat(const struct desk_mat *m)
 		return false;
 	}
 	pthread_mutex_lock(&g_mat_lock);
-	bool same = g_mat.kind == m->kind && g_mat.size == m->size
+	bool same = g_mat.kind == m->kind && g_mat.size == m->size && g_mat.span == m->span
 		&& !memcmp(g_mat.rgb, m->rgb, sizeof g_mat.rgb)
 		&& (m->kind != DESK_MAT_PHOTO || !strcmp(g_mat.photo, m->photo));
 	bool photo = m->kind == DESK_MAT_PHOTO && m->photo[0];
@@ -31005,7 +31009,23 @@ bool desk_set_mat(const struct desk_mat *m)
 	return !same;
 }
 
-static uint64_t mat_key(void)
+bool desk_set_mat_screens(int x, int y, int w, int h)
+{
+	pthread_mutex_lock(&g_mat_lock);
+	bool changed = g_mat_screens[0] != x || g_mat_screens[1] != y || g_mat_screens[2] != w
+		|| g_mat_screens[3] != h;
+	if (changed) {
+		g_mat_screens[0] = x;
+		g_mat_screens[1] = y;
+		g_mat_screens[2] = w;
+		g_mat_screens[3] = h;
+		g_mat_gen++;
+	}
+	pthread_mutex_unlock(&g_mat_lock);
+	return changed;
+}
+
+uint64_t desk_mat_key(void)
 {
 	pthread_mutex_lock(&g_mat_lock);
 	uint64_t k = g_mat_gen;
@@ -31014,14 +31034,23 @@ static uint64_t mat_key(void)
 }
 
 /* Where the mat lies (x, y, w, h): centred, near the front edge, and never up
- * to the console, clock and post box. */
-static void mat_rect(int w, int h, double size, double r[4])
+ * to the console, clock and post box. With span, on all the screens together
+ * (desk_set_mat_screens) as on one the size of them, so it can run off the
+ * desk's own. */
+static void mat_rect(int w, int h, double size, bool span, const int screens[4], double r[4])
 {
 	size = isfinite(size) ? clampf(size, 0.0, 1.0) : DESK_MAT_MEDIUM;
-	r[2] = w * (0.34 + 0.58 * size);
-	r[3] = h * (0.36 + 0.46 * size);
-	r[0] = (w - r[2]) * 0.5;
-	r[1] = h * 0.96 - r[3];
+	double bx = 0.0, by = 0.0, bw = w, bh = h;
+	if (span && screens[2] > 0 && screens[3] > 0) {
+		bx = screens[0];
+		by = screens[1];
+		bw = screens[2];
+		bh = screens[3];
+	}
+	r[2] = bw * (0.34 + 0.58 * size);
+	r[3] = bh * (0.36 + 0.46 * size);
+	r[0] = bx + (bw - r[2]) * 0.5;
+	r[1] = by + bh * 0.96 - r[3];
 }
 
 /* The mat's lift off the boards, in pixels: a thick felt blotter. */
@@ -31036,12 +31065,15 @@ static bool mat_box(int w, int h, double box[4])
 	pthread_mutex_lock(&g_mat_lock);
 	int kind = g_mat.kind;
 	double size = g_mat.size;
+	bool span = g_mat.span;
+	int screens[4];
+	memcpy(screens, g_mat_screens, sizeof screens);
 	pthread_mutex_unlock(&g_mat_lock);
 	if (kind == DESK_MAT_NONE) {
 		return false;
 	}
 	double r[4], pad = 0.035 * fmin(w, h);
-	mat_rect(w, h, size, r);
+	mat_rect(w, h, size, span, screens, r);
 	box[0] = floor(r[0] - pad);
 	box[1] = floor(r[1] - pad);
 	box[2] = ceil(r[0] + r[2] + pad) - box[0];
@@ -31166,12 +31198,17 @@ static void mat_thread(const float rgb[3], double out[3])
 	}
 }
 
-static void mat_paint(cairo_t *cr, int w, int h)
+/* The mat, in the desk screen's coordinates; another screen's part is drawn by
+ * moving cr. Only the desk's own screen is lit by the baked room: a side desk
+ * dims what is on it with the boards. */
+static void mat_paint_body(cairo_t *cr, int w, int h, bool lit_by_room)
 {
 	struct desk_mat m;
+	int screens[4];
 	cairo_surface_t *pic = NULL;
 	pthread_mutex_lock(&g_mat_lock);
 	m = g_mat;
+	memcpy(screens, g_mat_screens, sizeof screens);
 	if (m.kind == DESK_MAT_PHOTO && g_mat_pic && !strcmp(g_mat_pic_path, m.photo)) {
 		pic = cairo_surface_reference(g_mat_pic);
 	}
@@ -31180,7 +31217,7 @@ static void mat_paint(cairo_t *cr, int w, int h)
 		return;
 	}
 	double r[4], u = fmin(w, h);
-	mat_rect(w, h, m.size, r);
+	mat_rect(w, h, m.size, m.span, screens, r);
 	double x = r[0], y = r[1], mw = r[2], mh = r[3], rad = 0.014 * u;
 	double lift = mat_lift(w, h);
 
@@ -31230,7 +31267,7 @@ static void mat_paint(cairo_t *cr, int w, int h)
 		overlay_grain(cr, x, y, mw, mh, 1.6);
 	}
 	/* the lamp on it: the baked room's own light, over the whole mat */
-	cairo_surface_t *lit = mat_light(w, h);
+	cairo_surface_t *lit = lit_by_room ? mat_light(w, h) : NULL;
 	if (lit) {
 		cairo_set_operator(cr, CAIRO_OPERATOR_MULTIPLY);
 		cairo_set_source_surface(cr, lit, 0, 0);
@@ -31294,6 +31331,35 @@ static void mat_paint(cairo_t *cr, int w, int h)
 	}
 }
 
+static void mat_paint(cairo_t *cr, int w, int h)
+{
+	mat_paint_body(cr, w, h, true);
+}
+
+void desk_draw_mat_side(cairo_t *cr, int x, int y, int w, int h, int desk_w, int desk_h)
+{
+	struct desk_mat m;
+	int screens[4];
+	pthread_mutex_lock(&g_mat_lock);
+	m = g_mat;
+	memcpy(screens, g_mat_screens, sizeof screens);
+	pthread_mutex_unlock(&g_mat_lock);
+	if (m.kind == DESK_MAT_NONE || !m.span || desk_w < 8 || desk_h < 8) {
+		return;
+	}
+	double r[4], pad = 0.035 * fmin(desk_w, desk_h);
+	mat_rect(desk_w, desk_h, m.size, true, screens, r);
+	/* nothing of it, or of its shadow, on this screen */
+	if (r[0] + r[2] + pad <= x || r[0] - pad >= x + w || r[1] + r[3] + pad <= y
+		|| r[1] - pad >= y + h) {
+		return;
+	}
+	cairo_save(cr);
+	cairo_translate(cr, -x, -y);
+	mat_paint_body(cr, desk_w, desk_h, false);
+	cairo_restore(cr);
+}
+
 /* ---- what lies over the desk, a sprite at a time ----------------
  *
  * The compositor used to repaint everything drawn over the baked desk --
@@ -31310,7 +31376,7 @@ uint64_t desk_overlay_key(int which, time_t now, int unread)
 {
 	switch (which) {
 	case DESK_OVL_MAT:
-		return mat_key();
+		return desk_mat_key();
 	case DESK_OVL_CLOCK:
 		return desk_clock_key(now);
 	case DESK_OVL_POST:

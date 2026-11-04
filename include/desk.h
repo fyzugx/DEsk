@@ -1063,6 +1063,7 @@ struct desk_mat {
 	float rgb[3];      /* DESK_MAT_COLOR; the cloth a photo that cannot be read falls back to */
 	char photo[512];   /* DESK_MAT_PHOTO: the picture's path */
 	double size;       /* 0 .. 1, as above */
+	bool span;         /* one mat across every screen, not one on the desk's own */
 };
 /* The preset named (green, navy, burgundy, charcoal, cream) or a colour
  * written #rrggbb, as a mat: false for anything else. Leaves size alone. */
@@ -1077,6 +1078,18 @@ bool desk_mat_size_parse(const char *s, double *out);
  * read at all); until it lands the mat is
  * the plain cloth, and desk_overlay_key changes when it does. */
 bool desk_set_mat(const struct desk_mat *m);
+/* The screens the mat may stretch across (desk_mat.span): the box all of
+ * them fill together, in the coordinates the desk's screen has its top
+ * left at 0,0 in (the layout's). True when that has changed. Without
+ * span, or with one screen, the mat is the desk's own screen's. */
+bool desk_set_mat_screens(int x, int y, int w, int h);
+/* What the mat puts on the desk beside the desk's own screen: the part of
+ * it that falls on x, y, w, h (laid out as for desk_draw_side_desk, which
+ * calls this before it dims the desk away from the lamp). Nothing with no
+ * span, or no mat. */
+void desk_draw_mat_side(cairo_t *cr, int x, int y, int w, int h, int desk_w, int desk_h);
+/* A key that changes when what desk_draw_mat_side draws would. */
+uint64_t desk_mat_key(void);
 
 /* ---- the clock on the back of the desk ----------------------------
  *

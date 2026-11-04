@@ -339,6 +339,9 @@ static const struct setting SETTINGS[] = {
 		"in shell.conf.", MAT_WORDS, MAT_VALS, 0, NULL },
 	{ S_CHOICE, "desk_mat_size", "Size of the desk mat", "How much of the desk it covers.",
 		MATSZ_WORDS, MATSZ_VALS, 1, NULL },
+	{ S_CHECK, "desk_mat_span", "Stretch the mat across every screen",
+		"One mat over all the screens, its photo running on from one to the next. Off, the "
+		"mat is on the desk's own screen.", NULL, NULL, 0, NULL },
 	{ S_CHECK, "lights_at_login", "Bring the lamp up slowly at login",
 		"The room starts dark and the lamp comes up as it is made; the clock counts how far. "
 		"Off, it is lit at once.", NULL, NULL, 1, NULL },
@@ -1024,6 +1027,7 @@ static bool conf_write(const char *path, const char *key, const char *value)
 			"#   desk_mat = none | green | navy | burgundy | charcoal | cream | #rrggbb | photo\n"
 			"#                                      a mat on the desk, under the windows\n"
 			"#   desk_mat_photo = /path/to/picture  the picture, for desk_mat = photo\n"
+			"#   desk_mat_span = yes | no           one mat across every screen\n"
 			"#   desk_mat_size = small | medium | large | full, or a percentage\n"
 			"#   language = auto | en | ja | zh | ko | es | fr | de\n"
 			"#                                      the desk's words; auto: the locale's\n"

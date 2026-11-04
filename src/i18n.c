@@ -532,6 +532,21 @@ static const char *const WORDS[][DESK_LANG_COUNT] = {
 		"désigne desk_mat_photo dans shell.conf.",
 		"Eine Unterlage auf dem Schreibtisch, unter den Fenstern. „Foto“ legt das Bild aus, "
 		"das desk_mat_photo in der shell.conf nennt." },
+	{ "Stretch the mat across every screen",
+		"マットをすべての画面にまたがらせる", "让桌垫横跨所有屏幕", "매트를 모든 화면에 펼치기",
+		"Extender el tapete por todas las pantallas", "Étendre le sous-main sur tous les écrans",
+		"Unterlage über alle Bildschirme ziehen" },
+	{ "One mat over all the screens, its photo running on from one to the next. Off, the mat "
+		"is on the desk's own screen.",
+		"一枚のマットをすべての画面にかけ、写真が画面から画面へ続きます。オフのときは机の画面だけです。",
+		"一张桌垫铺在所有屏幕上，照片从一个屏幕延续到下一个。关闭时只在桌子所在的屏幕上。",
+		"매트 한 장을 모든 화면에 걸쳐 깔고 사진이 화면에서 화면으로 이어집니다. 끄면 책상 화면에만 깔립니다.",
+		"Un solo tapete sobre todas las pantallas, con su foto continuando de una a otra. "
+		"Apagado, el tapete queda en la pantalla del escritorio.",
+		"Un seul sous-main sur tous les écrans, sa photo se prolongeant de l'un à l'autre. "
+		"Désactivé, il reste sur l'écran du bureau.",
+		"Eine Unterlage über alle Bildschirme, ihr Foto läuft von einem zum nächsten weiter. "
+		"Aus, liegt sie nur auf dem Bildschirm des Schreibtischs." },
 	{ "Size of the desk mat", "デスクマットの大きさ", "桌垫大小", "데스크 매트 크기",
 		"Tamaño del tapete", "Taille du sous-main", "Größe der Unterlage" },
 	{ "How much of the desk it covers.", "机の上でどれだけを覆うか。", "覆盖桌面的多少。",
