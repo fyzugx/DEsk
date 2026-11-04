@@ -28,6 +28,7 @@ enum desk_dev_action {
 	DESK_DEV_DISCONNECT,
 	DESK_DEV_DEFAULT,     /* sound: make it the one used */
 	DESK_DEV_SCAN,        /* look again for what is in range */
+	DESK_DEV_MUTE,        /* sound: silence the device, or let it speak again */
 };
 
 #define DESK_DEV_MAX 40
@@ -40,6 +41,7 @@ struct desk_dev {
 	bool secure;       /* Wi-Fi: it wants a password */
 	bool known;        /* Wi-Fi: saved; Bluetooth: paired */
 	bool active;       /* connected; for sound, the one in use */
+	bool muted;        /* sound: silenced */
 };
 
 struct desk_dev_list {

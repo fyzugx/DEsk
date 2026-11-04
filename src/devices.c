@@ -441,6 +441,8 @@ static void read_sound(struct desk_dev_list *L, bool sink)
 			d->active = def[0] && !strcmp(d->id, def);
 		} else if (!strncmp(line, "Description: ", 13)) {
 			copy(d->label, sizeof d->label, line + 13);
+		} else if (!strncmp(line, "Mute: ", 6)) {
+			d->muted = !strncmp(line + 6, "yes", 3);
 		}
 	}
 	/* a sink's monitor is not something anybody records from on purpose */
@@ -535,6 +537,12 @@ static bool act(const struct dev_job *j)
 	}
 	case DESK_DEV_SINK:
 	case DESK_DEV_SOURCE: {
+		if (j->action == DESK_DEV_MUTE) {
+			const char *argv[] = { "pactl",
+				j->kind == DESK_DEV_SINK ? "set-sink-mute" : "set-source-mute", j->id,
+				"toggle", NULL };
+			return run(argv, 5, out, sizeof out);
+		}
 		if (j->action != DESK_DEV_DEFAULT) {
 			return true;
 		}

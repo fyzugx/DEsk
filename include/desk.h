@@ -227,6 +227,8 @@ struct desk_tuner {
 	int band;                          /* -1 none; else which of band_word is chosen */
 	const char *band_word[2];
 	const char *right;                 /* the right button's word */
+	const char *mid;                   /* the middle button's word (let go of, mute), or NULL */
+	bool mid_lit;                      /* it is in effect (muted) */
 	int hot;                           /* DESK_TUNER_* under the pointer, or -1 */
 	bool busy;                         /* something asked of it, not back yet */
 	double clock;                      /* seconds, for the busy lamp */
@@ -240,6 +242,7 @@ enum {
 	DESK_TUNER_LEFT,
 	DESK_TUNER_BAND,
 	DESK_TUNER_RIGHT,
+	DESK_TUNER_MID,
 };
 struct desk_tuner_place {
 	double x, y, w, h;       /* where it is drawn */

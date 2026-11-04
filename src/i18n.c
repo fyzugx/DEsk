@@ -148,6 +148,8 @@ static const char *const WORDS[][DESK_LANG_COUNT] = {
 		"Nicht verbunden" },
 	{ "%d connected", "%d 台接続中", "已连接 %d 个", "%d개 연결됨", "%d conectados", "%d connectés",
 		"%d verbunden" },
+	{ "DISCONNECT", "切断", "断开", "연결 끊기", "DESCONECTAR", "DÉCONNECTER", "TRENNEN" },
+	{ "MUTE", "消音", "静音", "음소거", "SILENCIO", "SOURDINE", "STUMM" },
 	{ "RESCAN", "再検索", "重新扫描", "다시 검색", "BUSCAR", "RECHERCHER", "SUCHEN" },
 	{ "SEARCH", "探す", "搜索", "찾기", "BUSCAR", "CHERCHER", "SUCHEN" },
 	{ "Connected", "接続中", "已连接", "연결됨", "Conectado", "Connecté", "Verbunden" },

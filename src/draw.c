@@ -21481,6 +21481,7 @@ bool desk_console_piece_box(int w, int h, int p, double box[4])
 #define TUNER_REACH (84.0 * M_PI / 180.0)
 #define TUNER_LX 150.0
 #define TUNER_RX 1050.0
+#define TUNER_MX 900.0
 #define TUNER_BY 262.0
 #define TUNER_BTN 19.0
 
@@ -21543,6 +21544,122 @@ static void tuner_button(cairo_t *cr, double x, double y, const char *word, bool
 		cairo_fill(cr);
 	}
 	show_text_fit_as(cr, DESK_FONT_ENGRAVE, word, x, y + TUNER_BTN + 19.0, 16.0, true,
+		0.84, 0.79, 0.66, 0.85, 0, 170.0);
+}
+
+/* A push button set in a plate of brass at x, y (the tuner's own units),
+ * its word under it. Out, it stands proud of the plate, domed and bright;
+ * in (a latched MUTE), it has gone down into its well, dull, with the
+ * well's rim shading it. */
+#define TUNER_PLATE_HALF 31.0
+
+static void tuner_plate_button(cairo_t *cr, double x, double y, const char *word, bool in,
+	bool hot)
+{
+	double hw = TUNER_PLATE_HALF;
+	/* what the plate throws on the face */
+	desk_rounded_path(cr, x - hw + 2.0, y - hw + 4.0, hw * 2, hw * 2, 7.0);
+	cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.50);
+	cairo_fill(cr);
+	/* the plate: brushed brass, bevelled */
+	cairo_pattern_t *g = cairo_pattern_create_linear(0, y - hw, 0, y + hw);
+	cairo_pattern_add_color_stop_rgb(g, 0.0, 0.86, 0.70, 0.38);
+	cairo_pattern_add_color_stop_rgb(g, 0.5, 0.66, 0.50, 0.22);
+	cairo_pattern_add_color_stop_rgb(g, 1.0, 0.44, 0.32, 0.13);
+	desk_rounded_path(cr, x - hw, y - hw, hw * 2, hw * 2, 7.0);
+	cairo_set_source(cr, g);
+	cairo_fill_preserve(cr);
+	cairo_pattern_destroy(g);
+	cairo_save(cr);
+	cairo_clip(cr);
+	for (int i = 0; i < 12; i++) {
+		double ly = y - hw + 3.0 + i * 5.3;
+		cairo_move_to(cr, x - hw, ly);
+		cairo_line_to(cr, x + hw, ly + 0.6);
+		cairo_set_line_width(cr, 0.6);
+		cairo_set_source_rgba(cr, i % 2 ? 1.0 : 0.2, i % 2 ? 0.92 : 0.12, i % 2 ? 0.7 : 0.03,
+			0.10);
+		cairo_stroke(cr);
+	}
+	overlay_grain(cr, x - hw, y - hw, hw * 2, hw * 2, 0.45);
+	cairo_restore(cr);
+	desk_rounded_path(cr, x - hw + 1.0, y - hw + 1.0, hw * 2 - 2.0, hw * 2 - 2.0, 6.0);
+	cairo_set_line_width(cr, 1.4);
+	cairo_set_source_rgba(cr, 1.0, 0.94, 0.72, 0.45);   /* the lit edge, top and left */
+	cairo_stroke(cr);
+	desk_rounded_path(cr, x - hw, y - hw, hw * 2, hw * 2, 7.0);
+	cairo_set_line_width(cr, 1.2);
+	cairo_set_source_rgba(cr, 0.16, 0.10, 0.03, 0.85);
+	cairo_stroke(cr);
+	/* four screws, each with a slot at its own angle */
+	for (int i = 0; i < 4; i++) {
+		double sx = x + (i & 1 ? hw - 6.5 : -hw + 6.5), sy = y + (i & 2 ? hw - 6.5 : -hw + 6.5);
+		cairo_arc(cr, sx, sy, 2.6, 0, 2 * M_PI);
+		cairo_set_source_rgba(cr, 0.30, 0.22, 0.08, 0.95);
+		cairo_fill(cr);
+		double a = 0.6 + i * 1.3;
+		cairo_move_to(cr, sx - cos(a) * 2.2, sy - sin(a) * 2.2);
+		cairo_line_to(cr, sx + cos(a) * 2.2, sy + sin(a) * 2.2);
+		cairo_set_line_width(cr, 0.9);
+		cairo_set_source_rgba(cr, 0.06, 0.04, 0.01, 0.9);
+		cairo_stroke(cr);
+	}
+	/* the well: dark, with its far rim in shadow */
+	double well = TUNER_BTN + 3.5;
+	cairo_arc(cr, x, y, well + 1.2, 0, 2 * M_PI);
+	cairo_set_source_rgba(cr, 1.0, 0.92, 0.65, 0.35);   /* the lip catching light below */
+	cairo_fill(cr);
+	cairo_pattern_t *w = cairo_pattern_create_linear(0, y - well, 0, y + well);
+	cairo_pattern_add_color_stop_rgb(w, 0.0, 0.01, 0.005, 0.0);
+	cairo_pattern_add_color_stop_rgb(w, 1.0, 0.10, 0.07, 0.03);
+	cairo_arc(cr, x, y, well, 0, 2 * M_PI);
+	cairo_set_source(cr, w);
+	cairo_fill(cr);
+	cairo_pattern_destroy(w);
+	/* the cap */
+	double cy = in ? y + 2.6 : y - 1.8;
+	double r = in ? TUNER_BTN * 0.92 : TUNER_BTN;
+	if (!in) {
+		/* its side, where it stands out of the well */
+		cairo_arc(cr, x, cy + 3.2, r, 0, 2 * M_PI);
+		cairo_set_source_rgb(cr, 0.34, 0.24, 0.08);
+		cairo_fill(cr);
+	}
+	cairo_pattern_t *d = cairo_pattern_create_radial(x - r * 0.35, cy - r * 0.40, r * 0.10, x, cy, r);
+	if (in) {
+		cairo_pattern_add_color_stop_rgb(d, 0.0, 0.62, 0.48, 0.24);
+		cairo_pattern_add_color_stop_rgb(d, 1.0, 0.26, 0.18, 0.07);
+	} else {
+		cairo_pattern_add_color_stop_rgb(d, 0.0, 1.00, 0.95, 0.72);
+		cairo_pattern_add_color_stop_rgb(d, 0.55, 0.84, 0.66, 0.30);
+		cairo_pattern_add_color_stop_rgb(d, 1.0, 0.48, 0.35, 0.13);
+	}
+	cairo_arc(cr, x, cy, r, 0, 2 * M_PI);
+	cairo_set_source(cr, d);
+	cairo_fill_preserve(cr);
+	cairo_pattern_destroy(d);
+	cairo_set_line_width(cr, 1.0);
+	cairo_set_source_rgba(cr, 0.12, 0.08, 0.02, 0.8);
+	cairo_stroke(cr);
+	if (in) {
+		/* the well's rim shading the top of the cap that has gone down */
+		cairo_save(cr);
+		cairo_arc(cr, x, cy, r, 0, 2 * M_PI);
+		cairo_clip(cr);
+		cairo_pattern_t *s = cairo_pattern_create_linear(0, cy - r, 0, cy);
+		cairo_pattern_add_color_stop_rgba(s, 0.0, 0.0, 0.0, 0.0, 0.65);
+		cairo_pattern_add_color_stop_rgba(s, 1.0, 0.0, 0.0, 0.0, 0.0);
+		cairo_set_source(cr, s);
+		cairo_paint(cr);
+		cairo_pattern_destroy(s);
+		cairo_restore(cr);
+	}
+	if (hot) {
+		cairo_arc(cr, x, cy, r - 2.0, 0, 2 * M_PI);
+		cairo_set_source_rgba(cr, 1.0, 0.95, 0.80, 0.22);
+		cairo_fill(cr);
+	}
+	show_text_fit_as(cr, DESK_FONT_ENGRAVE, word, x, y + hw + 16.0, 16.0, true,
 		0.84, 0.79, 0.66, 0.85, 0, 170.0);
 }
 
@@ -21812,6 +21929,10 @@ void desk_draw_tuner(cairo_t *cr, const struct desk_tuner *t, const struct desk_
 	if (t->right) {
 		tuner_button(cr, TUNER_RX, TUNER_BY - 8.0, t->right, t->hot == DESK_TUNER_RIGHT);
 	}
+	if (t->mid) {
+		tuner_plate_button(cr, TUNER_MX, TUNER_BY - 8.0, t->mid, t->mid_lit,
+			t->hot == DESK_TUNER_MID);
+	}
 
 	cairo_pop_group_to_source(cr);
 	cairo_paint_with_alpha(cr, pull);
@@ -21846,6 +21967,10 @@ int desk_tuner_hit(const struct desk_tuner *t, const struct desk_tuner_place *pl
 	}
 	if (t->right && hypot(x - TUNER_RX, y - (TUNER_BY - 8.0)) <= TUNER_BTN + 6.0) {
 		return DESK_TUNER_RIGHT;
+	}
+	if (t->mid && fabs(x - TUNER_MX) <= TUNER_PLATE_HALF
+		&& fabs(y - (TUNER_BY - 8.0)) <= TUNER_PLATE_HALF) {
+		return DESK_TUNER_MID;
 	}
 	return DESK_TUNER_PLATE;
 }

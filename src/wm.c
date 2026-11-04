@@ -1087,6 +1087,7 @@ struct desk_server {
 	double ccd_pull, ccd_pull_from, ccd_pull_to, ccd_pull_start;
 	bool ccd_pulling;
 	int ccd_hot, ccd_sel, ccd_band;
+	struct wl_event_source *ccd_poll;   /* reads the open list again, now and then */
 	int ccd_choose_down;                /* the CHOOSE held down, or -1 */
 	/* the room the lid opened in (desk_console_room); and, when that room
 	 * has given way to another (the screen changed shape) with the lid
@@ -8713,6 +8714,33 @@ static bool ccd_build(struct desk_server *server, struct desk_tuner *t)
 		snprintf(t->read2, sizeof t->read2, "%s", TR("That did not work"));
 	}
 
+	/* the middle button: let go of what is connected; for the sound that
+	 * plays, silence it */
+	if (kind == DESK_DEV_SINK) {
+		struct desk_meters m;
+		desk_meters_read_volume(&m);
+		if (m.have_volume) {
+			t->mid = TR("MUTE");
+			t->mid_lit = m.muted;
+		}
+	} else if (kind == DESK_DEV_SOURCE) {
+		/* the microphone in use, as pactl last reported it */
+		for (int i = 0; L.read && L.have && i < L.n; i++) {
+			if (L.d[i].active) {
+				t->mid = TR("MUTE");
+				t->mid_lit = L.d[i].muted;
+				break;
+			}
+		}
+	} else if (kind != DESK_DEV_SOURCE && L.read && L.have && !L.off) {
+		for (int i = 0; i < L.n; i++) {
+			if (L.d[i].active) {
+				t->mid = TR("DISCONNECT");
+				break;
+			}
+		}
+	}
+
 	/* the other readout: what is in use now, wherever the dial is turned */
 	if (L.read && L.have && !L.off) {
 		int at = -1, n = 0;
@@ -8869,6 +8897,8 @@ static void ccd_paint(struct desk_server *server)
 	key = key_add(key, &t.hot, sizeof t.hot);
 	key = key_add(key, &t.band, sizeof t.band);
 	key = key_add(key, &t.busy, sizeof t.busy);
+	key = key_add(key, &t.mid_lit, sizeof t.mid_lit);
+	key = key_add(key, t.mid ? t.mid : "", t.mid ? strlen(t.mid) : 0);
 	key = key_add(key, t.title, strlen(t.title));
 	key = key_add(key, t.read1, strlen(t.read1));
 	key = key_add(key, t.read2, strlen(t.read2));
@@ -9015,6 +9045,47 @@ static void ccd_take(struct desk_server *server)
 	server_schedule_frames(server);
 }
 
+static void clock_publish(struct desk_server *server);
+
+/* The middle button: sound, silenced or let speak again; a wireless
+ * network or Bluetooth device, the one under the pointer if it is
+ * connected, else the first that is, let go of. */
+static void ccd_mid(struct desk_server *server)
+{
+	enum desk_dev_kind kind = ccd_kind(server);
+	snd_at(server, DESK_SND_KEY_PRESS, server->cursor->x, 0.8);
+	if (kind == DESK_DEV_SINK) {
+		if (desk_meters_set_muted(2)) {
+			clock_publish(server);
+		}
+	} else if (kind == DESK_DEV_SOURCE) {
+		struct desk_dev_list L;
+		desk_devices_get(kind, &L);
+		for (int i = 0; i < L.n; i++) {
+			if (L.d[i].active) {
+				desk_devices_act(kind, DESK_DEV_MUTE, L.d[i].id);
+				break;
+			}
+		}
+	} else if (kind == DESK_DEV_WIFI || kind == DESK_DEV_BT) {
+		struct desk_dev_list L;
+		desk_devices_get(kind, &L);
+		int sel = ccd_sel_in(server, &L), at = -1;
+		if (sel < L.n && L.d[sel].active) {
+			at = sel;
+		}
+		for (int i = 0; at < 0 && i < L.n; i++) {
+			at = L.d[i].active ? i : -1;
+		}
+		if (at >= 0) {
+			wlr_log(WLR_INFO, "console: %s, to be let go of", L.d[at].label);
+			desk_devices_act(kind, DESK_DEV_DISCONNECT, L.d[at].id);
+		}
+	}
+	ccd_paint(server);
+	server_schedule_frames(server);
+}
+
 /* Once a frame: the tuner on its way out or in, the scale rolling to
  * where the knob has been turned, and the busy lamp. */
 static void ccd_tick(struct desk_server *server)
@@ -9145,6 +9216,9 @@ static bool ccd_press(struct desk_server *server, uint32_t button)
 		ccd_paint(server);
 		server_schedule_frames(server);
 		break;
+	case DESK_TUNER_MID:
+		ccd_mid(server);
+		break;
 	case DESK_TUNER_RIGHT: {
 		int which = server->ccd_which;
 		ccd_gone(server);
@@ -9247,6 +9321,26 @@ static bool ccd_keys(struct desk_server *server, xkb_keysym_t sym)
 }
 
 /* devices.c has read a list again, or done what it was asked. */
+/* The other end can let go, or go, on its own: while the lid is up the
+ * list is read again every few seconds, so that the dial never shows what
+ * is no longer so. (Looking for more -- RESCAN, SEARCH -- stays the
+ * user's to ask for.) */
+#define CCD_REREAD_MS 3000
+
+static int ccd_poll_cb(void *data)
+{
+	struct desk_server *server = data;
+	if (ccd_out(server)) {
+		struct desk_dev_list L;
+		desk_devices_get(ccd_kind(server), &L);
+		if (!L.busy) {
+			desk_devices_refresh(ccd_kind(server));
+		}
+	}
+	wl_event_source_timer_update(server->ccd_poll, CCD_REREAD_MS);
+	return 0;
+}
+
 static void devices_changed(void *data)
 {
 	struct desk_server *server = data;
@@ -24485,6 +24579,8 @@ int main(int argc, char **argv)
 #endif
 	/* what is behind the Control Panel's levers and knob, for its cards */
 	desk_devices_init(loop, devices_changed, &server);
+	server.ccd_poll = wl_event_loop_add_timer(loop, ccd_poll_cb, &server);
+	wl_event_source_timer_update(server.ccd_poll, CCD_REREAD_MS);
 	hand_start(&server, loop);
 	wl_event_source_timer_update(server.tick, 1000);
 
