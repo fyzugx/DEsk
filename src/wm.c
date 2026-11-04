@@ -218,6 +218,7 @@ struct shell_conf {
 	char desk_mat[32];          /* the mat on the desk: none, a preset, #rrggbb or photo */
 	char desk_mat_photo[512];   /* the picture for photo */
 	double desk_mat_size;       /* desk_mat_size: 0 .. 1 */
+	bool desk_mat_out;          /* unrolled on the desk, not rolled up in its bag */
 	char language[16];          /* "auto", "en", "ja", "zh", ... */
 	bool drawer_closes;         /* the drawer goes back after something is used */
 	bool take_sheet;            /* ALL APPS: the sheet is carried down for the window */
@@ -256,10 +257,12 @@ struct shell_conf {
 static bool mat_apply(const struct shell_conf *c);
 
 /* One thing in the drawer: a program, kept there; the screwdriver (Shell
- * Settings); or a sheet folded away into it, which is there only while it is. */
+ * Settings); the desk mat's roll bag; or a sheet folded away into it, which
+ * is there only while it is. */
 enum drawer_kind {
 	DRAWER_APP,
 	DRAWER_PANEL,
+	DRAWER_MAT,
 	DRAWER_SHEET,
 	DRAWER_STD,      /* one of DEsk's standard programs, whichever it is now */
 };
@@ -10133,6 +10136,8 @@ static void terminal_open(void)
  *                                         a mat on the desk under the windows
  *                                         (none)
  *   desk_mat_photo = /path/to/picture     the picture, for desk_mat = photo
+ *   desk_mat_out = yes | no               unrolled on the desk, or rolled up in its bag
+ *                                         in the drawer, which does it (yes)
  *   desk_mat_size = small | medium | large | full, or 0% to 100%
  *                                         how much of the desk it covers (medium)
  *   camera_bounce = normal | low | off    how far the camera goes past where
@@ -10234,6 +10239,7 @@ static void shell_conf_defaults(struct shell_conf *c)
 	snprintf(c->desk_mat, sizeof c->desk_mat, "none");
 	c->desk_mat_photo[0] = '\0';
 	c->desk_mat_size = DESK_MAT_MEDIUM;
+	c->desk_mat_out = true;
 	snprintf(c->language, sizeof c->language, "auto");
 	c->drawer_closes = true;
 	c->take_sheet = true;
@@ -10570,6 +10576,8 @@ static void shell_conf_read_file(struct shell_conf *c, const char *path)
 			c->letter_sound = b;
 		} else if (!strcmp(key, "lights_at_login")) {
 			c->lights_at_login = b;
+		} else if (!strcmp(key, "desk_mat_out")) {
+			c->desk_mat_out = b;
 		} else if (!strcmp(key, "celebrations")) {
 			/* not on Shell Settings: the days are kept as a surprise, on
 			 * their dates. This is for anyone who needs them not to be
@@ -10967,7 +10975,7 @@ static void overlay_update(struct desk_server *server, bool force);
 /* The mat shell.conf asks for. True when that is not what lies on the desk. */
 static bool mat_apply(const struct shell_conf *c)
 {
-	struct desk_mat m = { .size = c->desk_mat_size };
+	struct desk_mat m = { .size = c->desk_mat_size, .rolled = !c->desk_mat_out };
 	if (!strcasecmp(c->desk_mat, "photo") && c->desk_mat_photo[0]) {
 		desk_mat_preset("charcoal", &m);   /* the cloth until the picture is read */
 		m.kind = DESK_MAT_PHOTO;
@@ -10987,6 +10995,7 @@ static void shell_apply_all(struct desk_server *server)
 	g_bounce = server->conf.bounce;
 	desk_set_clock_12h(server->conf.clock_12h);
 	mat_apply(&server->conf);
+	server->drw_dirty = true;
 	overlay_update(server, true);
 	/* a new size for things: the room is traced again for it, as for a
 	 * new screen */
@@ -11130,7 +11139,8 @@ static void drawer_save(struct desk_server *server)
 	}
 	fprintf(f, "# DEsk's drawer (2). What is in it, in order: \"thing <terminal | browser |\n"
 		"# files | editor>\" (DEsk's standard program for it, whichever that is),\n"
-		"# \"app <desktop file id>\", or \"panel\" (the screwdriver: Shell Settings).\n");
+		"# \"app <desktop file id>\", \"panel\" (the screwdriver: Shell Settings) or \"mat\" (the\n"
+		"# desk mat's roll bag).\n");
 	for (int i = 0; i < server->drw_n; i++) {
 		const struct drawer_entry *e = &server->drw[i];
 		if (e->kind == DRAWER_APP) {
@@ -11139,6 +11149,8 @@ static void drawer_save(struct desk_server *server)
 			fprintf(f, "thing %s\n", desk_std_name(e->std));
 		} else if (e->kind == DRAWER_PANEL) {
 			fprintf(f, "panel\n");
+		} else if (e->kind == DRAWER_MAT) {
+			fprintf(f, "mat\n");
 		}
 	}
 	bool ok = fflush(f) == 0 && !ferror(f);
@@ -11192,6 +11204,9 @@ static void drawer_load(struct desk_server *server)
 		if (strcmp(s, "panel") == 0) {
 			e.kind = DRAWER_PANEL;
 			e.present = true;
+		} else if (strcmp(s, "mat") == 0) {
+			e.kind = DRAWER_MAT;
+			e.present = true;
 		} else if (strncmp(s, "thing", 5) == 0 && (s[5] == ' ' || s[5] == '\t')) {
 			const char *name = s + 6;
 			while (*name == ' ' || *name == '\t') {
@@ -11219,6 +11234,15 @@ static void drawer_load(struct desk_server *server)
 		server->drw[server->drw_n++] = e;
 	}
 	fclose(f);
+	/* a drawer kept before there was a mat has its bag put in it, at the end */
+	bool bag = false;
+	for (int i = 0; i < server->drw_n; i++) {
+		bag = bag || server->drw[i].kind == DRAWER_MAT;
+	}
+	if (!bag && server->drw_n < DRAWER_MAX) {
+		server->drw[server->drw_n++] = (struct drawer_entry){ .kind = DRAWER_MAT,
+			.present = true, .fit = 1.0, .fit_to = 1.0 };
+	}
 }
 
 static int drawer_shown(const struct desk_server *server)
@@ -11288,6 +11312,8 @@ static void drawer_match(struct desk_server *server)
 				.std = m, .fit = 1.0, .fit_to = 1.0 };
 		}
 		server->drw[server->drw_n++] = (struct drawer_entry){ .kind = DRAWER_PANEL,
+			.present = true, .fit = 1.0, .fit_to = 1.0 };
+		server->drw[server->drw_n++] = (struct drawer_entry){ .kind = DRAWER_MAT,
 			.present = true, .fit = 1.0, .fit_to = 1.0 };
 		for (int i = 0; i < nk && server->drw_n < DRAWER_MAX; i++) {
 			server->drw[server->drw_n++] = keep[i];
@@ -11383,6 +11409,12 @@ static void drawer_item_of(const struct desk_server *server, const struct desk_a
 		it->look = DESK_ICON_GEAR;
 		snprintf(it->name, sizeof it->name, "%s", TR("Shell Settings"));
 		it->seed = 7;
+		break;
+	case DRAWER_MAT:
+		it->look = DESK_LOOK_MAT;
+		it->mat_out = server->conf.desk_mat_out && strcasecmp(server->conf.desk_mat, "none") != 0;
+		snprintf(it->name, sizeof it->name, "%s", TR("Desk mat"));
+		it->seed = 11;
 		break;
 	case DRAWER_SHEET:
 		it->look = DESK_LOOK_PACKET;
@@ -11806,8 +11838,8 @@ static void drawer_carry_move(struct desk_server *server)
 	int gap = -1;
 	if (over) {
 		gap = drawer_gap_for(server, x);
-	} else if (c->kind == DRAWER_PANEL) {
-		/* the screwdriver cannot be taken out: its place stays open for it */
+	} else if (c->kind == DRAWER_PANEL || c->kind == DRAWER_MAT) {
+		/* the screwdriver and the bag cannot be taken out: their place stays open */
 		gap = server->drw_carry_from;
 	}
 	server->drw_over = over;
@@ -11853,7 +11885,7 @@ static void drawer_drop(struct desk_server *server)
 		if (server->drw_carry_node) {
 			wlr_scene_node_set_enabled(&server->drw_carry_node->node, false);
 		}
-	} else if (c.kind == DRAWER_PANEL) {
+	} else if (c.kind == DRAWER_PANEL || c.kind == DRAWER_MAT) {
 		/* back where it was */
 		snd_at(server, DESK_SND_FELT_DROP, cx, 0.7);
 		drawer_insert(server, &c, server->drw_carry_from >= 0 ? server->drw_carry_from : 0);
@@ -11931,6 +11963,25 @@ static void drawer_forget(struct desk_server *server, struct desk_sheet *sheet)
 	sheet->in_drawer = false;
 }
 
+/* The roll bag: the mat unrolled onto the desk, or rolled up again. With none chosen
+ * it is the green one, so that the first time does something. Kept in shell.conf. */
+static void mat_toggle(struct desk_server *server)
+{
+	struct shell_conf *c = &server->conf;
+	if (!strcasecmp(c->desk_mat, "none")) {
+		snprintf(c->desk_mat, sizeof c->desk_mat, "green");
+		c->desk_mat_out = false;
+		shell_conf_put("desk_mat", "green");
+	}
+	c->desk_mat_out = !c->desk_mat_out;
+	wlr_log(WLR_INFO, "desk mat: %s", c->desk_mat_out ? "unrolled" : "rolled up");
+	shell_conf_put("desk_mat_out", c->desk_mat_out ? "yes" : "no");
+	mat_apply(c);
+	overlay_update(server, true);
+	server->drw_dirty = true;
+	server_schedule_frames(server);
+}
+
 /* What a hand on entry i is for. */
 static void drawer_activate(struct desk_server *server, int i)
 {
@@ -11962,6 +12013,9 @@ static void drawer_activate(struct desk_server *server, int i)
 		/* the screwdriver: Shell Settings, whose window comes on the desk */
 		wlr_log(WLR_INFO, "taking the screwdriver, Shell Settings, out of the drawer");
 		settings_open();
+		break;
+	case DRAWER_MAT:
+		mat_toggle(server);
 		break;
 	case DRAWER_SHEET: {
 		struct desk_sheet *s = e->sheet;

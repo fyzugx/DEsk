@@ -12113,7 +12113,94 @@ static double drawer_item_height(const struct desk_drawer_item *it)
 	if (it->look >= 0 && it->look < DESK_DOCK_COUNT) {
 		return TOOL_HEIGHT[it->look];
 	}
-	return it->look == DESK_LOOK_PACKET ? 0.12 : 0.03;
+	return it->look == DESK_LOOK_PACKET ? 0.12 : it->look == DESK_LOOK_MAT ? 0.20 : 0.03;
+}
+
+static void mat_roll_rgb(float rgb[3]);
+
+/* The desk mat's leather roll bag, from above in room units about its middle: round,
+ * strapped and stitched with the roll's cloth showing at one end -- or, with the mat
+ * unrolled on the desk, lying slack and empty with its straps undone. */
+static void tool_mat_bag(cairo_t *cr, bool out, unsigned seed)
+{
+	float cloth[3];
+	mat_roll_rgb(cloth);
+	double hh = out ? 0.30 : 0.42, x0 = out ? -1.0 : -1.08, x1 = out ? 1.0 : 1.08;
+	/* the roll's end, a band of cloth with its layers */
+	if (!out) {
+		cairo_rectangle(cr, x0 - 0.34, -hh * 0.86, 0.50, hh * 1.72);
+		cairo_set_source_rgb(cr, cloth[0], cloth[1], cloth[2]);
+		cairo_fill_preserve(cr);
+		cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.35);
+		cairo_set_line_width(cr, 0.015);
+		cairo_stroke(cr);
+		for (int i = 1; i < 5; i++) {
+			cairo_move_to(cr, x0 - 0.34 + i * 0.075, -hh * 0.86);
+			cairo_line_to(cr, x0 - 0.34 + i * 0.075, hh * 0.86);
+			cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.22);
+			cairo_stroke(cr);
+		}
+	}
+	/* the leather, lit from the lamp's side so that it reads as round */
+	desk_rounded_path(cr, x0, -hh, x1 - x0, hh * 2.0, hh * 0.92);
+	cairo_pattern_t *g = cairo_pattern_create_linear(-TOOL_LAMP_X * hh, TOOL_LAMP_Y * hh,
+		TOOL_LAMP_X * hh, -TOOL_LAMP_Y * hh);
+	cairo_pattern_add_color_stop_rgb(g, 0.0, 0.62, 0.40, 0.21);
+	cairo_pattern_add_color_stop_rgb(g, 0.45, 0.45, 0.27, 0.13);
+	cairo_pattern_add_color_stop_rgb(g, 1.0, 0.22, 0.12, 0.06);
+	cairo_set_source(cr, g);
+	cairo_fill_preserve(cr);
+	cairo_pattern_destroy(g);
+	cairo_set_source_rgba(cr, 0.10, 0.05, 0.02, 0.85);
+	cairo_set_line_width(cr, 0.02);
+	cairo_stroke(cr);
+	/* the stitching, a little in from the edge */
+	double dash[2] = { 0.05, 0.04 };
+	desk_rounded_path(cr, x0 + 0.07, -hh + 0.07, x1 - x0 - 0.14, hh * 2.0 - 0.14, hh * 0.8);
+	cairo_set_dash(cr, dash, 2, 0.0);
+	cairo_set_source_rgba(cr, 0.88, 0.76, 0.52, 0.80);
+	cairo_set_line_width(cr, 0.016);
+	cairo_stroke(cr);
+	cairo_set_dash(cr, NULL, 0, 0.0);
+	/* the straps across it, each with its brass buckle; undone, they lie off to one side */
+	const double sx[2] = { -0.42, 0.50 };
+	for (int i = 0; i < 2; i++) {
+		double j = (hash21((double)(seed % 977u), 3.3 + i) - 0.5) * 0.05;
+		double top = out ? hh * 0.75 : -hh * 1.02, len = out ? 0.30 : hh * 2.04;
+		cairo_rectangle(cr, sx[i] + j - 0.095, top, 0.19, len);
+		cairo_set_source_rgb(cr, 0.27, 0.15, 0.07);
+		cairo_fill_preserve(cr);
+		cairo_set_source_rgba(cr, 0.07, 0.03, 0.01, 0.9);
+		cairo_set_line_width(cr, 0.012);
+		cairo_stroke(cr);
+		double by = out ? top + 0.20 : -hh * 0.42;
+		desk_rounded_path(cr, sx[i] + j - 0.115, by, 0.23, 0.15, 0.025);
+		cairo_set_source_rgb(cr, 0.80, 0.62, 0.26);
+		cairo_fill_preserve(cr);
+		cairo_set_source_rgba(cr, 0.25, 0.17, 0.05, 0.9);
+		cairo_stroke(cr);
+		cairo_rectangle(cr, sx[i] + j - 0.07, by + 0.04, 0.14, 0.07);
+		cairo_set_source_rgba(cr, 0.12, 0.08, 0.03, 0.85);
+		cairo_fill(cr);
+	}
+}
+
+static cairo_surface_t *mat_bag_image(const struct desk_drawer_item *it, double ppu, double turn,
+	double *ax, double *ay)
+{
+	double cw = 3.2 * ppu, ch = 1.5 * ppu;
+	double diag = hypot(cw, ch) + 4.0;
+	cairo_surface_t *img = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, (int)ceil(diag),
+		(int)ceil(diag));
+	cairo_t *cr = cairo_create(img);
+	cairo_translate(cr, diag * 0.5, diag * 0.5);
+	cairo_rotate(cr, turn);
+	cairo_scale(cr, ppu, ppu);
+	tool_mat_bag(cr, it->mat_out, it->seed);
+	cairo_destroy(cr);
+	cairo_surface_flush(img);
+	*ax = *ay = diag * 0.5;
+	return img;
 }
 
 /* How lit the felt is at (x, y) on the drawer sheet, against its middle:
@@ -12203,6 +12290,9 @@ static cairo_surface_t *drawer_item_image(struct room_render *rr, const struct d
 		return img;
 	}
 	double turn = (hash21((double)(it->seed % 977u), 4.1) - 0.5) * 0.14;
+	if (it->look == DESK_LOOK_MAT) {
+		return mat_bag_image(it, ppu, turn, ax, ay);
+	}
 	if (it->look == DESK_LOOK_PACKET && it->packet) {
 		/* a sheet folded away: as it was folded, smaller */
 		double pw = cairo_image_surface_get_width(it->packet);
@@ -23308,14 +23398,16 @@ void desk_draw_room(cairo_t *cr, int w, int h, double drawer_open)
 	/* what a drawer nobody has filled comes with: the five things, in a
 	 * row (the compositor lays in whatever has been put there) */
 	if (drawer_open > 0.004) {
-		struct desk_drawer_item items[DESK_DOCK_COUNT];
-		double xs[DESK_DOCK_COUNT], fits[DESK_DOCK_COUNT];
-		for (int i = 0; i < DESK_DOCK_COUNT; i++) {
-			items[i] = (struct desk_drawer_item){ .look = i, .seed = (unsigned)i };
-			xs[i] = desk_drawer_slot_x(i, DESK_DOCK_COUNT);
-			fits[i] = desk_drawer_fit(DESK_DOCK_COUNT);
+		enum { N = DESK_DOCK_COUNT + 1 };   /* and the mat's bag */
+		struct desk_drawer_item items[N];
+		double xs[N], fits[N];
+		for (int i = 0; i < N; i++) {
+			items[i] = (struct desk_drawer_item){ .look = i < DESK_DOCK_COUNT ? i : DESK_LOOK_MAT,
+				.seed = (unsigned)i };
+			xs[i] = desk_drawer_slot_x(i, N);
+			fits[i] = desk_drawer_fit(N);
 		}
-		desk_drawer_paint_items(cr, w, h, items, DESK_DOCK_COUNT, xs, fits, -1);
+		desk_drawer_paint_items(cr, w, h, items, N, xs, fits, -1);
 	}
 	cairo_restore(cr);
 
@@ -30975,7 +31067,7 @@ bool desk_set_mat(const struct desk_mat *m)
 		return false;
 	}
 	pthread_mutex_lock(&g_mat_lock);
-	bool same = g_mat.kind == m->kind && g_mat.size == m->size
+	bool same = g_mat.kind == m->kind && g_mat.size == m->size && g_mat.rolled == m->rolled
 		&& !memcmp(g_mat.rgb, m->rgb, sizeof g_mat.rgb)
 		&& (m->kind != DESK_MAT_PHOTO || !strcmp(g_mat.photo, m->photo));
 	bool photo = m->kind == DESK_MAT_PHOTO && m->photo[0];
@@ -31010,6 +31102,20 @@ static uint64_t mat_key(void)
 	uint64_t k = g_mat_gen;
 	pthread_mutex_unlock(&g_mat_lock);
 	return k;
+}
+
+/* The cloth of the roll in the bag: the mat that is chosen, charcoal for a photo, green
+ * where none is. */
+static void mat_roll_rgb(float rgb[3])
+{
+	struct desk_mat m = { 0 };
+	pthread_mutex_lock(&g_mat_lock);
+	m = g_mat;
+	pthread_mutex_unlock(&g_mat_lock);
+	if (m.kind != DESK_MAT_COLOR) {
+		desk_mat_preset(m.kind == DESK_MAT_PHOTO ? "charcoal" : "green", &m);
+	}
+	memcpy(rgb, m.rgb, 3 * sizeof *rgb);
 }
 
 /* Where the mat lies (x, y, w, h): centred, near the front edge, and never up
@@ -31056,8 +31162,9 @@ static bool mat_box(int w, int h, double box[4])
 	pthread_mutex_lock(&g_mat_lock);
 	int kind = g_mat.kind;
 	double size = g_mat.size;
+	bool rolled = g_mat.rolled;
 	pthread_mutex_unlock(&g_mat_lock);
-	if (kind == DESK_MAT_NONE) {
+	if (kind == DESK_MAT_NONE || rolled) {
 		box[0] = box[1] = box[2] = box[3] = 0.0;
 		return true;
 	}
@@ -31197,7 +31304,8 @@ static void mat_paint(cairo_t *cr, int w, int h)
 		pic = cairo_surface_reference(g_mat_pic);
 	}
 	pthread_mutex_unlock(&g_mat_lock);
-	if (m.kind == DESK_MAT_NONE) {
+	if (m.kind == DESK_MAT_NONE || m.rolled) {
+		cairo_surface_destroy(pic);
 		return;
 	}
 	double r[4], k = desk_px_per_pt(w);

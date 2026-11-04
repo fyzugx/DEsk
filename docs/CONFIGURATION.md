@@ -55,6 +55,7 @@ One `key = value` per line; `#` starts a comment.
 | `clock` | `24h`, `12h` | `24h` | |
 | `desk_mat` | `none`, `green`, `navy`, `burgundy`, `charcoal`, `cream`, `#rrggbb`, `photo` | `none` | A mat on the desk, under the windows. A colour is felt; `photo` lays the picture in `desk_mat_photo`. |
 | `desk_mat_photo` | an absolute path | (none) | The picture for `desk_mat = photo`. A PNG of up to 4 megapixels is read by DEsk itself; a larger one, and JPEG, WebP and the rest, by gdk-pixbuf's thumbnailer (or ImageMagick for `.png`, `.jpg`, `.webp`, `.gif`, `.bmp` and `.tif`), each in a process of its own. It must be a regular file of up to 64 MB (a PNG up to 48 megapixels). Until it is read, or if it can't be (the log says), the mat is charcoal cloth; it is tried again when the settings are applied again. |
+| `desk_mat_out` | `yes`, `no` | `yes` | The mat unrolled on the desk, or rolled up in the leather bag in the drawer. The bag does it: press it. |
 | `desk_mat_size` | `small`, `medium`, `large`, `full`, or a percentage (`60%`) | `medium` | How big the mat is, in points like the windows, so a larger screen shows more desk rather than a larger mat: about 600 by 380 points, 900 by 530 and 1160 by 650; `full` is all the open desk. A percentage is a place on the way from the least to `full`; no mat is bigger than the open desk. |
 | `lights_at_login` | `yes`, `no` | `yes` | The room starts dark and the lamp comes up as it is made. |
 | `celebrations` | `yes`, `no` | `yes` | The door and clock on certain days (not in Shell Settings). |

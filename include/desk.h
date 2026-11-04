@@ -766,7 +766,7 @@ void desk_draw_desktop(cairo_t *cr, int w, int h, time_t now, bool with_demo_win
  * Whatever has been put there, in a row: one of the five things the drawer
  * has always had (look 0..DESK_DOCK_COUNT-1, in DRAWER_ITEMS' order), a
  * card with a program's mark on it, or a sheet folded away. */
-enum { DESK_LOOK_CARD = DESK_DOCK_COUNT, DESK_LOOK_PACKET };
+enum { DESK_LOOK_CARD = DESK_DOCK_COUNT, DESK_LOOK_PACKET, DESK_LOOK_MAT };
 struct desk_drawer_item {
 	int look;
 	cairo_surface_t *icon;     /* a card: the program's icon, or NULL */
@@ -774,6 +774,7 @@ struct desk_drawer_item {
 	char name[128];            /* printed under a card's mark; chalked under the rest */
 	char initial[8];           /* a card with no icon: its letter */
 	unsigned seed;             /* how it happens to lie */
+	bool mat_out;              /* DESK_LOOK_MAT: the mat is unrolled on the desk, the bag empty */
 };
 /* The row, in room units across the drawer, 0 its middle: slot k's middle
  * in a row of m, how far apart they are, and how big a thing is drawn in a
@@ -1064,6 +1065,7 @@ struct desk_mat {
 	float rgb[3];      /* DESK_MAT_COLOR; the cloth a photo that cannot be read falls back to */
 	char photo[512];   /* DESK_MAT_PHOTO: the picture's path */
 	double size;       /* 0 .. 1, as above */
+	bool rolled;       /* rolled up in its bag in the drawer: kept, but not on the desk */
 };
 /* The preset named (green, navy, burgundy, charcoal, cream) or a colour
  * written #rrggbb, as a mat: false for anything else. Leaves size alone. */
