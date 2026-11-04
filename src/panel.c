@@ -596,6 +596,60 @@ void desk_meters_read_volume(struct desk_meters *out)
 	volume(out);
 }
 
+static pthread_mutex_t g_latest_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct desk_meters g_latest;
+static bool g_latest_have;
+static double g_latest_at = -1.0;
+static atomic_bool g_latest_asking;
+
+static void *meters_ask(void *arg)
+{
+	(void)arg;
+	struct desk_meters m;
+	desk_meters_read(&m);
+	pthread_mutex_lock(&g_latest_lock);
+	g_latest = m;
+	g_latest_have = true;
+	pthread_mutex_unlock(&g_latest_lock);
+	atomic_store(&g_latest_asking, false);
+	return NULL;
+}
+
+void desk_meters_latest(struct desk_meters *out)
+{
+	if (!out) {
+		return;
+	}
+	double at = now_sec();
+	pthread_mutex_lock(&g_latest_lock);
+	bool have = g_latest_have;
+	if (have) {
+		*out = g_latest;
+	}
+	bool stale = g_latest_at < 0.0 || at - g_latest_at >= 0.15;
+	if (stale) {
+		g_latest_at = at;
+	}
+	pthread_mutex_unlock(&g_latest_lock);
+	if (!have) {
+		/* the very first: there is nothing to show but a real reading */
+		desk_meters_read(out);
+		pthread_mutex_lock(&g_latest_lock);
+		g_latest = *out;
+		g_latest_have = true;
+		pthread_mutex_unlock(&g_latest_lock);
+		return;
+	}
+	if (stale && !atomic_exchange(&g_latest_asking, true)) {
+		pthread_t th;
+		if (pthread_create(&th, NULL, meters_ask, NULL) == 0) {
+			pthread_detach(th);
+		} else {
+			atomic_store(&g_latest_asking, false);
+		}
+	}
+}
+
 void desk_meters_read(struct desk_meters *out)
 {
 	if (!out) {
