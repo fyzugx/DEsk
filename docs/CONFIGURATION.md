@@ -53,6 +53,9 @@ One `key = value` per line; `#` starts a comment.
 | `camera_bounce` | `normal`, `low`, `off` | `normal` | How far the view swings past and settles. |
 | `language` | `auto`, `en`, `ja`, `zh`, `ko`, `es`, `fr`, `de` | `auto` | The desk's words and the names programs are filed under. `auto` follows `LC_ALL`, `LC_MESSAGES`, `LANG`. |
 | `clock` | `24h`, `12h` | `24h` | |
+| `desk_mat` | `none`, `green`, `navy`, `burgundy`, `charcoal`, `cream`, `#rrggbb`, `photo` | `none` | A mat on the desk, under the windows. A colour is felt; `photo` lays the picture in `desk_mat_photo`. |
+| `desk_mat_photo` | an absolute path | (none) | The picture for `desk_mat = photo`. PNG is read directly; JPEG, WebP and the rest need gdk-pixbuf's thumbnailer, or ImageMagick for `.jpg`, `.webp`, `.gif`, `.bmp` and `.tif`. It must be a regular file of up to 64 MB (a PNG up to 48 megapixels). Until it is read, or if it can't be (the log says), the mat is charcoal cloth; it is tried again when the settings are applied again. |
+| `desk_mat_size` | `small`, `medium`, `large`, `full`, or a percentage (`60%`) | `medium` | How much of the desk the mat covers. |
 | `lights_at_login` | `yes`, `no` | `yes` | The room starts dark and the lamp comes up as it is made. |
 | `celebrations` | `yes`, `no` | `yes` | The door and clock on certain days (not in Shell Settings). |
 
