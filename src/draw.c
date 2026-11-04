@@ -23413,6 +23413,12 @@ unsigned desk_room_shown(int screen_w, int screen_h)
 	return rr ? rr->serial : 0;
 }
 
+unsigned desk_console_room(int w, int h)
+{
+	struct room_render *rr = room_for_view(w, h, DESK_VIEW_CONSOLE);
+	return rr && rr->console ? rr->serial : 0;
+}
+
 void desk_scene_warm(int screen_w, int screen_h, bool async)
 {
 	desk_light_desk(screen_w, screen_h);

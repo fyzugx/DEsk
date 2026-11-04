@@ -46,6 +46,10 @@ void desk_draw_room(cairo_t *cr, int w, int h, double drawer_open);
  * any, when it lays the bare boards. Its picture changes only with this,
  * the size and the drawer. */
 unsigned desk_room_shown(int screen_w, int screen_h);
+/* The same for the control console: the serial of the room its set is
+ * traced in, 0 until that has landed. What is drawn of the set is drawn
+ * for this room, so it is drawn again when this changes. */
+unsigned desk_console_room(int w, int h);
 /* the bare boards desk_draw_room lays before there is any room, alone:
  * for drawing them smaller than the screen and stretching them */
 void desk_draw_room_placeholder(cairo_t *cr, int w, int h);

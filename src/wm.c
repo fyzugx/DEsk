@@ -1070,6 +1070,7 @@ struct desk_server {
 	struct wlr_scene_tree *cc_live;
 	struct desk_sprite cc_sprite[DESK_CCP_COUNT];
 	int cc_live_w, cc_live_h;
+	unsigned cc_base_room, cc_live_room;   /* and from which room (desk_console_room) */
 	struct wlr_scene_tree *layer_console;
 	struct wlr_scene_buffer *cc_dim;
 
@@ -7707,12 +7708,17 @@ static void paint_console_body(struct desk_server *server)
 
 	/* The traced sheet goes up once. Copying a screenful of baked steel
 	 * on every frame was most of what the set cost to look at. */
-	if (!server->cc_base || server->cc_base_w != w || server->cc_base_h != h) {
+	/* the room the set is drawn from: a new one (the screen has changed
+	 * shape, and its room has landed) puts it somewhere else */
+	unsigned room = desk_console_room(w, h);
+	if (!server->cc_base || server->cc_base_w != w || server->cc_base_h != h
+		|| server->cc_base_room != room) {
 		struct desk_buf *bb = buf_create(w, h);
 		desk_draw_console_base(bb->cr, w, h);
 		scene_put(&server->cc_base, server->layer_console, bb, 0, 0, NULL);
 		server->cc_base_w = w;
 		server->cc_base_h = h;
+		server->cc_base_room = room;
 		view_bases_under(server);
 	}
 
@@ -7731,14 +7737,18 @@ static void paint_console_body(struct desk_server *server)
 		 * that moves the tube on: frames asked for in between (a knob
 		 * being turned) find nothing on it to draw again */
 		if (st.clock != server->cc_meters_clock) {
-			desk_meters_read(&server->cc_meters);
+			/* the last reading, never waited for: a card's sensors can
+			 * take longer to answer than a frame lasts */
+			desk_meters_latest(&server->cc_meters);
 			server->cc_meters_clock = st.clock;
 		}
 		struct desk_meters m = server->cc_meters;
 		desk_console_advance(&st, &m);
-		bool force = server->cc_live_w != w || server->cc_live_h != h;
+		bool force = server->cc_live_w != w || server->cc_live_h != h
+			|| server->cc_live_room != room;
 		server->cc_live_w = w;
 		server->cc_live_h = h;
+		server->cc_live_room = room;
 		for (int p = 0; p < DESK_CCP_COUNT; p++) {
 			struct desk_sprite *sp = &server->cc_sprite[p];
 			uint64_t key = desk_console_piece_key(p, &st, server->cc_hover, &m);
