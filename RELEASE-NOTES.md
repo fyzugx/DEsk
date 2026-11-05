@@ -1,8 +1,111 @@
 **English** | [日本語](RELEASE-NOTES.ja.md)
 
-# DEsk v0.1.4 (BETA)
+# DEsk v0.1.5 (BETA)
 
-## What changed since v0.1.3
+## What changed since v0.1.4
+
+- **Fixed: the screen could stop for half a second every second and a half**
+  on a laptop. The clock reads the battery every second, and a laptop's
+  battery is its firmware's to answer for, which on some laptops takes half
+  a second; DEsk waited for the answer with everything else waiting behind
+  it. The battery (and the temperature on the Control Panel) is now read on
+  a thread of its own, and what is shown is the last answer. Should the
+  once-a-second round ever take long enough to see, the log says which part
+  of it was slow, and so does desk-report. Thanks to Riennas (on Discord),
+  whose video showed the rhythm of it.
+- **Fixed: a window folded on a screen beside the desk's stays there.** With
+  more than one screen, a window folded on another screen flew to the front
+  of the desk's screen, and a folded sheet carried to another screen went
+  back when let go. Now it lies along the front of the screen it was folded
+  on, stays where it is while the drawer or the camera moves the desk, can
+  be opened or carried about there even while the desk's screen is turned to
+  the bookcase, and goes to a screen that is left when its screen is taken
+  away. Thanks to v (on Discord) for the report, and to DaeTheDruid, whose
+  PR #23 found and fixed it.
+- **Fixed: a screen turned off with a display tool could not be turned on
+  again.** wdisplays and the like could turn a screen off, but turning it
+  back on was refused every time, and as DEsk remembers how the screens were
+  left, it stayed off after a restart too. A real screen will not be tried
+  without a picture to show, and DEsk gave the one being turned on none; it
+  now gives each screen its first picture before the change is tried. A
+  screen turned back on without a mode comes on in the one it was turned off
+  in, and one asked to go where another screen already is (tools send 0,0,
+  knowing no place for a screen that is off) is put beside the others, to the
+  right, so the desk stays where it is. Thanks to Mr_Duckling (on Discord),
+  whose desk-report showed it.
+- **Fixed: a game made on the whole screen could open as a sheet on the
+  desk.** A program can ask for the whole screen, or to be opened out,
+  before its window is up: Wine does so for a game made on the whole screen
+  (Proton's games among them), and so do many Wayland programs. DEsk only
+  listened once the window was up, so such a game came onto the desk as a
+  big sheet fitted to the desk, like an opened-out window. It now gets what
+  it asked for as it opens, the whole screen or opened out; one that asked
+  for both is opened out again when it leaves the whole screen. A program
+  that remembers being opened out (many do) now opens that way again. The
+  log, and so desk-report, now says how each X11 window came onto the desk
+  and when it asks for the whole screen or to leave it. Thanks to Nightshade
+  (on Discord), whose report about a game led to it.
+- **Fixed: a file dragged from one X11 program to another was dropped
+  short.** Dragging between X11 programs (Wine ones among them) ended as
+  soon as the pointer left the first window: the picture being dragged is
+  a window of its own under the pointer, DEsk handed the pointer to it, and
+  Xwayland takes that as the button let go. A button held down in a program
+  now keeps the pointer with that program until it is let go, as on other
+  desktops: a drag between X11 programs reaches the other one, and a slider
+  or a selection pulled out of a window goes on following the mouse. A
+  Wayland program is told, too, when the button comes up outside its window
+  (it used to go on thinking it was held). Dragging from an X11 program onto
+  a Wayland one still does not work (wlroots 0.18 cannot); such a drag now
+  just ends where it is let go. Thanks to YZ10 (on Discord), whose report
+  led to it.
+- **X11 and Flatpak programs can keep the screen lit too.** A film in
+  Spotify, VLC or a game used to let the screen go dark, as they ask on
+  the session bus (`org.freedesktop.ScreenSaver`), which DEsk didn't
+  answer; only Wayland programs were heard. Now both are, for as long as
+  the program asks, and one that quits without letting go lets go as it
+  leaves. A screen saver of your own that has the name keeps it. Thanks
+  to DaddyBeer (on Discord).
+- **Fixed: a program installed while you were logged in was not in the
+  bookcase** until you logged in again. DEsk now looks at the folders the
+  programs' entries are in every few seconds, and when one changes (a
+  program installed or taken away, Flatpak or a package) it reads them
+  again, as at login. It waits while you're at the bookcase. Thanks to
+  PasqualePerilli (#34) and JamesStallings (#50).
+- **Fixed: Flatpak apps had no icon** in the bookcase, the drawer, on their
+  folded sheets and in the tray. DEsk now looks for icons wherever the
+  icon theme spec says, Flatpak's own folders included. Thanks to
+  barenakedchicken (dentarthurdent on Discord), whose AiO found it.
+- **Fixed: emoji in notifications were boxes with an X.** A letter in the post
+  box now shows them in colour, and Arabic in it is joined up. Thanks to
+  barenakedchicken (dentarthurdent on Discord), who wrote the fix (PR #15).
+  Building DEsk now needs Pango's headers; the installers add them.
+- **Fixed: the Control Panel could stay out of place after the screen
+  changed shape.** Opened just after a resize, before the room for the new
+  size was ready, it kept the old room's picture under its needles and
+  lamps. It's now drawn again once the new room is there. Thanks to
+  DaeTheDruid (PR #58).
+- **Volume up unmutes.** While the sound is muted, the key that turns the
+  volume up now unmutes it too, as on other desktops; turning it down
+  leaves it muted. Thanks to what (on Discord).
+- **Natural scrolling for a mouse's wheel.** Shell Settings has a new row
+  under the touchpad's, "Natural scrolling on the mouse"
+  (`natural_scrolling_mouse` in shell.conf): the page goes the way the
+  wheel turns. Before, natural scrolling was only for touchpads, and a
+  mouse could not be turned round at all. Thanks to AlanGraham0 (#27).
+- **New: a Terminal row in Shell Settings** (System, Look and language,
+  under Default programs): the terminal the drawer and `Super+Enter` open,
+  chosen by name from the ones installed. Default programs can't choose
+  one, as a terminal has no kind of file of its own, which is why changing
+  it there did nothing. Thanks to JamesStallings (#47).
+- **The pointer shows when DEsk runs as a window on another Wayland
+  desktop.** Some desktops don't show the pointer a window asks for over
+  it, so DEsk now draws the pointer into its own window there. Thanks to
+  Gberfield (PR #29).
+- **NixOS: a flake**, in `packaging/nix`, with a package and a NixOS module
+  for the login session. It's kept by the community, not built or tested
+  with each release. Thanks to picarica (PR #48, #22).
+
+## What changed in v0.1.4
 
 - **Fixed: after the screen turned off, it never came back** on some
   monitors (GitHub #18). Many HDMI and DisplayPort monitors say they have
@@ -223,7 +326,7 @@ lights a ray-traced room.
 
 ## Installing
 
-Unpack the release (`DEsk-v0.1.4-BETA.zip` or `.tar.gz`), go into its folder
+Unpack the release (`DEsk-v0.1.5-BETA.zip` or `.tar.gz`), go into its folder
 and run the line for your system:
 
 ```sh
@@ -254,9 +357,9 @@ disk afterwards.
 - **More than one screen**: screens other than the desk's show a plain desk
   for windows; the bookcase, Control Panel and post box are on the desk's
   screen only.
-- **X11 programs** run through Xwayland. Ones that keep the screen awake
-  through `org.freedesktop.ScreenSaver` (some video players and games) are
-  not yet heard.
+- **X11 programs** run through Xwayland. Dragging from an X11 program onto a
+  Wayland one does not work (wlroots 0.18 cannot); between X11 programs, and
+  from Wayland ones onto X11 ones, it does.
 - **Suspend and hibernate** have no button yet (log out, restart and power
   off do).
 - **Screen sharing** shares whole screens, not single windows, and does not
@@ -265,7 +368,8 @@ disk afterwards.
   (xdg-desktop-portal-wlr) needs GPU buffers from a wlroots as old as the
   0.18 DEsk is built on. `desk-report` says which it is.
 - **Right-to-left scripts** (Arabic, Hebrew) show their letters, but not
-  joined up or in right-to-left order, in what DEsk draws itself.
+  joined up or in right-to-left order, in what DEsk draws itself (letters in
+  the post box excepted, where Arabic is joined up).
 - **Translations** other than English and Japanese have not yet been
   reviewed by native speakers.
 - **No plugin API**: changing DEsk means changing its source
@@ -287,14 +391,17 @@ ThreadSanitizer, AddressSanitizer and UndefinedBehaviorSanitizer, including
 with deliberately malformed settings, data and `.desktop` files; every view
 rendered in all seven languages; the translation tables checked by
 `meson test`. Details in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+For v0.1.5, each fix was tried on v0.1.4 and on v0.1.5 with the same test
+(a real kernel's DRM and libinput in QEMU where it needed one), and the four
+builds, the static analyzer and the sanitizer runs were done again.
 
 ## Checking your copy
 
 The folder carries `SHA256SUMS`, which the installer checks before it builds.
-The archive comes with `DEsk-v0.1.4-BETA.tar.gz.sha256`:
+The archive comes with `DEsk-v0.1.5-BETA.tar.gz.sha256`:
 
 ```sh
-sha256sum -c DEsk-v0.1.4-BETA.tar.gz.sha256
+sha256sum -c DEsk-v0.1.5-BETA.tar.gz.sha256
 ```
 
 ## License

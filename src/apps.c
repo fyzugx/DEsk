@@ -19,6 +19,7 @@
 #include <locale.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,6 +27,7 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 /* ---- small string work ----------------------------------------- */
@@ -130,6 +132,7 @@ static char g_lang[16];
 
 void desk_apps_set_language(const char *code)
 {
+	desk_apps_finish();   /* not while a scan reads it */
 	str_copy(g_lang, sizeof g_lang, code ? code : "");
 }
 
@@ -533,11 +536,66 @@ static bool raster_svg(const char *svg, const char *png)
 	return desk_svg_raster(svg, png, DESK_APP_ICON_PX);
 }
 
-static const char *ICON_ROOTS[] = {
-	NULL,   /* filled in with $HOME/.local/share/icons */
-	"/usr/local/share/icons",
-	"/usr/share/icons",
+/* Where icon themes are, by the icon theme spec, nearest first:
+ * $XDG_DATA_HOME/icons, ~/.icons, each of $XDG_DATA_DIRS/icons -- and the
+ * icons Flatpak exports, the user's and the system's, for a session that
+ * has not put them on $XDG_DATA_DIRS. Only those that are there, each
+ * once, and gathered for each lookup: the scan is on a thread of its own,
+ * and a list kept between calls pointed into the stack of the last one.
+ * (The Flatpak ones after dentarthurdent's flatpak-icons, AiO v0.7.) */
+#define ICON_ROOTS_MAX 16
+struct icon_roots {
+	char dir[ICON_ROOTS_MAX][512];
+	size_t n;
 };
+
+static void icon_root_add(struct icon_roots *r, const char *dir)
+{
+	struct stat st;
+	if (r->n >= ICON_ROOTS_MAX || dir[0] != '/' || stat(dir, &st) != 0 || !S_ISDIR(st.st_mode)) {
+		return;
+	}
+	for (size_t i = 0; i < r->n; i++) {
+		if (strcmp(r->dir[i], dir) == 0) {
+			return;
+		}
+	}
+	str_copy(r->dir[r->n++], sizeof r->dir[0], dir);
+}
+
+static void icon_roots_get(struct icon_roots *r)
+{
+	r->n = 0;
+	char p[512];
+	const char *home = getenv("HOME");
+	const char *dh = getenv("XDG_DATA_HOME");
+	if (dh && *dh == '/') {
+		snprintf(p, sizeof p, "%s/icons", dh);
+		icon_root_add(r, p);
+	} else if (home && *home) {
+		snprintf(p, sizeof p, "%s/.local/share/icons", home);
+		icon_root_add(r, p);
+	}
+	if (home && *home) {
+		snprintf(p, sizeof p, "%s/.icons", home);
+		icon_root_add(r, p);
+	}
+	const char *dirs = getenv("XDG_DATA_DIRS");
+	char buf[2048];
+	str_copy(buf, sizeof buf, dirs && *dirs ? dirs : "/usr/local/share:/usr/share");
+	char *save = NULL;
+	for (char *d = strtok_r(buf, ":", &save); d; d = strtok_r(NULL, ":", &save)) {
+		if ((size_t)snprintf(p, sizeof p, "%s/icons", d) < sizeof p) {
+			icon_root_add(r, p);
+		}
+	}
+	if (home && *home) {
+		snprintf(p, sizeof p, "%s/.local/share/flatpak/exports/share/icons", home);
+		icon_root_add(r, p);
+	}
+	icon_root_add(r, "/var/lib/flatpak/exports/share/icons");
+}
+
 static const char *ICON_THEMES[] = {
 	"hicolor", "Adwaita", "breeze", "Tango", "gnome", "oxygen", "mate", "Humanity",
 };
@@ -546,19 +604,20 @@ static const char *ICON_THEMES[] = {
 static const int ICON_SIZES[] = { 128, 96, 64, 256, 512, 72, 48 };
 static const int ICON_SMALL[] = { 32, 24, 22, 16 };
 
-static bool icon_png_at(const char *name, int size, char *out, size_t n)
+static bool icon_png_at(const struct icon_roots *roots, const char *name, int size,
+	char *out, size_t n)
 {
-	char path[512];
-	for (size_t r = 0; r < sizeof ICON_ROOTS / sizeof *ICON_ROOTS; r++) {
+	char path[768];
+	for (size_t r = 0; r < roots->n; r++) {
 		for (size_t t = 0; t < sizeof ICON_THEMES / sizeof *ICON_THEMES; t++) {
 			snprintf(path, sizeof path, "%s/%s/%dx%d/apps/%s.png",
-				ICON_ROOTS[r], ICON_THEMES[t], size, size, name);
+				roots->dir[r], ICON_THEMES[t], size, size, name);
 			if (file_ok(path)) {
 				str_copy(out, n, path);
 				return true;
 			}
 			snprintf(path, sizeof path, "%s/%s/apps/%d/%s.png",
-				ICON_ROOTS[r], ICON_THEMES[t], size, name);
+				roots->dir[r], ICON_THEMES[t], size, name);
 			if (file_ok(path)) {
 				str_copy(out, n, path);
 				return true;
@@ -580,21 +639,15 @@ static void icon_resolve(const char *name, char *out, size_t n)
 		}
 		return;
 	}
-	char home_icons[256] = { 0 };
-	const char *home = getenv("HOME");
-	if (home) {
-		snprintf(home_icons, sizeof home_icons, "%s/.local/share/icons", home);
-		ICON_ROOTS[0] = home_icons;
-	} else {
-		ICON_ROOTS[0] = "/nonexistent";
-	}
+	struct icon_roots roots;
+	icon_roots_get(&roots);
 
-	char path[512];
+	char path[768];
 	/* a real PNG at a usable size, closest to what a sheet prints at, in
 	 * whichever theme has one -- not the first theme's 32 pixel one blown
 	 * up to four times its size when another has it at 128 */
 	for (size_t s = 0; s < sizeof ICON_SIZES / sizeof *ICON_SIZES; s++) {
-		if (icon_png_at(name, ICON_SIZES[s], out, n)) {
+		if (icon_png_at(&roots, name, ICON_SIZES[s], out, n)) {
 			return;
 		}
 	}
@@ -619,13 +672,13 @@ static void icon_resolve(const char *name, char *out, size_t n)
 		str_copy(out, n, cached);
 		return;
 	}
-	for (size_t r = 0; r < sizeof ICON_ROOTS / sizeof *ICON_ROOTS; r++) {
+	for (size_t r = 0; r < roots.n; r++) {
 		for (size_t t = 0; t < sizeof ICON_THEMES / sizeof *ICON_THEMES; t++) {
 			snprintf(path, sizeof path, "%s/%s/scalable/apps/%s.svg",
-				ICON_ROOTS[r], ICON_THEMES[t], name);
+				roots.dir[r], ICON_THEMES[t], name);
 			if (!file_ok(path)) {
 				snprintf(path, sizeof path, "%s/%s/apps/scalable/%s.svg",
-					ICON_ROOTS[r], ICON_THEMES[t], name);
+					roots.dir[r], ICON_THEMES[t], name);
 			}
 			if (!file_ok(path)) {
 				continue;
@@ -648,7 +701,7 @@ static void icon_resolve(const char *name, char *out, size_t n)
 small:
 	/* and only now the small ones */
 	for (size_t s = 0; s < sizeof ICON_SMALL / sizeof *ICON_SMALL; s++) {
-		if (icon_png_at(name, ICON_SMALL[s], out, n)) {
+		if (icon_png_at(&roots, name, ICON_SMALL[s], out, n)) {
 			return;
 		}
 	}
@@ -749,17 +802,13 @@ bool desk_icon_path(const char *name, const char *extra_dir, char *out, size_t n
 			tray_svg_under(extra_dir, name, svg, sizeof svg);
 		}
 	}
-	char home_icons[256] = "/nonexistent";
-	const char *home = getenv("HOME");
-	if (home) {
-		snprintf(home_icons, sizeof home_icons, "%s/.local/share/icons", home);
-	}
-	const char *roots[] = { home_icons, "/usr/local/share/icons", "/usr/share/icons" };
+	struct icon_roots roots;
+	icon_roots_get(&roots);
 	if (!svg[0]) {
-		for (size_t r = 0; r < sizeof roots / sizeof *roots; r++) {
+		for (size_t r = 0; r < roots.n; r++) {
 			for (size_t t = 0; t < sizeof TRAY_THEMES / sizeof *TRAY_THEMES; t++) {
 				char root[600];
-				snprintf(root, sizeof root, "%s/%s", roots[r], TRAY_THEMES[t]);
+				snprintf(root, sizeof root, "%s/%s", roots.dir[r], TRAY_THEMES[t]);
 				if (tray_png_under(root, name, out, n)) {
 					return true;
 				}
@@ -773,10 +822,10 @@ bool desk_icon_path(const char *name, const char *extra_dir, char *out, size_t n
 				return true;
 			}
 		}
-		for (size_t r = 0; r < sizeof roots / sizeof *roots && !svg[0]; r++) {
+		for (size_t r = 0; r < roots.n && !svg[0]; r++) {
 			for (size_t t = 0; t < sizeof TRAY_THEMES / sizeof *TRAY_THEMES && !svg[0]; t++) {
 				char root[600];
-				snprintf(root, sizeof root, "%s/%s", roots[r], TRAY_THEMES[t]);
+				snprintf(root, sizeof root, "%s/%s", roots.dir[r], TRAY_THEMES[t]);
 				tray_svg_under(root, name, svg, sizeof svg);
 			}
 		}
@@ -1023,11 +1072,45 @@ static bool on_path(const char *prog)
 
 /* ---- the scan -------------------------------------------------- */
 
+/* A folder the scan read, or looked for and did not find, and when it was
+ * last changed: what desk_apps_look stats again. */
+#define WATCH_MAX 64
+struct watch {
+	char dir[512];
+	bool there;
+	struct timespec changed;
+};
+
 struct scan {
 	struct desk_app *apps;
 	int n, cap;
 	int n_files, n_hidden;
+	struct watch watch[WATCH_MAX];
+	int n_watch;
 };
+
+static void watch_stat(struct watch *w)
+{
+	struct stat st;
+	w->there = stat(w->dir, &st) == 0 && S_ISDIR(st.st_mode);
+	w->changed = w->there ? st.st_mtim : (struct timespec){ 0, 0 };
+}
+
+/* every folder read, and the top ones not there (made later, they count) */
+static void watch_add(struct scan *sc, const char *dir)
+{
+	if (sc->n_watch >= WATCH_MAX) {
+		return;
+	}
+	for (int i = 0; i < sc->n_watch; i++) {
+		if (strcmp(sc->watch[i].dir, dir) == 0) {
+			return;
+		}
+	}
+	struct watch *w = &sc->watch[sc->n_watch++];
+	str_copy(w->dir, sizeof w->dir, dir);
+	watch_stat(w);
+}
 
 static bool seen_id(const struct scan *s, const char *id)
 {
@@ -1047,6 +1130,9 @@ static void scan_dir(struct scan *sc, const char *root, const char *sub, int dep
 	} else {
 		str_copy(dir, sizeof dir, root);
 	}
+	/* its time taken before it is read: a file put in while it is being
+	 * read changes it again, and it is read again */
+	watch_add(sc, dir);
 	DIR *d = opendir(dir);
 	if (!d) {
 		return;
@@ -1202,7 +1288,12 @@ static struct snapshot *g_snap;
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_t g_worker;
 static bool g_worker_live;
+static atomic_bool g_worker_done;   /* the worker's scan has published */
 static unsigned g_generation;
+/* the folders the last scan read (desk_apps_look): written by the scan,
+ * read only while no scan is running */
+static struct watch g_watch[WATCH_MAX];
+static int g_nwatch;
 
 static void snapshot_free(struct snapshot *s)
 {
@@ -1340,6 +1431,8 @@ static void do_scan(void)
 			scan_dir(&sc, root, NULL, 0);
 		}
 	}
+	memcpy(g_watch, sc.watch, (size_t)sc.n_watch * sizeof *g_watch);
+	g_nwatch = sc.n_watch;
 	publish(&sc);
 }
 
@@ -1347,7 +1440,18 @@ static void *worker(void *arg)
 {
 	(void)arg;
 	do_scan();
+	atomic_store(&g_worker_done, true);
 	return NULL;
+}
+
+static void worker_start(void)
+{
+	atomic_store(&g_worker_done, false);
+	if (pthread_create(&g_worker, NULL, worker, NULL) == 0) {
+		g_worker_live = true;
+	} else {
+		do_scan();
+	}
 }
 
 void desk_apps_init(bool async)
@@ -1362,11 +1466,7 @@ void desk_apps_init(bool async)
 		do_scan();
 		return;
 	}
-	if (pthread_create(&g_worker, NULL, worker, NULL) == 0) {
-		g_worker_live = true;
-	} else {
-		do_scan();
-	}
+	worker_start();
 }
 
 /* Read them all again, now, on this thread: for a change of language,
@@ -1383,6 +1483,50 @@ void desk_apps_finish(void)
 		pthread_join(g_worker, NULL);
 		g_worker_live = false;
 	}
+}
+
+/* ---- looking again ---------------------------------------------- */
+
+/* A program installed or taken away while the desk is up -- from a
+ * terminal, Flatpak, a software centre -- puts its desktop file in, or
+ * takes it out of, one of the folders the scan read, and that folder's
+ * time of change moves (a package manager's rename into place does too).
+ * So every few seconds those folders are looked at again, a stat each, and
+ * when one has changed -- or one that was not there is now -- they are all
+ * read again on a thread of their own, as at the start, and the books
+ * follow the new list. Nothing else is read until then. (GitHub #34: a
+ * Flatpak installed from a terminal was in the book only after logging in
+ * again.) */
+#define LOOK_EVERY_S 3
+
+bool desk_apps_look(char *why, size_t n)
+{
+	struct timespec now;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	static time_t last;
+	if (last && now.tv_sec - last < LOOK_EVERY_S) {
+		return false;
+	}
+	last = now.tv_sec;
+	if (g_worker_live) {
+		if (!atomic_load(&g_worker_done)) {
+			return false;   /* still reading; looked at once it has */
+		}
+		pthread_join(g_worker, NULL);
+		g_worker_live = false;
+	}
+	for (int i = 0; i < g_nwatch; i++) {
+		struct watch w = g_watch[i];
+		watch_stat(&w);
+		if (w.there != g_watch[i].there || w.changed.tv_sec != g_watch[i].changed.tv_sec
+			|| w.changed.tv_nsec != g_watch[i].changed.tv_nsec) {
+			snprintf(why, n, "%s %s", w.dir,
+				!w.there ? "has gone" : !g_watch[i].there ? "is there now" : "has changed");
+			worker_start();
+			return true;
+		}
+	}
+	return false;
 }
 
 void desk_apps_shutdown(void)

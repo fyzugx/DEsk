@@ -2,7 +2,7 @@
 
 # DEsk
 
-**v0.1.4 (BETA)** -- fixes (a session no longer ends when a monitor goes to sleep, and laptops whose firmware screen stays beside the graphics card get the desk on the right screen), GTK 4 programs on paper, and Arabic and more as a second keyboard layout. See [RELEASE-NOTES.md](RELEASE-NOTES.md).
+**v0.1.5 (BETA)** -- fixes: no more half-second stops every second and a half on some laptops, windows folded on a second screen stay there, screens turned off with a display tool come back on, games made on the whole screen open on it, drags between X11 programs, programs installed while logged in show up in the bookcase, emoji in notifications, and more. See [RELEASE-NOTES.md](RELEASE-NOTES.md).
 
 I've created a Discord server!
 You can also report bugs and submit ideas for new features here!
@@ -63,6 +63,9 @@ sudo sh scripts/install_fedora.sh
 ```
 
 Then log out and choose **DEsk** on the login screen.
+
+**NixOS**: a flake kept by the community is in `packaging/nix`; its README
+says how to add it to your system.
 
 - It shows what it will install and asks first. `--yes` takes the suggested
   answers; `--no-apps` installs DEsk without the recommended programs.
@@ -150,7 +153,8 @@ there -- its material, the light on it, its shadow and the wear of use.
 - **More than one screen.** The desk is on one screen; every other shows
   more of the desk's boards, running on from it, for windows to lie on. A
   new window comes onto the screen the pointer is on, Unfold and full
-  screen fill the screen the window is on, and nothing the desk's own
+  screen fill the screen the window is on, a window folded there lies
+  folded at the front of that screen, and nothing the desk's own
   screen does -- the drawer, turning to the bookshelf -- moves what lies on
   the others or takes it out of reach. A screen taken away puts its
   windows on one that is left.
@@ -215,7 +219,7 @@ browser, a file manager and a text editor. The drawer's things and
   settings, borrowed programs, sounds, the room, things on the desk.
 - [docs/CONFIGURATION.md](docs/CONFIGURATION.md) -- every setting, file and
   environment variable.
-- [RELEASE-NOTES.md](RELEASE-NOTES.md) -- what is in v0.1.4 and what is known
+- [RELEASE-NOTES.md](RELEASE-NOTES.md) -- what is in v0.1.5 and what is known
   not to work yet.
 - [docs/design.md](docs/design.md) -- the full development log (in Japanese).
 
@@ -306,7 +310,8 @@ the text being written -- in a program's window as on the desk's own pages --
 and leave the keys where they are. It turns the screen off when nobody is at the
 desk (locking first, by default), lets video players keep it on, and
 speaks wlr-output-management (wdisplays, wlr-randr, kanshi), remembering a
-display tool's arrangement for each set of screens. Logging out, restarting
+display tool's arrangement for each set of screens; a screen turned off there
+can be turned on there again. Logging out, restarting
 and powering off ask every window to close first, so a program with unsaved
 work can ask about it; a window that does not close holds it up and is put in
 front.

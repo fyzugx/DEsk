@@ -1,5 +1,5 @@
 project('desk', 'c',
-  version: '0.1.4',
+  version: '0.1.5',
   default_options: [
     'buildtype=debugoptimized',
     'c_std=c11',
@@ -15,7 +15,7 @@ add_project_arguments(
 )
 # what this release is called, as --version and the session log say it,
 # and its number, as the notification server tells programs that ask
-add_project_arguments('-DDESK_RELEASE="DEsk v0.1.4 (BETA)"',
+add_project_arguments('-DDESK_RELEASE="DEsk v0.1.5 (BETA)"',
   '-DDESK_VERSION="@0@"'.format(meson.project_version()), language: 'c')
 # a variable initialised from itself (x = x) is uninitialised, and in C
 # -Wall does not say so: a keysym once read as garbage that way
@@ -25,6 +25,8 @@ add_project_arguments(meson.get_compiler('c').get_supported_arguments('-Winit-se
 math = meson.get_compiler('c').find_library('m', required: true)
 threads = dependency('threads')
 cairo = dependency('cairo')
+# a letter's text, emoji and every script in it (src/draw.c, note_layout)
+pangocairo = dependency('pangocairo')
 # the faces text is set in are chosen from what is installed (src/fonts.c)
 fontconfig = dependency('fontconfig')
 pixman = dependency('pixman-1')
@@ -75,7 +77,7 @@ endforeach
 
 draw_sources = ['src/draw.c', 'src/apps.c', 'src/panel.c', 'src/agenda.c', 'src/fonts.c', 'src/i18n.c',
   'src/memo.c', 'src/user.c']
-draw_deps = [cairo, fontconfig, math, threads]
+draw_deps = [cairo, pangocairo, fontconfig, math, threads]
 # The room is a distance field marched once per pixel, which is what
 # graphics hardware is for. Without EGL we simply do not build that path
 # and the C tracer -- which stays the reference either way -- is all there
@@ -202,8 +204,9 @@ if sdbus.found()
   wm_sources += 'src/post.c'
   # and the tray: the watcher programs put their tray icons with, what
   # input method is on (IBus keeps a bus of its own; fcitx5 is on this
-  # one), and what is playing (MPRIS), for the clock's MEDIA page
-  wm_sources += ['src/tray.c', 'src/ime.c', 'src/media.c']
+  # one), and what is playing (MPRIS), for the clock's MEDIA page; and
+  # programs asking the screen saver's name for the screen to stay lit
+  wm_sources += ['src/tray.c', 'src/ime.c', 'src/media.c', 'src/saver.c']
   wm_deps += sdbus
 endif
 

@@ -694,6 +694,20 @@ static const char *const WORDS[][DESK_LANG_COUNT] = {
 		"La página va hacia donde van los dedos, como en un móvil.",
 		"La page suit les doigts, comme sur un téléphone.",
 		"Die Seite folgt den Fingern, wie auf einem Handy." },
+	{ "Natural scrolling on the mouse",
+		"マウスのナチュラルスクロール",
+		"鼠标自然滚动",
+		"마우스 자연스러운 스크롤",
+		"Desplazamiento natural con el ratón",
+		"Défilement naturel à la souris",
+		"Natürliches Scrollen mit der Maus" },
+	{ "The wheel the other way round: the page goes the way the wheel turns.",
+		"ホイールを逆向きに。ホイールを回した方向にページが動きます。",
+		"滚轮方向反过来：页面随滚轮转动的方向移动。",
+		"휠 방향을 반대로: 휠을 돌리는 방향으로 페이지가 움직입니다.",
+		"La rueda al revés: la página va hacia donde gira la rueda.",
+		"La molette à l'envers : la page suit le sens de la molette.",
+		"Das Mausrad andersherum: Die Seite folgt der Drehung des Rads." },
 	{ "Pointer speed",
 		"ポインタの速さ",
 		"指针速度",
@@ -1281,6 +1295,21 @@ static const char *const WORDS[][DESK_LANG_COUNT] = {
 		"ceux choisis ici.",
 		"Welches Programm Weblinks, E-Mail und jede Dateiart öffnet. Browser, "
 		"Dateimanager und Texteditor der Schublade sind die hier gewählten." },
+	{ "Terminal", "端末", "终端", "터미널", "Terminal", "Terminal", "Terminal" },
+	{ "The terminal the drawer and Super+Enter open, which Default programs has no say "
+		"in. Automatic is the first of the usual ones that is installed.",
+		"引き出しと Super+Enter で開く端末です。既定のプログラムでは選べません。自動は、"
+		"よく使われる端末のうち入っている最初のものです。",
+		"抽屉和 Super+Enter 打开的终端。默认程序管不到它。自动是常用终端中已安装的第一个。",
+		"서랍과 Super+Enter로 여는 터미널입니다. 기본 프로그램에서는 고를 수 없습니다. 자동은 "
+		"흔히 쓰는 터미널 가운데 설치된 첫 번째 것입니다.",
+		"La terminal que abren el cajón y Super+Intro; los programas predeterminados no la "
+		"eligen. Automático es la primera de las habituales que esté instalada.",
+		"Le terminal qu’ouvrent le tiroir et Super+Entrée\xc2\xa0; les programmes par défaut ne le "
+		"choisissent pas. Automatique est le premier des terminaux habituels qui soit "
+		"installé.",
+		"Das Terminal, das die Schublade und Super+Enter öffnen; die Standardprogramme "
+		"bestimmen es nicht. Automatisch ist das erste der üblichen, das installiert ist." },
 	{ "Disks", "ディスク", "磁盘", "디스크", "Discos", "Disques", "Datenträger" },
 	{ "Formatting, partitioning and checking disks and memory sticks.",
 		"ディスクや USB メモリの初期化・パーティション分け・検査です。",

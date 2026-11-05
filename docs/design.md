@@ -506,6 +506,7 @@ DEsk は **wlroots 0.18 の上に書いた Wayland コンポジタ**で、1 プ�
 - **考え方**：GNOME や KDE のように一揃いのデスクトップとして配る。役（`enum desk_std`：端末・ブラウザ・ファイル・エディタ）ごとに標準を決め、引き出しの小物は「役」を指す（`thing terminal`）。
 - **決め方**（apps.c `desk_apps_for_std`）：`shell.conf` の `app.<役>` → DEsk の `desk-mimeapps.list`（freedesktop の mimeapps と同じ置き場：`$XDG_CONFIG_HOME`・`$XDG_CONFIG_DIRS` の直下と、`$XDG_DATA_HOME`・`$XDG_DATA_DIRS` の `applications/`。`session/desk-mimeapps.list` を `$datadir/applications` にインストール）を MIME 型で（`ROLE_MIME`）→ 標準の列（`STD_*`、Xfce・MATE の昔ながらの GTK が先：xfce4-terminal・Firefox ESR・Thunar → Caja（`caja-browser`／`caja-folder-handler`）・Mousepad → Pluma）→ Categories（開発用は後回し）。2026-10-09 から、既定の表は freedesktop の順（各置き場で `desk-mimeapps.list` → `mimeapps.list`、最初に入っている id）で読む。Shell Settings の Default programs（xfce4-mime-settings）が書く `~/.config/mimeapps.list` に引き出しも従い、xdg-open・GIO と同じ答えになる。`desk_apps_find` は本棚に出さない項目（NoDisplay、ほかのデスクトップの OnlyShowIn）も id で見つける（スナップショットの `off`、アイコンは引かない）。
 - **引き出し**（wm.c）：`DRAWER_STD` と `std`。ファイルは `thing <役>` の行。以前の版の `app <id>` の行で、役の既定に当たっていたもの（`cursor.desktop` のエディタなど）は初回に役へ置き換えて書き直す（`drw_migrate`、ログに一行）。Super+Enter も標準の端末（`terminal_open`）。`Terminal=true` のアプリは標準の端末の中で開く（`term_exec_words`）。
+- **Shell Settings の Terminal の行**（2026-11-01、#47）：Look and language の Default programs の下に `app.terminal` の選択（settings.c `terminals_find`）。候補は `$XDG_DATA_HOME`・`$XDG_DATA_DIRS` の `applications/` で Categories に TerminalEmulator がある項目（NoDisplay・Hidden は除く。前の置き場に同じ id があればそちらが立つ）を名前順に、最大 24。Automatic は `auto`（wm.c では空と同じ＝標準の順）。一覧に無い id が書いてあれば、その id を語として足す（`val_choice`）。端末には MIME 型が無いので、Default programs（xfce4-mime-settings）の端末は効かない（Xfce の helpers.rc は読まない）。初めの版は見た id を 256 個で打ち切っていて、409 項目ある /usr/share/applications では XTerm などが漏れた。今は前の置き場にその名前のファイルがあるかを直接見る。
 
 ### 2.4.30 卓上メモ（2026-10-08）
 
@@ -685,7 +686,7 @@ All Apps でバインダーを開くと、アプリの紙が多い棚ほど極�
 
 - **名前**：DeskWM → **DEsk**（D·E＝Desktop Environment と desk。Reddit の提案）。表示名 `DEsk`、XDG のデスクトップ名 `DEsk`（`XDG_CURRENT_DESKTOP`・`OnlyShowIn`、旧 `DeskWM` も読む）、コマンド・ファイル・C の接頭辞 `desk`・`desk_`、マクロと環境変数 `DESK_*`。`include/compat.h` の `desk_compat()` が各プログラムの main の最初で、`DESKWM_*` を `DESK_*` として読み（`DESK_*` があればそちら）、`~/.config/deskwm`・`~/.local/share/deskwm`・`~/.local/state/deskwm`・`~/.cache/deskwm`・`deskwm-mimeapps.list` を、移し先が無ければ `desk` へ移す。
 - **GTK 3 を紙に**（wm.c `server_new_kde_deco`・`kde_server_frame`）：`wlr_server_decoration_manager` を既定 SERVER で出し、面ごとの mode を追う（new_decoration、mode、destroy）。`view_draws_own_frame` の xdg 側は `deco == NULL && !kde_server_frame(surface)`。ヘッダーバーの窓は CLIENT を言うので自分の枠のまま。窓が出た後で mode が変われば `view_frame_update`。
-- **画面の消灯**（wm.c `idle_*`・`screen_*`）：`screen_off`（分、既定 10）・`lock_on_screen_off`（既定 yes）。最後の入力からの時間は壁時計で測り、タイマーは一つ。時間が来たら必要ならロック（`LOCK_COME_NOW`）、それから出力を切る（DRM と headless はコミットした `enabled=false`、モードを覚えて戻す。入れ子は黒い層 `layer_dark` で覆う）。消えている間 `output_frame` はすぐ帰る。起こした入力とその後 0.8 秒のクリック・キーは捨てる（`WAKE_BLIND_S`）。idle-inhibit は面が見えているときだけ数える（マップ・畳み・引き出し・ロック）。ext-idle-notify と wlr-output-power-management も同じ仕組み。試験は `DESK_IDLE_TEST_S`。
+- **画面の消灯**（wm.c `idle_*`・`screen_*`）：`screen_off`（分、既定 10）・`lock_on_screen_off`（既定 yes）。最後の入力からの時間は壁時計で測り、タイマーは一つ。時間が来たら必要ならロック（`LOCK_COME_NOW`）、それから出力を切る（DRM と headless はコミットした `enabled=false`、モードを覚えて戻す。入れ子は黒い層 `layer_dark` で覆う）。消えている間 `output_frame` はすぐ帰る。起こした入力とその後 0.8 秒のクリック・キーは捨てる（`WAKE_BLIND_S`）。idle-inhibit は面が見えているときだけ数える（マップ・畳み・引き出し・ロック）。2026-11-01 から、セッションバスの org.freedesktop.ScreenSaver（saver.c。`/org/freedesktop/ScreenSaver` と `/ScreenSaver`、Inhibit・UnInhibit・SimulateUserActivity）の頼みも数える。窓に結べないので見えているかは問わず、ロック中は数えない。頼みごとに `sd_bus_track` で頼んだ相手を見張り、解かずにバスを去れば解く。UnInhibit は頼んだ相手からだけ。名前は他の持ち主から奪わず（`SD_BUS_NAME_ALLOW_REPLACEMENT` だけ）、後から来たスクリーンセーバーには渡す。SimulateUserActivity は入力と同じ（`input_seen`、暗ければ点く）。ext-idle-notify と wlr-output-power-management も同じ仕組み。試験は `DESK_IDLE_TEST_S`。
 - **画面の配置**（wm.c `om_*`・`displays_*`）：wlr-output-management v4 で、モード・カスタムモード・位置・向き・オン/オフを `wlr_backend_test` してから `wlr_backend_commit`。画面が一つも点かない構成は断る。スケールは机の「1 ポイントが何ピクセルか」で、wlroots の出力スケールにはせず shell.conf の `scale` に書く（`DESK_SCALE` があれば断る）。机を描くのは位置 (0,0) の画面（`first_output`）で、ツールの配置はその画面が (0,0) に来るようずらす。その画面が抜かれたら残った画面を (0,0) へ。ツールが apply に成功したら、つながった画面の組（make/model/serial、無ければコネクタ名）ごとに `displays.conf` に覚え、起動時と抜き差しのとき同じ組なら戻す。実機（DRM・headless）だけで、入れ子の窓には使わない。
 - **終了時の暖機スレッド**：部屋の暖機は join できるスレッドにし、`desk_room_stop()` が止めの旗を立てて待つ（行・GPU の窓・パスのコンパイル・試運転の間で旗を見る）。途中で止めた部屋は捨てる。`wl_display_run` から戻った直後に呼ぶ。終了時に Mesa/LLVM の後始末と競って落ちることがあった（Ubuntu 26.04 の llvmpipe で 6 回中 3 回）。
 - **Shell Settings を設定の入口に**：SCREEN の行と、SYSTEM の行（`DESK_FORM_ACTION`。ラベル・注・鉛筆の「Open ›」。入っている最初のプログラムを二重 fork・setsid・fd を閉じて起こす。無ければ薄く、配布ごとのパッケージ名。必要な Wayland のグローバル（Displays は `zwlr_output_manager_v1`）が無ければ薄く）。Xfce の画面・外観の設定は xfsettingsd が要り、それが起きるときに GSettings を Xfce の既定で上書きするので使わない。
@@ -1293,6 +1294,186 @@ what さん（Discord #bug-report「Small little bugs」の 1）：Brave を Unf
 - 確かめたこと：ASan＋UBSan の机（ロック 3 回、うち 2 回は細かい描き直しの途中で入る）でエラー 0（終了時に残る物の報告は、フォントの型・ロックの写真・main のタイマーだけで、扉からは無し）。TSan で競合 0（apps.c のスレッドを終了時に待たない報告 1 つは前から）。werror の構成で警告 0。draw.c の静的解析 0。プレビューの止まった姿勢の絵は前と同じ（動いている姿勢の粗い絵は、そのときの細かさで描くので変わる）。
 - 実機では試していない。
 
+### 2.4.94 Flatpak のアプリのアイコン（2026-10-30、次の版で）
+
+AiO v0.7 の flatpak-icons（barenakedchicken さん）を手で移した（apps.c）。
+
+- **症状**：Flatpak で入れたアプリは、本棚・引き出し・たたんだ紙・トレイで印が出ない（頭文字になる）。アイコンを探す場所（`ICON_ROOTS`）が `~/.local/share/icons`・`/usr/local/share/icons`・`/usr/share/icons` の三つだけで、Flatpak が書き出す `~/.local/share/flatpak/exports/share/icons` と `/var/lib/flatpak/exports/share/icons` を見ていなかった。アプリの一覧（.desktop）の方は `$XDG_DATA_DIRS` を見るので、desk-session が Flatpak の場所を足していれば、アプリはあるのに印だけ無い。
+- **AiO の直し**：その二つを決め打ちで足す。もう一つ、`ICON_ROOTS[0]` に、呼ぶたびに関数の中の配列（`home_icons`）の番地を入れていた（返った後は無い所を指し、一覧を読むスレッドと取り合う）のを、呼ぶたびの配列に改めた。
+- **DEsk の直し**：アイコンテーマの仕様どおりに、探す場所を呼ぶたびに集める（`icon_roots_get`）：`$XDG_DATA_HOME/icons`（無ければ `~/.local/share/icons`）、`~/.icons`、`$XDG_DATA_DIRS` のそれぞれの `/icons`、最後に Flatpak の二つ（`$XDG_DATA_DIRS` に入っていないセッション向け）。無いフォルダーは入れず、同じものは一度だけ（最大 16）。アプリのアイコン（`icon_resolve`）とトレイのアイコン（`desk_icon_path`）の両方で使う。AiO より広く、NixOS（`/run/current-system/sw/share`）なども `$XDG_DATA_DIRS` から拾える。
+- 確かめたこと：
+  - 偽の HOME と `$XDG_DATA_DIRS` に、Flatpak の形で .desktop とアイコンを置き、apps.c をリンクした小さな試験で：直す前は、ユーザーの Flatpak（128 の PNG）もシステムの Flatpak（SVG だけ）も印なし、トレイも見つからない。直した後は、PNG はそのまま、SVG は PNG に焼いて、トレイも見つかる。
+  - この VM の 134 のアプリで、直す前と後の印が全部同じ（`env -i` で `$XDG_DATA_DIRS` は既定）。一覧の読み込みは 44 ms → 53 ms（印の焼き置きがある時。スレッドの上）。
+  - ASan＋UBSan の机で本棚を開く：エラー 0。4 構成で警告 0。apps.c の静的解析 0。
+- 本物の Flatpak では試していない（この VM に無い）。
+
+### 2.4.97 手紙の絵文字（2026-10-30、次の版で）
+
+barenakedchicken さんの PR #15（AiO v0.7 の emoji と同じもの。Discord では dentarthurdent さん、#bug-report「Notifications show squares with X's in them when emojis are…」）を手で移した（draw.c）。
+
+- **症状**：通知（ポストの手紙）の差出人・見出し・本文に絵文字があると、×の入った四角になる。cairo の文字（`show_text_as`、`desk_font_select`）は一つの文字列を一つの書体で組み、DEsk の書体には絵文字が無い。
+- **直し**：手紙の文字だけ PangoCairo で組む（`note_layout`）。Pango は一続きごとに字のある書体へ移る：絵文字はカラーの Noto Color Emoji（インストーラーが入れている）、ほかの文字（アラビア文字はつながって右から左）もそれぞれの書体で。書体はタイプの字の Latin と wide を並べて渡す（`desk_font_family`・`desk_font_family_wide`、"Latin,wide"）ので、日本語・中国語・韓国語は今までどおり言語ごとの字形。送られてきた文字はそのまま（Pango のマークアップとしては読まない）。
+  - 一行もの（`note_line`）：差出人・見出し。入らなければ 0.94 倍ずつ半分強まで縮め、それでもなら末尾を「…」。
+  - 本文（`note_body`）：言語の決まりで折り返す（複数の文字でできた絵文字は分けない、長すぎる語は途中で）。**行は一行ずつ置く**：箱の中のカードは罫線（`u * 0.095` おき）に、開いた手紙は字の 1.24 倍おきに。PR #15 は Pango の行送りのままで、罫線からずれていく。最後の行は入りきらなければ「…」。開いた手紙が長ければ 0.95 倍ずつ 6 回まで縮めるのも今までどおり（`note_lines` で数える）。
+- **依存**：meson に `pangocairo`（`draw_deps`、desk・desk-settings・desk-index・desk-preview がつながる）。インストーラー 4 つのビルドの一覧に Pango（Debian・Ubuntu `libpango1.0-dev`、Fedora `pango-devel`、Arch `pango`）、README の手で入れる行にも（と絵文字の書体）。動かす分は GTK と一緒に入っている。
+- **ついでに直した**：手紙の差出人の頭文字が、名前の最初の 1 バイトだった（`post_icon`）。韓国語・日本語の名前（메신저）では壊れた字で空の箱に見えた。`desk_initial_of`（UTF-8 の一文字）に。
+- 確かめたこと（入れ子の机、ASan＋UBSan、試験のバスに notify-send）：「Coffee ☕ is ready 🎉」（Chat 💬、本文に 🍰 👍 🎂 🌍 👨‍👩‍👧、日本語とアラビア語）で、箱のカードも開いた手紙も、絵文字はカラー、日本語は日本語の字形、アラビア文字はつながり、家族の絵文字は一つ、罫線に乗る。長い本文は縮んで収まり、韓国語の手紙は頭文字「메」。絵文字の無い手紙は今までと同じ見た目。エラー 0。4 構成で警告 0。draw.c の静的解析 0（範囲を絞って）。
+- 韓国語の本文は、Pango が音節の間でも折る（DEsk の `wrap_lines` は韓国語を語の途中で折らなかった）。手紙の本文だけのこと。
+- LeakSanitizer（ASan のビルド、`detect_leaks=1`）は、出口で Pango と fontconfig の分を約 30 万バイト「漏れ」と数える（v0.1.4 は約 3 KB）。手紙の数によらず一定（10 通 29.7 万、40 通 32.0 万、120 通を全部めくって 32.0 万）で、使っている間は増えない（普通のビルドで 120 通を 5 往復めくって、常駐の大きさは 1 往復目から同じ 414,740 kB）。主のスレッドで Pango が持つ書体の表（`pango_cairo_font_map_get_default`、スレッドごと）が、出口では見えなくなるため。（2026-11-05、v0.1.5 の試験で）
+- ThreadSanitizer のビルドでは、最初の手紙を描く時に Pango が自分で立てるスレッド（`[pango] fontcon`）と、主のスレッドの Pango の間の競合が 10 件ほど出る。どれも Pango と GLib の中どうしで（GLib の排他は futex で、TSan から見えない）、DEsk のスレッドは関わらない。（同じ日）
+
+### 2.4.106 ほかの画面で畳んだ窓が、その画面に残る（2026-11-03）
+
+- **症状**：画面が二つ以上のとき、机の画面の隣の画面で窓を畳むと、畳んだ紙が机の画面の手前へ飛んでいく。その紙を隣の画面へ運んで離しても、机の画面へ戻る（Discord で v さん「add folded apps to non main monitor」、オーナーの環境でも起きる）。GitHub の PR #23（DaeTheDruid さん）が同じ不具合を直していた。
+- **原因**：畳んだ紙の置き場所（`sheet_slot_xy`）と、離した所の内側に収める範囲（`drawer_drop`）が、いつも `work_area()`、つまり机の画面だけだった。窓のほうは `screen_area(server, out)` で画面ごとに扱っていた（2.4.54）。
+- **直し**（PR #23 を今の wm.c に移した。wm.c だけ）：
+  - `sheet_screen`：紙が置かれている（置かれに行く）画面＝止まる所の真ん中の画面。
+  - `sheet_alloc_slot(server, out, self)`・`sheet_slot_xy(server, out, ...)`：置き場所の列は画面ごと。`sheet_begin_fold` は窓の画面（`view_screen`）の手前に置く。引き出しから出す紙（`drawer_lift_sheet`・`drawer_put_in`）は今まで通り机の画面。
+  - `drawer_drop`：離した所の画面の内側に収め、画面が変わったら列の場所も取り直す。
+  - `desk_follow`：引き出しや本棚へのカメラで机が動く間、隣の画面の紙も（窓と同じく）その場に残す。畳んだ窓の開く先（`x0`・`y0`）も一緒に戻す。
+  - `windows_onto_screens`：外された画面にあった紙は、残った近い画面の手前へ。畳んだ窓の開く先も、窓を移した所に。
+  - 隣の画面の紙に手が届くように：隣の画面のクリックも、まず `drawer_press`（紙をつかむ・開く）へ。本棚・Control Panel・ポストを見ている間の「届かない」は机の画面だけ（README のとおり）。
+  - 隣の画面で紙を低い所へ運んでも、引き出しは出てこない（取っ手は机の画面にだけある）。
+  - ついでに：本棚からアプリを出したときに置く紙（`base_new`）も、`cascade_next` が選んだ画面（ポインタの画面）の内側に収める（今までは机の画面の内側に押し込んでいた）。
+- **確かめたこと**（入れ子の二画面）：直す前に再現（隣の画面で畳むと、紙は机の画面の左下へ）。直した後、隣の画面で畳む → その画面の手前に残る、クリックで開く、もう一度畳んで画面の中で運ぶ、引き出しを出す（紙は動かない）、本棚を見上げたまま隣の紙をクリックして開く。ASan＋UBSan で同じ操作をして報告 0。ビルド 4 構成で警告 0。
+- **確かめていないこと**：紙を画面から画面へ運ぶ所（入れ子では X の窓をまたいで引きずれない）。実機で。（画面を外したときに紙が移る所は、2.4.107 の直しの後、入れ子で表示の道具（`omctl off`）から隣の画面を消して確かめた：紙は机の画面の手前へ移り、開くと窓も机の画面に。2026-11-04）
+
+### 2.4.107 表示の道具で消した画面を、また点けられる（2026-11-04）
+
+- **症状**：wdisplays などで画面を一つ消すと、二度と点けられない（何度試しても「refused」。理由はログに出ない）。DEsk は消した配置を displays.conf に覚えるので、再起動しても抜き差ししても消えたまま（Discord の Mr_Duckling さん、NVIDIA・画面 3 つ。desk-report では DP-2 を 640x480・0,0 で点けようとして refused）。
+- **再現**：QEMU の DRM 試験機で virtio-gpu に画面を二つ（2 つ目の画面は `-display dbus` の SetUIInfo で点く）、wdisplays と同じ頼み方をする小さな道具で消して点ける：モードが 640x480・0,0 でも、推奨モードで隣でも、モード無しでも、毎回 refused。入れ子（X11）では通るので気づかなかった。
+- **原因**：`om_try` は、ツールの頼みを `wlr_output_configuration_v1_build_state` で状態にして、そのまま `wlr_backend_test`・`wlr_backend_commit` していた。本物の画面（DRM）は、点く画面に見せる絵（バッファ）が無いと試しも通さない。点いている画面は今の絵があるので、消すのと並べ替えは通り、消してあった画面を点ける時だけ断られていた。wlroots は、まとめて画面を変えるコンポジタのために `wlr_output_swapchain_manager` を用意している（sway と同じやり方）。
+- **直し**（wm.c）：
+  - `om_try`：`wlr_output_swapchain_manager` で、その組に合うスワップチェーンを用意し（`prepare`）、点く画面ごとに最初の絵を付けてから試す（`om_picture`）。シーンのある画面は今の絵（`wlr_scene_output_build_state`、そのスワップチェーンで）、無い画面（消してあった）は黒（次のフレームで机）。通ったら `wlr_output_swapchain_manager_apply`。
+  - `om_turned_on`：消してあった画面は、消している間ツールにモードも位置も伝わらない（消えた head には何も送られない）。それでツールは、モード無しや、自分で選んだモードを 0,0（机の画面の上）で頼んでくる。モード無しなら消す前のモード（`off_mode`・`off_w` など、消す時に覚える）か推奨のモード。点いている画面と重なる所なら、点いている画面の右隣（いちばん右の端）に置く。机の画面はそのまま（0,0 に二つ重なると、机がどちらに行くか分からない）。入れ子の窓（X11・Wayland）と、暗くなっているだけの画面はそのまま。
+  - 断った時はログに理由（「the screens would not take it」など）。
+- **確かめたこと**：QEMU（DRM、virgl と、GL の無い virtio-gpu で CPU 描画・Low の両方）で、640x480・0,0 → 右隣の 1280,0 に置いて点いた、推奨モードで隣 → 点いた、消してモード無し → 消す前の 1280x800 で点いた。点いた画面には机の続きの板（DEsk 自身の写真＝grim で確かめた。QEMU の screendump は、GL では撮れず、2D では変わった所しか送られないので半分黒く写る）。入れ子の二画面でも消す・点ける・試すが通る。ASan＋UBSan（3 巡）で報告 0、ビルド 4 構成で警告 0。
+- **確かめていないこと**：NVIDIA などの実機（試験機は virtio-gpu）。
+
+### 2.4.108 毎秒の処理で、電池の答えを待たない（2026-11-04）
+
+- **症状**：約 1.5 秒ごとに、画面もポインタも約 0.5 秒止まる。とても規則的（Discord の Riennas さん、HP のノート・i5 第 10 世代。動画をこま送りすると、止まり始めは 1.50〜1.54 秒おき、止まるのは 0.43〜0.50 秒）。
+- **見立て**：毎秒の `tick_cb` は、仕事を終えてから 1000 ms 後に次を予約する。仕事に 0.5 秒かかれば、周期は 1.5 秒で止まりは 0.5 秒になり、動画と合う。その仕事のうち機械によって長さが変わるのが、時計の電池の読み取り（`clock_tick` → `desk_supply_read`、/sys/class/power_supply を毎秒）。ノートの電池は ACPI の電池ドライバが組み込みコントローラーに聞き（_BST）、答えを `cache_time`（既定 1000 ms）だけ取っておく。毎秒読めば毎回コントローラーまで聞きに行き、遅いコントローラーの機種では、その答えを画面のスレッドが待っていた。Control Panel の計器も、電池（`battery`）と温度（`temperature`。ノートの thermal zone の多くは同じファームウェア）を、管のクロックの刻みごとに同じスレッドで読んでいた。v0.1.4 も同じ。**Riennas さんの機械でこれが原因かは未確認**（desk-report 待ち）。
+- **再現**：電池のある偽の /sys（`DESK_SYSFS=sys`）と、答えの遅いコントローラーをまねる `slowsys.so`（LD_PRELOAD。電池のファイルは、前の答えから 1 秒たっていれば 450 ms 待たせる。`type` は電源の仕組みの側なので待たない）。`a3.py NAME` が入れ子の DEsk で端末を 12.6 秒引きずり、Control Panel を 8 秒見て、フレームの間隔と、誰が答えを待ったかを数える。直す前：引きずる間に 0.46〜0.50 秒の止まりが 8 回、1.42〜1.48 秒おき（動画と同じ形）。Control Panel では 0.47〜0.58 秒が 5 回。遅い答え 14 回すべてを画面のスレッドが待った。
+- **直し**：
+  - panel.c：電池と温度の読み取りを、音量（`volume_ask`）と同じく、それ用のスレッドに（`supply_look`）。見せるのは最後の答え（`supply_last`。前に始めてから 0.95 秒たっていて、聞いている最中でなければ、次を始める）。最初の答えが来るまでは「電池なし、コンセント」。`desk_supply_read` は `desk_supply_latest`（答えの数を返す。新しい答えごとに 1 増える）に。計器の `battery` は時計と同じ読み取りから（二つが食い違わない。前は /sys 決め打ちで DESK_SYSFS が効かなかった）。
+  - wm.c：時計は新しい答えが来た時だけ、時間ごとの消費の記録に 1 秒分を足す（`supply_seen`）。明るさのキーと Control Panel を開く時の `screen_read` は、バックライトだけを読む（`desk_backlight_find`。電池まで読んでいた）。
+  - wm.c `tick_cb`：毎秒の仕事を一つずつ測り（`tick_chore`）、合わせて 100 ms 以上かかった時は、いちばん長かった仕事をログに書く（1 分に 1 回まで）：「the once-a-second round took 461 ms, the screen standing still meanwhile; the longest of it was the settings (459 ms)」。
+  - desk-report：電源（`power supply: BAT0, Battery` など）と、その行の最初の 3 つ。
+- **確かめたこと**：直した後、同じ試験で、引きずる間も Control Panel を見る間も 300 ms を超える止まりは 0（フレームは 361 → 494、92 → 147）。遅い答え 11 回は、どれも画面のスレッドでは待っていない。設定ファイルの読み直しを同じ仕掛けで遅くすると、上のログの行が出る。
+- **確かめていないこと**：本物の遅いコントローラー（この VM に電池は無い）。明るさのキーの `screen_read` は今も画面のスレッドで読む（キーを押した時の 1 回。`acpi_video` のバックライトなら、これもファームウェアに聞く）。
+
+### 2.4.109 ボタンを押したアプリに、放すまでポインタを渡す（2026-11-04）
+
+- **症状**：Photoshop・Affinity・ArtCraft など（Wine などで動く X11 のアプリ）へ、画像をドラッグで入れられない（Discord の YZ10 さん、10/27。どこから、どのアプリへかは返事待ち）。
+- **見立て**：入れ子で、GTK3 の試験用の窓（ドラッグ元とドロップ先）を Wayland と X11 で組み合わせた。Wayland → Wayland と Wayland → X11 はファイルが届いた（後者は wlroots の xwm が中継する。v0.1.4 でも同じ）。X11 → X11 は届かなかった（X → Wayland は wlroots 0.18 が対応していない）。Wayland のプロトコルを記録すると、X のドラッグが始まると、ドラッグ元はドラッグ中の絵を X の窓（override-redirect）にしてポインタの下に出す。DEsk はボタンを押したままでもポインタの下の面にポインタを渡していた（`pointer_over_paper` → `view_at`）ので、その絵の窓に `wl_pointer.enter` を送っていた。Xwayland は、ボタンが下がったまま X の窓に入ると、そのボタンを放したことにする。ドラッグ元はそれを放したと受け取り、相手のいない所でドラッグを終えていた（GTK の結果は NO_TARGET）。ほかの X の窓に入ったときも同じ。X の側でドラッグが終わらないまま残ると、次の 1 クリックがその終わりに使われた。Wayland のアプリでも、押したまま窓を出ると、窓の外で放したことが伝わらず、アプリは押したままだと思い続けていた（窓の外で放したスライダーなど）。ほかのコンポジタは、ボタンを押した面に、放すまでポインタを渡し続ける（暗黙のグラブ）。
+- **再現**（試験の道具。公開はしていない）：
+  - `dndprobe.py`（GTK3）：ドラッグ元はマゼンタ、ドロップ先はシアン。見るだけの窓 watch-a・watch-b もある。
+  - `a5.py NAME --cases …`：入れ子の DEsk（Xephyr :45、専用のバスと XDG）で窓を色で見つけ、手で引くようにゆっくりドラッグし、何が届いたかを数える。
+    - `wx` などは元と先（w＝Wayland、x＝X11）。ドラッグの後に元を 1 回クリックし、届くかも見る。
+    - `hw`・`hx` は、A で押して B で放す。
+    - `mw`・`mx` は、見出しを持って窓を動かす。
+  - `xview.py`：入れ子の Xwayland の見方（窓の位置、XdndAware、ポインタ）を読むだけ。
+- **直し**（wm.c）：
+  - `pointer_hold`：アプリにボタンを渡した時（`paper_press`、最初の 1 つ）、ポインタの下の面（scene の buffer）を覚える。
+  - `pointer_held`：ボタンが下がっている間は、その面だけにポインタの動きを渡す。窓の外にいても、その面の今の位置から、`point_accepts_input` で wlroots と同じ座標にして渡す。
+  - Wayland のドラッグ（`seat->drag`）の間は、これまでどおり下の物を探す（ドロップ先はドラッグのグラブが決める）。
+  - 放した時（seat のボタンが 0）は、ポインタの下の物を探し直す。
+  - 押されたボタンは DEsk の側でも数える（`buttons_down`）。放したことを DEsk が食べても、ポインタがその面に止まったままにならないように。
+- **確かめたこと**：
+  - 直す前（A3 の前のビルド。ポインタのコードは同じ）：
+    - X11 → X11 は届かず、その後のクリックも元に届かなかった。
+    - Wayland で A で押して B で放すと、A には放したことが伝わらなかった。
+    - X11 では、A についていけたのは窓の縁のすぐ外まで。
+  - 直した後：
+    - wx・ww・xx でファイルが届いた。
+    - xw は届かない（wlroots 0.18）が、ドラッグは放した所で終わり、次のクリックは元に届いた。
+    - hw・hx：A には窓の外まで（60 回ほどの動き）ポインタが渡り、外で放したことも伝わった。B がポインタを得たのは放した時。
+    - mw・mx：見出しを持って 256,156 動いた（アプリにはボタンを渡さない）。
+  - ASan＋UBSan のビルドで、すべての場合を回して誤りは 0。終了時のリークの一覧は、fontconfig・cairo などと `main` の DISPLAY の控えだけで、今回の分は無い。
+  - 4 つの構成のビルドで警告 0。
+- **確かめていないこと**：
+  - Wine（この機械に入っていない）。
+  - YZ10 さんがどこから（Wayland のファイルマネージャー、ブラウザー、X11 のアプリ）ドラッグしたか。Wayland → X11 は前から試験の窓には届いていたので、元が Wayland のアプリなら、原因は別（Wine の側など）かもしれない。
+  - タッチ・タブレットのペンで押したまま動かす場合。
+
+### 2.4.110 開く前に頼んだ全画面・最大化を、そのとおりに（2026-11-04）
+
+- **症状**：American Truck Simulator（ATS）が全画面にならず、最大化した窓のように出る（Discord の Nightshade さん、10/30。Steam から起動したか、Proton か Linux 版かは返事待ち）。
+- **見立て**：入れ子で、ゲームが全画面になるやり方をまねた。
+  - SDL2（この機械の libSDL2 2.32.4、X11）：作る時に全画面（FULLSCREEN・FULLSCREEN_DESKTOP・1280x720 のモード）、作ってから全画面、のどれも画面全体になった。SDL2 は窓を出した後にもう一度頼むため。
+  - X の試験の窓：出した後に頼む（すぐ・2 秒後）のは画面全体になった。**出す前に `_NET_WM_STATE_FULLSCREEN` を付けておき、後から頼まない窓は、机に収まる紙（1424x762）として出た**（「最大化した窓のよう」）。Wine は、画面いっぱいで作った窓をこうする（Proton のゲームもこれ）。出す前に付けた最大化も同じく効かなかった（A6 のついでに見た件）。
+  - 原因は wlroots 0.18.2：窓を出す頼み（MapRequest）で、自分の状態（空）を窓の `_NET_WM_STATE` に書き、窓のものを読むのはその後（associate）。試験用のログで、`map_request` の時は X の側に FULLSCREEN があり、associate の時は 0 個だった。DEsk の `xview_map` は `xs->fullscreen` を見ていたが、そこまで届いていなかった。
+  - Wayland の窓も、出る前に頼んだ全画面・最大化（GTK3 で show の前に fullscreen()・maximize()）を聞いていなかった。頼みが来るのは最初の commit の前で（`initialized` でない）、出た時にも見直していなかった。SDL3 は Wayland を先に使うので、Wayland で動くゲームも同じになる。
+- **直し**（wm.c）：
+  - `xview_map_request`：MapRequest の時、wlroots が上書きする前に、窓の `_NET_WM_STATE` を xwm の接続で読む。FULLSCREEN・MAXIMIZED_* があれば、`wlr_xwayland_surface_set_fullscreen`・`_set_maximized` で wlroots に渡す。後は `xview_map` がする。atom は窓の種類と同じ表（`xatom` の XS_*）。
+  - `xview_map`：最大化を先に、それから全画面（前は全画面なら最大化はしなかった）。両方を頼んだ窓は、全画面を出ると最大化に戻る。
+  - `xdg_toplevel_map`：`requested.maximized`・`requested.fullscreen` を、出た時に見る（同じ順）。
+  - `view_set_fullscreen`：最大化している窓が全画面を出る時は、控えた大きさではなく、その画面の最大化の広さに戻す。X の窓は、最大化してすぐ全画面にすると、大きさがまだ前のまま（commit 前）で控えられていた。
+  - ログ：X の窓が机に来た時（「an X11 window comes onto the desk: … , on the whole screen」）と、X の窓が全画面を頼んだ・出る時（「… asks for the whole screen」）。Wayland の窓の行にも「, on the whole screen」「, opened out」。desk-report の session.log で、ゲームがどう出て、どう頼んだかが分かる（前は X の窓の行が無かった）。
+- **再現**（入れ子の Xephyr）：
+  - `sdlfs`（SDL2 を直に呼ぶ C。ヘッダーは無いので宣言は自前）、`xfs.py`（X の窓、Wine 型ほか）、`wlfs.py`（GTK3 の Wayland の窓）。
+  - `scenarios.sh NAME sdl|x|w MODE…`：一つずつ、6 秒後に入れ子の Xwayland から見た窓（`xstate.py`）と絵。
+- **確かめたこと**：
+  - 直す前：prop（Wine 型）は紙、prop-max も最大化されず。msg・msg-late と SDL2 の 5 つは全画面。Wayland の full-first・max-first は 680x430 の紙。
+  - 直した後：
+    - prop は 1440x900 の全画面、prop-max は最大化。
+    - prop-leave は全画面を出ると机に収まる紙、prop-both（900x600 で両方）は全画面を出ると最大化。
+    - msg・msg-late・SDL2 の 5 つは前と同じ。
+    - Wayland：full-first は初めから全画面、max-first は最大化。max-full は全画面を出ると最大化、plain-full は元の大きさ。
+  - ASan＋UBSan のビルドで全部を回して誤り 0。4 つの構成のビルドで警告 0。meson test 通過。
+- **変えなかったこと（オーナーの判断待ち）**：枠の無い（Motif）、画面と同じ大きさの窓で、状態を何も頼まないもの（bare、SDL2 の borderless）は、今も紙として置く。ほかのデスクトップには、これを全画面として扱うもの（古いゲームのための決まり）がある。ATS がこの出し方なら、今回の直しでは直らない。
+- **確かめていないこと**：
+  - 本物の ATS（Linux 版・Proton とも）、Wine と Proton（この機械に入っていない）。
+  - Wayland の窓は、出た最初の 1 コマは差し出した大きさで、次から全画面（最初の configure では伝えていない）。
+  - 本物のブラウザーやエディターが開く時に最大化を頼むか（下の「ほかに変わること」）。
+- **ほかに変わること**：開く時に最大化を頼むプログラム（広げたことを覚えるもの）は、広げて開く。前は普通の大きさで開いていた（試験の窓では X・Wayland とも確かめた）。
+
+### 2.4.111 入れ子の Wayland ではポインタを窓の中に描く、NixOS の flake（2026-11-05）
+
+コミュニティの PR を 2 本取り込んだ（11/05）。
+
+- **PR #29（Gberfield）**：ほかの Wayland のデスクトップの中で DEsk を窓として動かすと、ポインタが見えないことがあった。DEsk は窓の上のポインタを親に頼む（wl_pointer.set_cursor）が、それを出さない親がある。`server_new_output` で、出力が Wayland の窓（`wlr_output_is_wl`）なら `wlr_output_lock_software_cursors(…, true)` で、ポインタを窓の絵の中に描く。X11 の入れ子と実機は変わらない。
+  - 確かめ方：Xephyr の DEsk（X11）の中に、`WLR_BACKENDS=wayland` の DEsk を 800x500 で出し、Xephyr にだけ XTest でポインタを動かし、外の DEsk を grim（`-c` なし＝外のポインタは写らない）で撮った。窓の上ではポインタが内側の DEsk の絵に描かれ、外に出ると消える。ログ「nested Wayland output: drawing cursor in the window」。ビルドの警告 0。
+- **PR #48（picarica、#22 の続き）**：`packaging/nix`（flake、パッケージ、NixOS のモジュール、試験）をそのまま加え、今のツリーに合わせて 3 か所直した：
+  - `version` を 0.1.4 に（`desk --version` と照らす試験がある。**版の番号を上げる時はここも**）。
+  - `pango` を加えた（PR #15 から pangocairo が要る）。
+  - アイコンの `/usr/share/icons`・`/usr/local/share/icons` の置き換えを消した（今は XDG_DATA_DIRS からテーマを探すので文字列が無く、`--replace-fail` で止まる）。pixmaps の置き換えは残した。
+  - README に「コミュニティが保守、DEsk の版ごとには組んでいない」と、本体の README（日本語・英語）のインストールの所に NixOS の一行。
+  - **確かめていない**：Nix はこの機械に無く、一度も組んでいない（置き換えの文字列が今のツリーにあることだけ確かめた）。作者は v0.1.3 で x86_64 の check が通ったと書いている。
+- 返事（11/05）：#29 は短いお礼、#48 はコミュニティ管理で入れることと、依存が変わる時に声を掛けてよいか。どちらも版が出たら Close。
+
+### 2.4.112 マウスのホイールも逆に（自然なスクロール）できる（2026-11-05）
+
+GitHub #27（AlanGraham0）：EndeavourOS、Bluetooth のマウス 2 つ（MX Master 3・M510）。Plasma でホイールを逆にしていたが、DEsk では逆にならず、変える所も無い。
+
+- **原因**：`pointer_configure` が natural scroll を `pad && c->natural_scroll` で掛けていた。タッチパッド（タップの指の数が 0 より多い）でなければ必ず切る。DEsk は libinput を自分で設定するので、Plasma の設定は効かない（KDE の画面が「ポインタの機器が無い」と言うのも KWin とだけ話すため）。
+- **直し**：shell.conf に `natural_scrolling_mouse = yes | no`（既定 no）、Shell Settings の KEYBOARD AND POINTER にタッチパッドの行の下に「Natural scrolling on the mouse」（7 か国語）。タッチパッドは今までどおり `natural_scrolling`、それ以外（マウス・トラックボール・トラックポイント）は新しい行。ノートでタッチパッドは自然、マウスは普通、という組み合わせが多いので一つにまとめなかった。ログの「pointer: …」の natural scrolling は、DEsk が渡した値ではなく libinput が受け取った値（`libinput_device_config_scroll_get_natural_scroll_enabled`）を書く。CONFIGURATION.md、README（日本語）の表。
+- **確かめ方**：入れ子は libinput を使わないので、QEMU の本物のカーネル。機械の PS/2 マウス（ImExPS/2 Generic Explorer Mouse）について、起動時（なし）→ `natural_scrolling_mouse = yes` を書き足す（natural scrolling）→ それを消して `natural_scrolling = yes` だけ（マウスはなし）。shell.conf を書き換えるたびに当て直される。
+- **確かめていないこと**：本物のマウスでホイールの向きが逆になる所（libinput の仕事）、Bluetooth のマウス、タッチパッド（QEMU に無い）。
+
+### 2.4.113 入れたアプリが、ログインし直さなくても本棚に（2026-11-05）
+
+GitHub #34（PasqualePerilli、#50 も）：端末から Flatpak でアプリを入れても ALL APPS にも分類の本にも出ない。5 分待っても出ず、ログインし直すと出る。
+
+- **原因**：アプリの一覧（apps.c `do_scan`）を読むのは起動の時と、言語を切り替えた時（`desk_apps_rescan`）だけだった。
+- **直し**：走査が読んだフォルダ（`$XDG_DATA_HOME/applications`、`$XDG_DATA_DIRS` の各 `applications`、その下のフォルダ、DEsk の隣の `applications`）と、無かったフォルダを、それぞれの変更時刻（`st_mtim`）と一緒に控える（`struct watch`、`g_watch`、64 まで）。時計の毎秒の処理から `desk_apps_look` を呼び、3 秒ごとに stat し直して、時刻が変わった・現れた・消えたフォルダがあれば、起動の時と同じく別のスレッドで読み直す（`worker_start`）。新しい一覧は新しい generation として出るので、本棚・本・引き出しは今の仕組みのまま追いつく。本棚を見ている間（`shelf_up`）は見に行かない（手元のバインダーが入れ替わらないように）。片付けた後の最初の見回りで読む。ログ「programs: <フォルダ> is there now / has changed / has gone; reading them again」。
+  - パッケージ（dpkg・rpm・pacman）は rename で置くので、フォルダの時刻が変わる。Flatpak は exports の中のリンクを作り直す。
+  - 走査中は見に行かない（`g_worker_done` が立ってから join）。言語の切り替え（`desk_apps_set_language`）は、走っている走査を待ってから言語を変える。
+  - 控えるのは走査を始める前のフォルダの時刻なので、読んでいる間に入ったファイルは次の見回りでもう一度読まれる。
+- **確かめ方**：入れ子の Xephyr で。ランプの後、何も変えない間は読み直さない。`$XDG_DATA_HOME/applications`（無かった）に `a-ten-test.desktop` を入れると 3 秒ほどで読み直し、Utilities が 30 → 31、ALL APPS が 120 → 121。消すと戻る。本棚を上げたまま入れると読まず（30 のまま）、片付けると読む（31）。ASan＋UBSan（bm-asan）で同じ流れを回して報告 0。絵 `a10-binders.png`・`a10-bookcase-up.png`。
+- **確かめていないこと**：本物の Flatpak・パッケージでの入れ方。ログインの後で `XDG_DATA_DIRS` に無い場所（Flatpak を初めて入れたばかりで、exports がまだセッションの環境に無いとき）は今まで通り見ない（ほかのデスクトップと同じく、ログインし直してから）。
+
+### 2.4.114 画面の形が変わった後、開いた Control Panel を新しい部屋で描き直す（2026-11-05、PR #58）
+
+DaeTheDruid の PR #58（#25 を分けたもの）の直し 1 を手で取り込んだ（11/05）。
+
+- **症状**：画面の形が変わった直後に Control Panel を開くと（開いたままでも）、新しい大きさの部屋がトレースされた後も、古い部屋で描いた下絵が残る。ブラウン管・計器の枠が、上に描く部品（針・ランプ・ブラウン管の中身）とずれ、絵も拡大されたまま。別の大きさになるまで直らない。
+- **原因**：下絵（`cc_base`）と部品（`cc_live`）は大きさが変わった時だけ描き直していた。新しい大きさの部屋は後から届き（`room_for_view` はそれまで別の部屋を返す）、その時は大きさが変わらない。
+- **直し**：部屋の通し番号（draw.c `desk_console_room`：`room_for_view(…, DESK_VIEW_CONSOLE)` の `serial`、まだ無ければ 0）を `cc_base_room`・`cc_live_room` に控え、変わったら描き直す（wm.c `paint_console_body`）。PR に無かった所：前もって下絵を作る温めの段（`case 4`）でも番号を控える。控えないと、最初に開いた時に一度余計に描き直す。
+- **取り込まなかったもの（直し 2、メーターをスレッドで）**：v0.1.4 は温度（hwmon、GPU のセンサー）と電池を画面のスレッドで読んでいた。手元では A3（2.4.108）でそれらはもう別スレッド（`supply_look`）で、残りは /proc と /sys の小さなファイルだけ。0.15 秒ごとにスレッドを作る形は A3 と二重になるので入れなかった。
+- **確かめ方**：入れ子の Xephyr（Low、GPU のトレース）で。1440x900 で落ち着いてから、Xephyr の中の窓を 1100x900 に（`xresize.py`、ウィンドウマネージャがするように）。直後に Super+C で開き、開いたまま新しい部屋を待つと、直す前は古い部屋の絵のまま（手本との違い 588,580 画素）、直した後は最初から 1100x900 で始めた手本と同じ（違いはメーターの値の約 1,900 画素）。開くのが部屋の後なら直す前でも正しい。ASan＋UBSan で同じ手順、報告 0。4 構成のビルドで警告 0。
+
 ## 3. 部屋の描画（レイトレーサ）
 
 ### 3.1 シーン
@@ -1505,7 +1686,7 @@ what さん（Discord #bug-report「Small little bugs」の 1）：Brave を Unf
 | ~~タッチパッドとマウス（タップでクリック、自然なスクロール、速さ、左手）~~ | 2026-10-09 済み（2.4.41） | 作る |
 | ~~キーボードの配列の切り替え、リピートの速さ~~（Compose は未） | 2026-10-09 済み（2.4.41） | 作る |
 | 夜間の色温度 | `wlr_gamma_control_manager_v1` を出せば wlsunset・gammastep をそのまま借りられる（出力のコミットに gamma を載せる必要があり、実機で確かめてから） | 作る＋借りる |
-| X11 のアプリの画面の点けたまま（VLC、SDL のゲーム） | セッションバスで org.freedesktop.ScreenSaver の Inhibit を受け、今の idle の保持に足す | 作る |
+| ~~X11 のアプリの画面の点けたまま（VLC、SDL のゲーム）~~ | 2026-11-01 済み：saver.c がセッションバスで org.freedesktop.ScreenSaver の Inhibit を受け、`idle_held` に足す | 作る |
 | サスペンド・休止のボタン、電源キー | logind の Suspend・Hibernate を Control Panel のガラスの下に。電源キーは logind の inhibitor を取ってガラスを開ける | 作る（仕事は logind） |
 | ~~電池の残り少ない知らせ~~ | 2026-10-09 済み：poweralertd（Arch は batsignal） | 借りる |
 | ~~メモリスティックの自動マウントと知らせ~~ | 2026-10-09 済み：udiskie | 借りる |

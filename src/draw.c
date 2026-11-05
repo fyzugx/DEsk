@@ -34,6 +34,7 @@
 #include "apps.h"
 #include "panel.h"
 #include "post.h"
+#include <pango/pangocairo.h>
 
 #include <strings.h>
 
@@ -21723,8 +21724,8 @@ static int post_xform(int screen_w, int screen_h, struct room_render **out_rr,
 static cairo_surface_t *post_icon(const struct desk_note *note, char *initial,
 	size_t initial_n)
 {
-	snprintf(initial, initial_n, "%c",
-		note->app[0] ? (char)toupper((unsigned char)note->app[0]) : '?');
+	/* (its first letter, not its first byte: 메신저 is 메) */
+	desk_initial_of(note->app, initial, initial_n);
 	const struct desk_app_list *l = desk_apps_acquire();
 	const struct desk_app *app = NULL;
 	if (note->desktop[0]) {
@@ -22144,6 +22145,114 @@ static int wrap_lines(cairo_t *cr, const char *s, double w, char out[][256], int
 	return n;
 }
 
+/* ---- what a letter says, emoji and all ------------------------------
+ *
+ * A letter's sender, heading and body are what a program sent, and that
+ * has emoji in it as often as not. cairo's own text sets a string in one
+ * face, which has none, and they came out as boxes with an X in them.
+ * Pango falls back, a run at a time, to a face that has them -- in colour,
+ * Noto Color Emoji, which the installers put in -- and to one for any
+ * other script, Arabic joined up as it should be. The faces are the
+ * typewriter's own, Latin and wide, and only the letters are set this
+ * way. (barenakedchicken's PR #15 -- dentarthurdent on Discord.) */
+
+static PangoLayout *note_layout(cairo_t *cr, const char *s, double size, bool bold)
+{
+	PangoLayout *pl = pango_cairo_create_layout(cr);
+	char family[256];
+	snprintf(family, sizeof family, "%s,%s", desk_font_family(DESK_FONT_TYPE, NULL),
+		desk_font_family_wide(DESK_FONT_TYPE, NULL));
+	PangoFontDescription *fd = pango_font_description_new();
+	pango_font_description_set_family(fd, family);
+	pango_font_description_set_weight(fd, bold ? PANGO_WEIGHT_BOLD : PANGO_WEIGHT_NORMAL);
+	pango_font_description_set_absolute_size(fd, size * PANGO_SCALE);
+	pango_layout_set_font_description(pl, fd);
+	pango_font_description_free(fd);
+	/* what was sent, as it was sent: never read as Pango's markup */
+	pango_layout_set_text(pl, s ? s : "", -1);
+	return pl;
+}
+
+static void note_layout_size(PangoLayout *pl, double size)
+{
+	PangoFontDescription *fd = pango_font_description_copy(pango_layout_get_font_description(pl));
+	pango_font_description_set_absolute_size(fd, size * PANGO_SCALE);
+	pango_layout_set_font_description(pl, fd);
+	pango_font_description_free(fd);
+}
+
+/* One line of it -- who it is from, what it is about -- made smaller to
+ * fit max_w, to about half its size, and cut short after that: x as
+ * show_text_as has it by align, y its baseline. */
+static void note_line(cairo_t *cr, const char *s, double x, double y, double size, bool bold,
+	double r, double g, double b, double a, int align, double max_w)
+{
+	if (!s || !*s || max_w <= 0.0) {
+		return;
+	}
+	PangoLayout *pl = note_layout(cr, s, size, bold);
+	pango_layout_set_single_paragraph_mode(pl, TRUE);
+	PangoRectangle box;
+	double use = size;
+	for (int i = 0; i < 24; i++) {
+		note_layout_size(pl, use);
+		pango_layout_get_extents(pl, NULL, &box);
+		if ((double)box.width / PANGO_SCALE <= max_w || use < size * 0.55) {
+			break;
+		}
+		use *= 0.94;
+	}
+	if ((double)box.width / PANGO_SCALE > max_w) {
+		pango_layout_set_width(pl, (int)(max_w * PANGO_SCALE));
+		pango_layout_set_ellipsize(pl, PANGO_ELLIPSIZE_END);
+		pango_layout_get_extents(pl, NULL, &box);
+	}
+	double bw = (double)box.width / PANGO_SCALE;
+	double dx = align == 0 ? -bw * 0.5 : align > 0 ? -bw : 0.0;
+	cairo_save(cr);
+	cairo_set_source_rgba(cr, r, g, b, a);
+	cairo_move_to(cr, x + dx, y);
+	pango_cairo_show_layout_line(cr, pango_layout_get_line_readonly(pl, 0));
+	cairo_restore(cr);
+	g_object_unref(pl);
+}
+
+/* How many lines s takes, w wide at size: broken where the language breaks
+ * (an emoji made of several, never in two; anywhere in a word too long). */
+static int note_lines(cairo_t *cr, const char *s, double w, double size)
+{
+	PangoLayout *pl = note_layout(cr, s, size, false);
+	pango_layout_set_width(pl, (int)(w * PANGO_SCALE));
+	pango_layout_set_wrap(pl, PANGO_WRAP_WORD_CHAR);
+	int n = pango_layout_get_line_count(pl);
+	g_object_unref(pl);
+	return n;
+}
+
+/* And set so: at most max lines, lh apart from the first baseline y -- the
+ * ruled lines' pitch, not Pango's -- the last cut short if there is more. */
+static void note_body(cairo_t *cr, const char *s, double x, double y, double w, double size,
+	double lh, int max, double r, double g, double b, double a)
+{
+	if (!s || !*s || w <= 0.0 || max < 1) {
+		return;
+	}
+	PangoLayout *pl = note_layout(cr, s, size, false);
+	pango_layout_set_width(pl, (int)(w * PANGO_SCALE));
+	pango_layout_set_wrap(pl, PANGO_WRAP_WORD_CHAR);
+	pango_layout_set_height(pl, -max);
+	pango_layout_set_ellipsize(pl, PANGO_ELLIPSIZE_END);
+	int n = pango_layout_get_line_count(pl);
+	cairo_save(cr);
+	cairo_set_source_rgba(cr, r, g, b, a);
+	for (int i = 0; i < n && i < max; i++) {
+		cairo_move_to(cr, x, y + i * lh);
+		pango_cairo_show_layout_line(cr, pango_layout_get_line_readonly(pl, i));
+	}
+	cairo_restore(cr);
+	g_object_unref(pl);
+}
+
 /* A letter as it stands in the box: letter paper, who it is from at the
  * top, what it is about under that, and the writing. */
 static void post_card_face(cairo_t *cr, double w, double h, const struct desk_note *note,
@@ -22202,7 +22311,7 @@ static void post_card_face(cairo_t *cr, double w, double h, const struct desk_no
 	double right = w - mx - w * 0.05;
 	show_text_as(cr, DESK_FONT_TYPE, when, right, l1, u * 0.048, false, 0.42, 0.37, 0.31,
 		0.85, 1);
-	show_text_fit_as(cr, DESK_FONT_TYPE, note->summary[0] ? note->summary : "", tx, l1,
+	note_line(cr, note->summary[0] ? note->summary : "", tx, l1,
 		u * 0.072, true,
 		0.15, 0.12, 0.09, 0.96, -1, right - tx - u * 0.16);
 	cairo_save(cr);
@@ -22217,7 +22326,7 @@ static void post_card_face(cairo_t *cr, double w, double h, const struct desk_no
 	snprintf(from_sp, sizeof from_sp, "%s ", from);
 	cairo_text_extents(cr, from_sp, &fe);
 	cairo_restore(cr);
-	show_text_fit_as(cr, DESK_FONT_TYPE, note->app[0] ? note->app : "\xe2\x80\x94",
+	note_line(cr, note->app[0] ? note->app : "\xe2\x80\x94",
 		tx + fe.x_advance, l2,
 		u * 0.052, true, 0.14, 0.18, 0.34, 0.92, -1, w - mx - tx - fe.x_advance);
 	/* a hand-ruled line under the heading */
@@ -22229,18 +22338,9 @@ static void post_card_face(cairo_t *cr, double w, double h, const struct desk_no
 
 	/* and what it says, on the lines */
 	if (note->body[0]) {
-		cairo_save(cr);
-		desk_font_select(cr, DESK_FONT_TYPE, note->body, false, false);
-		cairo_set_font_size(cr, u * 0.064);
-		char lines[5][256];
 		int room = (int)((h * 0.97 - u * 0.27) / (u * 0.095)) + 1;
-		int nl = wrap_lines(cr, note->body, w - mx * 2.0, lines, room < 5 ? (room > 0 ? room : 1) : 5);
-		cairo_set_source_rgba(cr, 0.26, 0.23, 0.30, 0.88);
-		for (int l = 0; l < nl; l++) {
-			cairo_move_to(cr, mx, u * 0.27 + l * u * 0.095);
-			cairo_show_text(cr, lines[l]);
-		}
-		cairo_restore(cr);
+		note_body(cr, note->body, mx, u * 0.27, w - mx * 2.0, u * 0.064, u * 0.095,
+			room < 5 ? (room > 0 ? room : 1) : 5, 0.26, 0.23, 0.30, 0.88);
 	}
 	if (note->urgency >= DESK_URGENCY_CRITICAL) {
 		/* a red band down the edge: this one was sent express */
@@ -22737,7 +22837,7 @@ cairo_surface_t *desk_letter_sheet(const struct desk_note *note,
 		show_text_as(cr, DESK_FONT_TYPE, initial, ix + is * 0.5, iy + is * 0.74, is * 0.66, true,
 			0.26, 0.19, 0.14, 0.88, 0);
 	}
-	show_text_fit_as(cr, DESK_FONT_TYPE, note->app[0] ? note->app : "\xe2\x80\x94",
+	note_line(cr, note->app[0] ? note->app : "\xe2\x80\x94",
 		ix + is + w * 0.030, iy + is * 0.70, h * 0.055, true,
 		0.17, 0.14, 0.11, 0.95, -1, w * 0.60);
 
@@ -22756,7 +22856,7 @@ cairo_surface_t *desk_letter_sheet(const struct desk_note *note,
 		0.28, 0.22, 0.16, 0.55);
 
 	/* what it says */
-	show_text_fit_as(cr, DESK_FONT_TYPE, note->summary[0] ? note->summary : "",
+	note_line(cr, note->summary[0] ? note->summary : "",
 		w * 0.075, h * 0.320, h * 0.072, true, 0.14, 0.12, 0.10, 0.96,
 		-1, w * 0.85);
 
@@ -22765,26 +22865,18 @@ cairo_surface_t *desk_letter_sheet(const struct desk_note *note,
 	if (note->body[0]) {
 		/* typed a little smaller when it is too long for the sheet (the
 		 * same in Spanish runs a third longer than in English) */
-		char lines[12][256];
-		int nl = 0;
 		double size = h * 0.050;
-		cairo_save(cr);
-		desk_font_select(cr, DESK_FONT_TYPE, note->body, false, false);
+		int room = 1;
 		for (int k = 0; k < 6; k++) {
-			cairo_set_font_size(cr, size);
-			nl = wrap_lines(cr, note->body, w * 0.85, lines, 12);
-			int room = (int)((h * 0.92 - h * 0.435) / (size * 1.24)) + 1;
-			if (nl <= room) {
+			room = (int)((h * 0.92 - h * 0.435) / (size * 1.24)) + 1;
+			if (note_lines(cr, note->body, w * 0.85, size) <= room) {
 				break;
 			}
 			size *= 0.95;
+			room = (int)((h * 0.92 - h * 0.435) / (size * 1.24)) + 1;
 		}
-		cairo_restore(cr);
-		double ly = h * 0.435, lh = size * 1.24;
-		for (int l = 0; l < nl && ly < h * 0.92; l++, ly += lh) {
-			show_text_as(cr, DESK_FONT_TYPE, lines[l], w * 0.075, ly, size, false,
-				0.30, 0.27, 0.24, 0.90, -1);
-		}
+		note_body(cr, note->body, w * 0.075, h * 0.435, w * 0.85, size, size * 1.24,
+			room < 12 ? room : 12, 0.30, 0.27, 0.24, 0.90);
 	}
 
 	paper_crease(cr, w, h, seed + 3, 0.05);
@@ -23411,6 +23503,12 @@ unsigned desk_room_shown(int screen_w, int screen_h)
 {
 	struct room_render *rr = room_for(screen_w, screen_h);
 	return rr ? rr->serial : 0;
+}
+
+unsigned desk_console_room(int w, int h)
+{
+	struct room_render *rr = room_for_view(w, h, DESK_VIEW_CONSOLE);
+	return rr && rr->console ? rr->serial : 0;
 }
 
 void desk_scene_warm(int screen_w, int screen_h, bool async)

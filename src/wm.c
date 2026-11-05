@@ -44,6 +44,7 @@
 #include "agenda.h"
 #ifdef DESK_HAVE_POST
 #include "tray.h"
+#include "saver.h"
 #endif
 #ifdef DESK_HAVE_GPU
 /* what the screen is drawn with: a GPU, or the processor in its place */
@@ -84,6 +85,8 @@
 #endif
 #include <wlr/render/allocator.h>
 #include <wlr/render/pixman.h>
+#include <wlr/render/pass.h>
+#include <wlr/render/swapchain.h>
 #include <wlr/render/wlr_renderer.h>
 #include <wlr/render/wlr_texture.h>
 #include <wlr/types/wlr_compositor.h>
@@ -98,6 +101,7 @@
 #include <wlr/types/wlr_output.h>
 #include <wlr/types/wlr_output_layout.h>
 #include <wlr/types/wlr_output_management_v1.h>
+#include <wlr/types/wlr_output_swapchain_manager.h>
 #include <wlr/types/wlr_output_power_management_v1.h>
 #include <wlr/types/wlr_pointer.h>
 #include <wlr/types/wlr_pointer_constraints_v1.h>
@@ -233,6 +237,7 @@ struct shell_conf {
 	/* the keyboard and the pointer (input_apply) */
 	bool tap_click;             /* a touchpad: a tap is a click */
 	bool natural_scroll;        /* a touchpad: the page follows the fingers */
+	bool natural_wheel;         /* a mouse: the page goes the way the wheel turns */
 	bool left_handed;           /* the buttons the other way round */
 	double pointer_speed;       /* libinput's, -1 to 1 */
 	char kb_layout[32];         /* an xkb layout; "" the system's */
@@ -359,6 +364,10 @@ struct desk_output {
 	struct wlr_output_mode *dark_mode;
 	int dark_w, dark_h, dark_refresh;
 	struct wlr_scene_rect *dark_cover;
+	/* the mode it was in when a display tool turned it off, for when one
+	 * turns it on again without saying which (om_try) */
+	struct wlr_output_mode *off_mode;
+	int off_w, off_h, off_refresh;
 	/* A screen beside the desk's own: the bare desk under its windows
 	 * (side_desks_paint), and what it was drawn for -- where the screen
 	 * is, how big, and the room it is cut from. */
@@ -482,6 +491,7 @@ struct desk_toplevel {
 	bool associated;
 	struct wl_listener associate;
 	struct wl_listener dissociate;
+	struct wl_listener map_request;
 	struct wl_listener request_configure;
 	struct wl_listener request_activate;
 	struct wl_listener set_decorations;
@@ -627,7 +637,7 @@ struct desk_server {
 	struct wl_event_source *xwayland_retry;
 	int xwayland_rebuilds;
 	double xwayland_rebuilt_at;
-	uint32_t xatom[16];   /* the window types we look at, once X is up */
+	uint32_t xatom[16];   /* the window types and states we look at, once X is up */
 
 	struct wlr_cursor *cursor;
 	struct wlr_xcursor_manager *cursor_mgr;
@@ -683,6 +693,12 @@ struct desk_server {
 	struct wl_listener start_drag;
 	struct wl_listener drag_icon_gone;
 	struct wlr_scene_tree *layer_drag;
+	/* a button held down in a program: the pointer stays the program's
+	 * until it is let go (pointer_hold) -- the surface it went down on,
+	 * and the buttons the hand has down, whoever was told of them */
+	struct wlr_scene_buffer *held;
+	struct wl_listener held_gone;
+	unsigned buttons_down;
 	/* how far the desk and everything on it is moved with the camera, at
 	 * the desk end of a move */
 	int desk_dx, desk_dy;
@@ -705,7 +721,7 @@ struct desk_server {
 		bool vol_drag;
 		double vol_scroll;
 		struct wl_event_source *timer;
-		double supply_at;
+		unsigned supply_seen;   /* the looks at it taken in (desk_supply_latest) */
 		struct desk_supply supply;
 		float hist[3600];
 		int hist_n, hist_at;
@@ -1066,6 +1082,7 @@ struct desk_server {
 	struct wl_event_source *cc_timer;
 	struct wlr_scene_buffer *cc_base;   /* the traced sheet, put up once */
 	int cc_base_w, cc_base_h;
+	unsigned cc_base_room, cc_live_room;   /* and from which room (desk_console_room) */
 	/* the instruments: a sprite a piece, each drawn only when it changes */
 	struct wlr_scene_tree *cc_live;
 	struct desk_sprite cc_sprite[DESK_CCP_COUNT];
@@ -1206,6 +1223,10 @@ struct desk_server {
 	int screenshot_delay_ms;
 	int exit_after_shot;
 	struct wl_event_source *tick;
+	/* the once-a-second round's longest chore, and when a long round was
+	 * last put in the log (tick_cb) */
+	const char *tick_worst;
+	double tick_worst_ms, tick_said_at;
 	struct wl_event_source *shot_timer;
 	bool icons_shown;
 	/* A resize arrives as a stream of events while an edge is dragged, and
@@ -1805,6 +1826,8 @@ static struct wlr_output *first_output(struct desk_server *server);
 static struct wlr_output *screen_at(struct desk_server *server, double x, double y);
 static bool screen_is_side(struct desk_server *server, const struct wlr_output *out);
 static struct wlr_box screen_area(struct desk_server *server, struct wlr_output *out);
+static bool pointer_on_side(struct desk_server *server);
+static struct wlr_output *view_screen(struct desk_toplevel *view);
 static void desk_screen_lay(struct desk_server *server, struct wlr_scene_buffer *b,
 	struct wlr_fbox src, double x, double y, double dw, double dh, int lx, int ly);
 
@@ -2389,13 +2412,29 @@ static void server_schedule_frames(struct desk_server *server)
 	}
 }
 
-static int sheet_alloc_slot(struct desk_server *server)
+/* The screen a sheet lies on, or is on its way to: the one the middle of
+ * where it comes to rest is on (x1, y1, in the paper's coordinates). */
+static struct wlr_output *sheet_screen(struct desk_server *server, const struct desk_sheet *s)
+{
+	int ow = (int)s->hit_w, oh = (int)s->hit_h, pad;
+	if (s->fold) {
+		desk_fold_extent(s->fold, 1.0, &ow, &oh, &pad);
+	}
+	return screen_at(server, s->x1 + ow * 0.5 + server->desk_dx,
+		s->y1 + oh * 0.5 + server->desk_dy + server->win_dy);
+}
+
+/* A place along the front of screen out for a sheet to be put down in:
+ * the first not held by another (not self) lying on that screen. */
+static int sheet_alloc_slot(struct desk_server *server, struct wlr_output *out,
+	const struct desk_sheet *self)
 {
 	bool used[12] = {0};
 	struct desk_toplevel *view;
 	wl_list_for_each(view, &server->toplevels, link) {
 		if (view->sheet.phase != SHEET_IDLE && !view->sheet.in_drawer
-			&& view->sheet.slot >= 0 && view->sheet.slot < 12) {
+			&& &view->sheet != self && view->sheet.slot >= 0 && view->sheet.slot < 12
+			&& sheet_screen(server, &view->sheet) == out) {
 			used[view->sheet.slot] = true;
 		}
 	}
@@ -2409,11 +2448,13 @@ static int sheet_alloc_slot(struct desk_server *server)
 
 static struct wlr_box work_area(struct desk_server *server);
 
-/* Where a folded sheet is put down: along the front of the desk, from the
- * left, a row at a time -- the next row further back, when one is full. */
-static void sheet_slot_xy(struct desk_server *server, int slot, int pw, int ph, double *x, double *y)
+/* Where a folded sheet is put down: along the front of the desk -- or of
+ * the screen beside it, out, it was folded on -- from the left, a row at a
+ * time -- the next row further back, when one is full. */
+static void sheet_slot_xy(struct desk_server *server, struct wlr_output *out, int slot,
+	int pw, int ph, double *x, double *y)
 {
-	struct wlr_box wa = work_area(server);
+	struct wlr_box wa = screen_area(server, out);
 	int per_row = (wa.width - 48) / (pw + 18);
 	if (per_row < 1) {
 		per_row = 1;
@@ -7575,11 +7616,13 @@ static void screen_apply(struct desk_server *server)
  * (the keys of a laptop, its power manager) may have turned it. */
 static void screen_read(struct desk_server *server)
 {
-	struct desk_supply su;
-	desk_supply_read(&su);
-	server->cc_screen_ok = su.have_backlight;
-	if (su.have_backlight && server->cc_grab != DESK_CC_SCREEN) {
-		server->cc_screen = su.backlight;
+	/* the backlight alone: the rest of the supply is the firmware's, and
+	 * slow to answer on some laptops (desk_supply_latest) */
+	char name[256];
+	double max, now;
+	server->cc_screen_ok = desk_backlight_find(name, sizeof name, &max, &now);
+	if (server->cc_screen_ok && server->cc_grab != DESK_CC_SCREEN) {
+		server->cc_screen = now / max > 1.0 ? 1.0 : now / max;
 	}
 }
 
@@ -7706,13 +7749,19 @@ static void paint_console_body(struct desk_server *server)
 	film_ensure(server, DESK_VIEW_CONSOLE, server->layer_console);
 
 	/* The traced sheet goes up once. Copying a screenful of baked steel
-	 * on every frame was most of what the set cost to look at. */
-	if (!server->cc_base || server->cc_base_w != w || server->cc_base_h != h) {
+	 * on every frame was most of what the set cost to look at. Once for a
+	 * room, too: the screen changed shape, the set is drawn at once from
+	 * the room there is, and drawn again when the new size's own room has
+	 * been traced -- which puts it somewhere else (DaeTheDruid, #58). */
+	unsigned room = desk_console_room(w, h);
+	if (!server->cc_base || server->cc_base_w != w || server->cc_base_h != h
+		|| server->cc_base_room != room) {
 		struct desk_buf *bb = buf_create(w, h);
 		desk_draw_console_base(bb->cr, w, h);
 		scene_put(&server->cc_base, server->layer_console, bb, 0, 0, NULL);
 		server->cc_base_w = w;
 		server->cc_base_h = h;
+		server->cc_base_room = room;
 		view_bases_under(server);
 	}
 
@@ -7736,9 +7785,11 @@ static void paint_console_body(struct desk_server *server)
 		}
 		struct desk_meters m = server->cc_meters;
 		desk_console_advance(&st, &m);
-		bool force = server->cc_live_w != w || server->cc_live_h != h;
+		bool force = server->cc_live_w != w || server->cc_live_h != h
+			|| server->cc_live_room != room;
 		server->cc_live_w = w;
 		server->cc_live_h = h;
+		server->cc_live_room = room;
 		for (int p = 0; p < DESK_CCP_COUNT; p++) {
 			struct desk_sprite *sp = &server->cc_sprite[p];
 			uint64_t key = desk_console_piece_key(p, &st, server->cc_hover, &m);
@@ -9331,7 +9382,7 @@ static void sheet_begin_unfold(struct desk_server *server, struct desk_sheet *sh
 
 static void sheet_begin_fold(struct desk_server *server, struct desk_sheet *sheet,
 	cairo_surface_t *src, double x, double y, struct wlr_scene_tree *live, void *hit,
-	cairo_surface_t *icon, const char *name)
+	cairo_surface_t *icon, const char *name, struct wlr_output *out)
 {
 	if (sheet->phase == SHEET_FOLDING) {
 		cairo_surface_destroy(src);
@@ -9368,7 +9419,7 @@ static void sheet_begin_fold(struct desk_server *server, struct desk_sheet *shee
 	if (sheet->tree && sheet->tree->node.parent != server->layer_parked) {
 		wlr_scene_node_reparent(&sheet->tree->node, server->layer_parked);
 	}
-	sheet->slot = sheet_alloc_slot(server);
+	sheet->slot = sheet_alloc_slot(server, out, sheet);
 	static unsigned sheet_seed;
 	sheet->seed = ++sheet_seed;
 	/* folded down to about a postcard, whatever size it was */
@@ -9385,7 +9436,8 @@ static void sheet_begin_fold(struct desk_server *server, struct desk_sheet *shee
 		sheet->x1 = server->desk_w * 0.5 - ow * 0.5 - server->layer_parked->node.x;
 		sheet->y1 = server->desk_h + 4 - server->layer_parked->node.y;
 	} else {
-		sheet_slot_xy(server, sheet->slot, ow, oh, &sheet->x1, &sheet->y1);
+		/* along the front of the screen it was on */
+		sheet_slot_xy(server, out, sheet->slot, ow, oh, &sheet->x1, &sheet->y1);
 	}
 	if (live) {
 		wlr_scene_node_set_enabled(&live->node, false);
@@ -9638,7 +9690,9 @@ static int base_new(struct desk_server *server, const struct desk_app *app,
 	b->w = ow + DESK_BORDER * 2;
 	b->h = oh + DESK_TITLE_H + DESK_BORDER;
 	cascade_next(server, &b->x, &b->y);
-	struct wlr_box wa = work_area(server);
+	/* inside the screen cascade_next chose: the pointer's */
+	struct wlr_box wa = screen_area(server,
+		screen_at(server, server->cursor->x, server->cursor->y));
 	if (b->x + b->w > wa.x + wa.width) {
 		b->x = wa.x + wa.width - b->w;
 	}
@@ -10140,6 +10194,8 @@ static void terminal_open(void)
  *   tap_to_click = yes | no               a touchpad: a tap is a click (yes)
  *   natural_scrolling = yes | no          a touchpad: the page goes the way
  *                                         the fingers do (no)
+ *   natural_scrolling_mouse = yes | no    a mouse: the page goes the way the
+ *                                         wheel turns (no)
  *   left_handed = yes | no                mice and touchpads: the buttons
  *                                         the other way round (no)
  *   pointer_speed = slow | normal | fast  or libinput's -1 to 1 (normal)
@@ -10236,6 +10292,7 @@ static void shell_conf_defaults(struct shell_conf *c)
 	c->lock_screen_off = true;
 	c->tap_click = true;
 	c->natural_scroll = false;
+	c->natural_wheel = false;
 	c->left_handed = false;
 	c->pointer_speed = 0.0;
 	c->kb_layout[0] = c->kb_second[0] = '\0';
@@ -10321,7 +10378,9 @@ static bool conf_other(struct shell_conf *c, const char *path, const char *key, 
 		return true;
 	}
 	if (!strncmp(key, "app.", 4) && desk_std_parse(key + 4) >= 0) {
-		desk_apps_set_std(desk_std_parse(key + 4), val);
+		/* auto: none set, the first of the usual ones (Shell Settings'
+		 * Automatic) */
+		desk_apps_set_std(desk_std_parse(key + 4), strcasecmp(val, "auto") ? val : "");
 		return true;
 	}
 	if (!strcmp(key, "language")) {
@@ -10548,6 +10607,8 @@ static void shell_conf_read_file(struct shell_conf *c, const char *path)
 			c->tap_click = b;
 		} else if (!strcmp(key, "natural_scrolling")) {
 			c->natural_scroll = b;
+		} else if (!strcmp(key, "natural_scrolling_mouse")) {
+			c->natural_wheel = b;
 		} else if (!strcmp(key, "left_handed")) {
 			c->left_handed = b;
 		} else if (!strncmp(key, "paper.", 6) && key[6]
@@ -11026,7 +11087,7 @@ static void view_fold_toggle(struct desk_toplevel *view)
 	bool had_keys = server->seat->keyboard_state.focused_surface == view_surface(view);
 	sheet_begin_fold(server, &view->sheet, src,
 		view->scene_tree->node.x, view->scene_tree->node.y,
-		view->scene_tree, view, icon, name);
+		view->scene_tree, view, icon, name, view_screen(view));
 	/* a sheet folded away is not the one being written on any more */
 	if (had_keys) {
 		focus_next(server);
@@ -11585,14 +11646,14 @@ static void drawer_lift_sheet(struct desk_server *server, int i)
 		return;
 	}
 	s->in_drawer = false;
-	s->slot = sheet_alloc_slot(server);
+	s->slot = sheet_alloc_slot(server, first_output(server), s);
 	int ow, oh, pad;
 	desk_fold_extent(s->fold, 1.0, &ow, &oh, &pad);
 	if (there) {
 		s->x1 = sx - server->layer_parked->node.x - ow * 0.5;
 		s->y1 = sy - server->layer_parked->node.y - oh * 0.5;
 	} else {
-		sheet_slot_xy(server, s->slot, ow, oh, &s->x1, &s->y1);
+		sheet_slot_xy(server, first_output(server), s->slot, ow, oh, &s->x1, &s->y1);
 	}
 	sheet_present(server, s, 1.0, s->x1, s->y1);
 }
@@ -11614,8 +11675,9 @@ static void drawer_put_in(struct desk_server *server, struct desk_sheet *sheet)
 	if (server->drw_n >= DRAWER_MAX || drawer_index_of(server, sheet) >= 0 || !sheet->fold) {
 		int ow, oh, pad;
 		desk_fold_extent(sheet->fold, 1.0, &ow, &oh, &pad);
-		sheet->slot = sheet_alloc_slot(server);
-		sheet_slot_xy(server, sheet->slot, ow, oh, &sheet->x1, &sheet->y1);
+		sheet->slot = sheet_alloc_slot(server, first_output(server), sheet);
+		sheet_slot_xy(server, first_output(server), sheet->slot, ow, oh,
+			&sheet->x1, &sheet->y1);
 		sheet_present(server, sheet, 1.0, sheet->x1, sheet->y1);
 		return;
 	}
@@ -11741,7 +11803,7 @@ static void drawer_carry_move(struct desk_server *server)
 	/* a packet carried to the shut drawer's pull: it comes out for it
 	 * (not for one only being moved about the desk with the right button) */
 	if (c->kind == DRAWER_SHEET && !server->drw_sprung && server->drw_button != BTN_RIGHT
-		&& cy >= h - desk_drawer_pull_h(w, h) - 6
+		&& !pointer_on_side(server) && cy >= h - desk_drawer_pull_h(w, h) - 6
 		&& !(server->drawer_moving ? server->drawer_to > 0.5 : server->drawer_t > 0.5)) {
 		server->drw_sprung = true;
 		drawer_move_to(server, 1.0);
@@ -11812,7 +11874,8 @@ static void drawer_drop(struct desk_server *server)
 		keep = true;
 		server_schedule_frames(server);
 	} else if (s) {
-		/* laid down on the desk where it was let go, inside its edges */
+		/* laid down where it was let go -- on the desk, or on the screen
+		 * beside it the hand is over -- inside that screen's edges */
 		if (c.packet) {
 			cairo_surface_destroy(c.packet);
 		}
@@ -11821,14 +11884,17 @@ static void drawer_drop(struct desk_server *server)
 		}
 		int ow, oh, pad;
 		desk_fold_extent(s->fold, 1.0, &ow, &oh, &pad);
-		struct wlr_box wa = work_area(server);
+		struct wlr_output *out = screen_at(server, cx, cy);
+		struct wlr_output *was = s->in_drawer ? NULL : sheet_screen(server, s);
+		struct wlr_box wa = screen_area(server, out);
 		double lx = cx - server->drw_gx * ow - server->layer_parked->node.x;
 		double ly = cy - server->drw_gy * oh - server->layer_parked->node.y;
 		lx = clampf_d(lx, wa.x, fmax(wa.x, wa.x + wa.width - ow));
 		ly = clampf_d(ly, wa.y, fmax(wa.y, wa.y + wa.height - oh));
 		s->in_drawer = false;
-		if (s->slot < 0) {
-			s->slot = sheet_alloc_slot(server);
+		/* a place along the front of the screen it is on now */
+		if (s->slot < 0 || was != out) {
+			s->slot = sheet_alloc_slot(server, out, s);
 		}
 		if (s->tree) {
 			wlr_scene_node_reparent(&s->tree->node, server->layer_parked);
@@ -11934,7 +12000,9 @@ static bool drawer_press(struct desk_server *server, uint32_t button)
 	if (server->drw_carrying || server->drw_press >= 0 || server->drw_press_sheet) {
 		return true;   /* already holding something */
 	}
-	if (post_up(server) || console_up(server) || shelf_up(server)) {
+	/* (a screen beside the desk's is in reach whatever the desk's is
+	 * turned to) */
+	if (!pointer_on_side(server) && (post_up(server) || console_up(server) || shelf_up(server))) {
 		return false;
 	}
 	bool right = button == BTN_RIGHT;
@@ -12643,8 +12711,39 @@ static void windows_onto_screens(struct desk_server *server)
 		} else {
 			wlr_scene_node_set_position(node, x, y);
 		}
+		/* folded, it opens out to where the window is now */
+		if (view->sheet.phase != SHEET_IDLE) {
+			view->sheet.x0 = node->x;
+			view->sheet.y0 = node->y;
+		}
 		view_sync_shadow(view);
 		view_send_position(view);
+	}
+	/* A sheet folded on a screen that has gone: along the front of the
+	 * nearest one that is there. */
+	wl_list_for_each(view, &server->toplevels, link) {
+		struct desk_sheet *s = &view->sheet;
+		if ((s->phase != SHEET_PARKED && s->phase != SHEET_FOLDING) || s->in_drawer
+			|| s->to_drawer || !s->fold
+			|| (s->tree && s->tree->node.parent == server->layer_drag)) {
+			continue;
+		}
+		int ow, oh, pad;
+		desk_fold_extent(s->fold, 1.0, &ow, &oh, &pad);
+		double mx = s->x1 + ow * 0.5 + server->desk_dx;
+		double my = s->y1 + oh * 0.5 + server->desk_dy + server->win_dy;
+		if (wlr_output_layout_output_at(server->output_layout, mx, my)) {
+			continue;
+		}
+		struct wlr_output *out = screen_at(server, mx, my);
+		if (!out) {
+			continue;
+		}
+		s->slot = sheet_alloc_slot(server, out, s);
+		sheet_slot_xy(server, out, s->slot, ow, oh, &s->x1, &s->y1);
+		if (s->phase == SHEET_PARKED) {
+			sheet_present(server, s, 1.0, s->x1, s->y1);
+		}
 	}
 }
 
@@ -12784,10 +12883,23 @@ static void view_set_fullscreen(struct desk_toplevel *view, bool on)
 	} else {
 		view->fullscreen = false;
 		wlr_scene_node_reparent(&view->scene_tree->node, server->layer_win);
+		int w = view->fs_inner_w, h = view->fs_inner_h;
+		if (view->maximized) {
+			/* opened out: to all of its screen's desk again, whatever size
+			 * it had got to on the way (an X window opened out and given
+			 * the whole screen as it is mapped had not got there yet) */
+			int l, t, r, b;
+			view_insets(view, &l, &t, &r, &b);
+			struct wlr_box ma = max_area(server, out);
+			view->fs_x = ma.x;
+			view->fs_y = ma.y;
+			w = ma.width - l - r;
+			h = ma.height - t - b;
+		}
 		wlr_scene_node_set_position(&view->scene_tree->node, view->fs_x, view->fs_y);
 		view_repaint_chrome(view);
 		view_sync_shadow(view);
-		view_set_size(view, view->fs_inner_w, view->fs_inner_h);
+		view_set_size(view, w, h);
 	}
 	wlr_scene_node_raise_to_top(&view->scene_tree->node);
 	fullscreen_layer_order(server);
@@ -14582,17 +14694,23 @@ static void views_prewarm(struct desk_server *server)
 	case 3:
 		film_ensure(server, DESK_VIEW_CONSOLE, server->layer_console);
 		break;
-	case 4:
-		if (!server->cc_base || server->cc_base_w != w || server->cc_base_h != h) {
+	case 4: {
+		/* noted with its room, as paint_console_body notes it, or the
+		 * first look at the set draws it all over again */
+		unsigned room = desk_console_room(w, h);
+		if (!server->cc_base || server->cc_base_w != w || server->cc_base_h != h
+			|| server->cc_base_room != room) {
 			struct desk_buf *bb = buf_create(w, h);
 			desk_draw_console_base(bb->cr, w, h);
 			scene_put(&server->cc_base, server->layer_console, bb, 0, 0, NULL);
 			wlr_scene_node_set_enabled(&server->cc_base->node, false);
 			server->cc_base_w = w;
 			server->cc_base_h = h;
+			server->cc_base_room = room;
 			view_bases_under(server);
 		}
 		break;
+	}
 	case 5:
 		film_ensure(server, DESK_VIEW_POST, server->layer_post);
 		break;
@@ -14945,9 +15063,11 @@ static bool clock_axis(struct desk_server *server, const struct wlr_pointer_axis
 static void clock_tick(struct desk_server *server)
 {
 	struct desk_supply *s = &server->clk.supply;
-	if (real_sec() - server->clk.supply_at >= 0.95) {
-		server->clk.supply_at = real_sec();
-		desk_supply_read(s);
+	/* a look a second, taken on a thread of its own: each new one is a
+	 * second of the hour's draw */
+	unsigned looks = desk_supply_latest(s);
+	if (looks != server->clk.supply_seen) {
+		server->clk.supply_seen = looks;
 		if (s->draw_w >= 0.0) {
 			server->clk.hist[server->clk.hist_at] = (float)s->draw_w;
 			server->clk.hist_at = (server->clk.hist_at + 1) % 3600;
@@ -14968,6 +15088,12 @@ static void clock_tick(struct desk_server *server)
 		server->clk.mode = DESK_CLOCK_TIME;
 	}
 	desk_occasion_tick();
+	/* programs installed or taken away while the desk is up: read in
+	 * again, but not under the hand of somebody at the bookcase */
+	char why[600];
+	if (!shelf_up(server) && desk_apps_look(why, sizeof why)) {
+		wlr_log(WLR_INFO, "programs: %s; reading them again", why);
+	}
 	show_midnight_check(server);
 	clock_publish(server);
 }
@@ -16192,6 +16318,20 @@ static void boot_tick(struct desk_server *server)
 	}
 }
 
+/* One of the round's chores, timed: the screen stands still while it is
+ * done, so a round that is long says in the log which chore it was. */
+static void tick_chore(struct desk_server *server, const char *what,
+	void (*chore)(struct desk_server *))
+{
+	double t0 = monotonic_sec();
+	chore(server);
+	double ms = (monotonic_sec() - t0) * 1000.0;
+	if (ms > server->tick_worst_ms) {
+		server->tick_worst_ms = ms;
+		server->tick_worst = what;
+	}
+}
+
 static int tick_cb(void *data)
 {
 	struct desk_server *server = data;
@@ -16217,11 +16357,14 @@ static int tick_cb(void *data)
 			server_schedule_frames(server);
 		}
 	}
-	desktop_tick(server);
-	views_prewarm(server);
-	clock_tick(server);
-	base_timeouts(server);
-	shell_conf_poll(server);
+	double round_at = monotonic_sec();
+	server->tick_worst = NULL;
+	server->tick_worst_ms = 0.0;
+	tick_chore(server, "the gadgets' faces", desktop_tick);
+	tick_chore(server, "the views made ahead", views_prewarm);
+	tick_chore(server, "the clock", clock_tick);
+	tick_chore(server, "the blank sheets", base_timeouts);
+	tick_chore(server, "the settings", shell_conf_poll);
 	/* The clock and the calendar live on the bookcase shelf now, and the
 	 * shelf is only repainted when something about it changes -- and while
 	 * you are looking at it, ten times a second. The seconds hand is
@@ -16230,10 +16373,26 @@ static int tick_cb(void *data)
 	 * clock that differs from the last picture of a clock. */
 	bool shelf = shelf_up(server);
 	if (shelf) {
+		double t0 = monotonic_sec();
 		paint_shelf(server);
 		server_schedule_frames(server);
 		/* the book's stills for the next turn, while it lies still */
 		book_ahead(server);
+		double ms = (monotonic_sec() - t0) * 1000.0;
+		if (ms > server->tick_worst_ms) {
+			server->tick_worst_ms = ms;
+			server->tick_worst = "the bookcase's shelf";
+		}
+	}
+	/* A round of a tenth of a second is a hitch anybody can see; it is
+	 * put in the log (once a minute at most), and a desk-report shows it. */
+	double round_ms = (monotonic_sec() - round_at) * 1000.0;
+	if (round_ms >= 100.0 && real_sec() - server->tick_said_at >= 60.0) {
+		server->tick_said_at = real_sec();
+		wlr_log(WLR_INFO, "the once-a-second round took %.0f ms, the screen standing still "
+			"meanwhile; the longest of it was %s (%.0f ms)", round_ms,
+			server->tick_worst ? server->tick_worst : "nothing in particular",
+			server->tick_worst_ms);
 	}
 	if (server->tick) {
 		int ms = 1000;
@@ -17335,6 +17494,11 @@ static bool idle_held(struct desk_server *server)
 	if (locked(server)) {
 		return false;
 	}
+#ifdef DESK_HAVE_POST
+	if (desk_saver_holds(NULL, 0) > 0) {
+		return true;   /* asked on the bus, with no window to go by */
+	}
+#endif
 	struct desk_idle_hold *hold;
 	wl_list_for_each(hold, &server->idle_holds, link) {
 		struct wlr_surface *s = wlr_surface_get_root_surface(hold->inhibitor->surface);
@@ -17359,8 +17523,8 @@ static void idle_hold_update(struct desk_server *server)
 	if (server->idle_notifier) {
 		wlr_idle_notifier_v1_set_inhibited(server->idle_notifier, held);
 	}
-	wlr_log(WLR_INFO, "screen: %s", held ? "kept lit for a program (idle inhibitor)"
-		: "no program keeping it lit any more");
+	wlr_log(WLR_INFO, "screen: %s", held ? "kept lit for a program (idle inhibitor, or on "
+		"the bus)" : "no program keeping it lit any more");
 	if (!held) {
 		/* let go of: counted from now, as if somebody had just looked up */
 		server->idle_at = real_sec();
@@ -17610,6 +17774,30 @@ static bool input_seen(struct desk_server *server, const char *what)
 	return now - server->wake_at >= WAKE_BLIND_S;
 }
 
+#ifdef DESK_HAVE_POST
+/* A program on the bus has asked for the screen to stay lit, or let go
+ * (saver.c): an X one, or one in a Flatpak through the portal. */
+static void saver_changed(void *data)
+{
+	struct desk_server *server = data;
+	char who[64];
+	int n = desk_saver_holds(who, sizeof who);
+	if (n) {
+		wlr_log(WLR_INFO, "screen: %d hold%s on the bus, the latest for %s", n,
+			n == 1 ? "" : "s", who);
+	} else {
+		wlr_log(WLR_INFO, "screen: no holds on the bus");
+	}
+	idle_hold_update(server);
+}
+
+/* and one saying somebody is there (SimulateUserActivity) */
+static void saver_awake(void *data)
+{
+	input_seen(data, "a program on the bus");
+}
+#endif
+
 /* The touch screen: nothing on the desk takes a finger yet, but one on the
  * glass is somebody there. */
 static void server_touch_down(struct wl_listener *listener, void *data)
@@ -17753,12 +17941,140 @@ static void om_log(const struct wlr_output_configuration_v1 *config, const char 
 	}
 }
 
+/* Is mode one of out's own (a mode kept from before may not be, the
+ * screen having been plugged in again)? */
+static bool om_mode_of(struct wlr_output *out, const struct wlr_output_mode *mode)
+{
+	struct wlr_output_mode *m;
+	wl_list_for_each(m, &out->modes, link) {
+		if (m == mode) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/* Where a head asked to be on would lie, and how big, turned as asked. */
+static struct wlr_box om_head_box(const struct wlr_output_head_v1_state *s)
+{
+	int w = s->mode ? s->mode->width : s->custom_mode.width;
+	int h = s->mode ? s->mode->height : s->custom_mode.height;
+	if (s->transform % 2 == 1) {
+		int k = w;
+		w = h;
+		h = k;
+	}
+	return (struct wlr_box){ s->x, s->y, w, h };
+}
+
+/* A screen a display tool turns on that was off: the tool was told of no
+ * mode and no place for it while it was off (an off head has none), so it
+ * may ask for no mode, or for one of its own choosing at 0,0, on top of the
+ * desk's own screen -- wdisplays did, at 640x480. Asked with no mode, it
+ * goes on in the one it was turned off in, or else its best; asked on top
+ * of a screen that is on, it is put beside them, to the right (the desk
+ * stays where it is). */
+static void om_turned_on(struct desk_server *server, struct wlr_output_configuration_v1 *config,
+	const char *who)
+{
+	struct wlr_output_configuration_head_v1 *head;
+	wl_list_for_each(head, &config->heads, link) {
+		struct wlr_output_head_v1_state *s = &head->state;
+		struct wlr_output *out = s->output;
+		struct desk_output *o = desk_output_of(server, out);
+		/* (one only gone dark keeps its mode and place: om_publish) */
+		if (!s->enabled || out->enabled || output_is_window(out) || (o && o->dark && !o->off)) {
+			continue;
+		}
+		if (!s->mode && s->custom_mode.width <= 0) {
+			if (o && o->off_mode && om_mode_of(out, o->off_mode)) {
+				s->mode = o->off_mode;
+			} else if (o && o->off_w > 0 && o->off_h > 0) {
+				s->custom_mode.width = o->off_w;
+				s->custom_mode.height = o->off_h;
+				s->custom_mode.refresh = o->off_refresh;
+			} else {
+				s->mode = wlr_output_preferred_mode(out);
+			}
+			wlr_log(WLR_INFO, "%s: %s asked on with no mode: in %dx%d", who, out->name,
+				s->mode ? s->mode->width : s->custom_mode.width,
+				s->mode ? s->mode->height : s->custom_mode.height);
+		}
+		struct wlr_box box = om_head_box(s);
+		bool over = false;
+		int right = 0;
+		struct wlr_output_configuration_head_v1 *other;
+		wl_list_for_each(other, &config->heads, link) {
+			if (other == head || !other->state.enabled) {
+				continue;
+			}
+			struct wlr_box ob = om_head_box(&other->state), cut;
+			over = over || wlr_box_intersection(&cut, &box, &ob);
+			right = ob.x + ob.width > right ? ob.x + ob.width : right;
+		}
+		if (over) {
+			wlr_log(WLR_INFO, "%s: %s asked on at %d,%d, over another screen: put "
+				"beside them at %d,0", who, out->name, s->x, s->y, right);
+			s->x = right;
+			s->y = 0;
+		}
+	}
+}
+
+/* Before a set of screens is tried, each that is to be on is given a
+ * picture of the size it is to be: a real screen (DRM) will not be tried
+ * lit with nothing to show, and one turned on again had nothing -- which is
+ * why a display tool could turn a screen off and never on again. One with
+ * a piece of the scene is drawn as it stands; one without (off till now)
+ * is black till its first frame. The pictures come from the swapchains
+ * wlr_output_swapchain_manager makes for the set (om_try). */
+static bool om_picture(struct desk_server *server, struct wlr_output_swapchain_manager *swm,
+	struct wlr_backend_output_state *st)
+{
+	if (!st->base.enabled) {
+		return true;
+	}
+	struct wlr_swapchain *sc = wlr_output_swapchain_manager_get_swapchain(swm, st->output);
+	if (!sc) {
+		return false;
+	}
+	struct wlr_scene_output *so = wlr_scene_get_scene_output(server->scene, st->output);
+	if (so) {
+		struct wlr_scene_output_state_options opts = { .swapchain = sc };
+		if (!wlr_scene_output_build_state(so, &st->base, &opts)) {
+			return false;
+		}
+		if (st->base.committed & WLR_OUTPUT_STATE_BUFFER) {
+			return true;
+		}
+	}
+	struct wlr_buffer *buf = wlr_swapchain_acquire(sc, NULL);
+	if (!buf) {
+		return false;
+	}
+	struct wlr_render_pass *pass = wlr_renderer_begin_buffer_pass(server->renderer, buf, NULL);
+	bool ok = pass != NULL;
+	if (pass) {
+		wlr_render_pass_add_rect(pass, &(struct wlr_render_rect_options){
+			.box = { 0, 0, buf->width, buf->height },
+			.color = { 0.0f, 0.0f, 0.0f, 1.0f },
+		});
+		ok = wlr_render_pass_submit(pass);
+	}
+	if (ok) {
+		wlr_output_state_set_buffer(&st->base, buf);
+	}
+	wlr_buffer_unlock(buf);
+	return ok;
+}
+
 /* Tried, and done if it is to be (apply): what a display tool asks, or
  * what displays.conf has kept (who says which, for the log). */
 static bool om_try(struct desk_server *server, struct wlr_output_configuration_v1 *config,
 	bool apply, const char *who)
 {
 	const char *what = apply ? "apply" : "test";
+	om_turned_on(server, config, who);
 	struct wlr_output_configuration_head_v1 *desk = om_desk_head(config);
 	if (!desk) {
 		wlr_log(WLR_INFO, "%s: %s refused: it would leave no screen on", who, what);
@@ -17790,12 +18106,45 @@ static bool om_try(struct desk_server *server, struct wlr_output_configuration_v
 		/* a screen set up anew is somebody at it */
 		screen_wake(server);
 	}
-	bool ok = wlr_backend_test(server->backend, states, n);
+	/* the mode each screen to be turned off is in, for when it is on again */
+	for (size_t i = 0; i < n; i++) {
+		struct wlr_output *out = states[i].output;
+		struct desk_output *o = desk_output_of(server, out);
+		if (o && !states[i].base.enabled && out->enabled) {
+			o->off_mode = out->current_mode;
+			o->off_w = out->width;
+			o->off_h = out->height;
+			o->off_refresh = out->refresh;
+		}
+	}
+	struct wlr_output_swapchain_manager swm;
+	wlr_output_swapchain_manager_init(&swm, server->backend);
+	const char *why = NULL;
+	bool ok = wlr_output_swapchain_manager_prepare(&swm, states, n);
+	if (!ok) {
+		why = "no pictures could be made for those screens together";
+	}
+	for (size_t i = 0; ok && i < n; i++) {
+		ok = om_picture(server, &swm, &states[i]);
+		why = ok ? NULL : "a screen's first picture could not be drawn";
+	}
+	if (ok && !wlr_backend_test(server->backend, states, n)) {
+		ok = false;
+		why = "the screens would not take it";
+	}
 	if (ok && apply) {
 		ok = wlr_backend_commit(server->backend, states, n);
+		why = ok ? NULL : "the screens would not take it";
+		if (ok) {
+			wlr_output_swapchain_manager_apply(&swm);
+		}
 	}
+	wlr_output_swapchain_manager_finish(&swm);
 	for (size_t i = 0; i < n; i++) {
 		wlr_output_state_finish(&states[i].base);
+	}
+	if (why) {
+		wlr_log(WLR_INFO, "%s: %s refused: %s", who, what, why);
 	}
 	free(states);
 	om_log(config, who, what, ok);
@@ -19412,9 +19761,14 @@ static void keyboard_handle_key(struct wl_listener *listener, void *data)
 			} else {
 				struct desk_meters m;
 				desk_meters_read_volume(&m);
+				bool up = sym0 == XKB_KEY_XF86AudioRaiseVolume;
 				if (m.have_volume) {
-					clock_set_volume(server, m.volume
-						+ (sym0 == XKB_KEY_XF86AudioRaiseVolume ? 0.05 : -0.05));
+					/* turning it up is wanting to hear it, as on other
+					 * desktops; turning it down leaves it muted */
+					if (up && m.muted) {
+						desk_meters_set_muted(0);
+					}
+					clock_set_volume(server, m.volume + (up ? 0.05 : -0.05));
 				}
 			}
 		}
@@ -19672,9 +20026,15 @@ static void pointer_configure(struct desk_server *server, struct wlr_input_devic
 		libinput_device_config_tap_set_enabled(d,
 			c->tap_click ? LIBINPUT_CONFIG_TAP_ENABLED : LIBINPUT_CONFIG_TAP_DISABLED);
 	}
+	/* the touchpad and the wheel each their own way: a laptop's pad
+	 * natural and its mouse not is common */
+	bool natural = pad ? c->natural_scroll : c->natural_wheel;
 	if (libinput_device_config_scroll_has_natural_scroll(d)) {
-		libinput_device_config_scroll_set_natural_scroll_enabled(d, pad && c->natural_scroll);
+		libinput_device_config_scroll_set_natural_scroll_enabled(d, natural);
 	}
+	/* what libinput took, for the log (a wheel it cannot turn round says no) */
+	natural = libinput_device_config_scroll_has_natural_scroll(d)
+		&& libinput_device_config_scroll_get_natural_scroll_enabled(d);
 	if (libinput_device_config_accel_is_available(d)) {
 		libinput_device_config_accel_set_speed(d, c->pointer_speed);
 	}
@@ -19683,7 +20043,7 @@ static void pointer_configure(struct desk_server *server, struct wlr_input_devic
 	}
 	wlr_log(WLR_INFO, "pointer: %s (%s): %s%sspeed %.2f%s", device->name ? device->name : "?",
 		pad ? "touchpad" : "mouse", pad ? (c->tap_click ? "tap to click, " : "no tapping, ") : "",
-		pad && c->natural_scroll ? "natural scrolling, " : "", c->pointer_speed,
+		natural ? "natural scrolling, " : "", c->pointer_speed,
 		c->left_handed ? ", left-handed" : "");
 #else
 	(void)server;
@@ -19977,6 +20337,74 @@ static void seat_start_drag(struct wl_listener *listener, void *data)
 		(int)server->cursor->x, (int)server->cursor->y);
 }
 
+/* A button held down in a program keeps the pointer with it until it is
+ * let go, as on any desktop: a slider, a selection, a file pulled out of a
+ * window are still the program's with the hand outside it, and it is told
+ * where the hand is from its own window. An X program needs it most: an X
+ * drag puts a window of its own under the pointer at once -- the picture
+ * of what is dragged -- and Xwayland lets go of every button the moment
+ * the pointer goes into another of its windows, so a file dragged from one
+ * X program to another (inside Wine too) was dropped short, on its own
+ * picture. A Wayland drag is the seat's own, and goes on finding what is
+ * under the pointer. */
+static void held_gone(struct wl_listener *listener, void *data)
+{
+	struct desk_server *server = wl_container_of(listener, server, held_gone);
+	(void)data;
+	wl_list_remove(&listener->link);
+	wl_list_init(&listener->link);
+	server->held = NULL;
+}
+
+/* The button just handed to the program under the pointer: hold on to the
+ * surface it went down on. */
+static void pointer_hold(struct desk_server *server)
+{
+	if (server->held) {
+		held_gone(&server->held_gone, NULL);
+	}
+	struct wlr_surface *focus = server->seat->pointer_state.focused_surface;
+	double sx, sy;
+	struct wlr_scene_node *node = wlr_scene_node_at(&server->scene->tree.node,
+		server->cursor->x, server->cursor->y, &sx, &sy);
+	if (!focus || !node || node->type != WLR_SCENE_NODE_BUFFER) {
+		return;
+	}
+	struct wlr_scene_buffer *buffer = wlr_scene_buffer_from_node(node);
+	struct wlr_scene_surface *scene_surface = wlr_scene_surface_try_from_buffer(buffer);
+	if (!scene_surface || scene_surface->surface != focus) {
+		return;
+	}
+	server->held = buffer;
+	wl_signal_add(&buffer->node.events.destroy, &server->held_gone);
+}
+
+/* The pointer moved with a button held in a program: told to it alone,
+ * from where its surface now lies, wherever the hand is. False if no
+ * button is held there (or what is held is a Wayland drag). */
+static bool pointer_held(struct desk_server *server, uint32_t time)
+{
+	struct wlr_seat *seat = server->seat;
+	if (!server->held || !server->buttons_down || seat->drag
+		|| !seat->pointer_state.button_count) {
+		return false;
+	}
+	struct wlr_scene_surface *scene_surface = wlr_scene_surface_try_from_buffer(server->held);
+	int lx, ly;
+	if (!scene_surface || scene_surface->surface != seat->pointer_state.focused_surface
+		|| !wlr_scene_node_coords(&server->held->node, &lx, &ly)) {
+		return false;
+	}
+	double sx = server->cursor->x - lx, sy = server->cursor->y - ly;
+	if (server->held->point_accepts_input) {
+		/* the surface's own coordinates, as wlroots works them out under
+		 * the pointer (a sheet partly clipped); outside it, as it is */
+		(void)server->held->point_accepts_input(server->held, &sx, &sy);
+	}
+	wlr_seat_pointer_notify_motion(seat, time, sx, sy);
+	return true;
+}
+
 static void process_cursor_move(struct desk_server *server)
 {
 	struct desk_toplevel *toplevel = server->grabbed;
@@ -20258,6 +20686,9 @@ static void pointer_over_paper(struct desk_server *server, uint32_t time)
 {
 	double sx, sy;
 	struct wlr_surface *surface = NULL;
+	if (pointer_held(server, time)) {
+		return;
+	}
 	struct desk_toplevel *under =
 		view_at(server, server->cursor->x, server->cursor->y, &surface, &sx, &sy);
 	curl_track(server, under, server->cursor->x, server->cursor->y);
@@ -20353,6 +20784,11 @@ static void server_cursor_button(struct wl_listener *listener, void *data)
 {
 	struct desk_server *server = wl_container_of(listener, server, cursor_button);
 	struct wlr_pointer_button_event *event = data;
+	if (event->state == WL_POINTER_BUTTON_STATE_PRESSED) {
+		server->buttons_down++;
+	} else if (server->buttons_down) {
+		server->buttons_down--;
+	}
 	/* a click on the dark screen -- or on it lit again, before it can have
 	 * been seen -- wakes it and lands on nothing, nor does its letting go */
 	if (!input_seen(server, "a click")) {
@@ -20409,6 +20845,11 @@ static void server_cursor_button(struct wl_listener *listener, void *data)
 		}
 		reset_cursor_mode(server);
 		wlr_seat_pointer_notify_button(server->seat, event->time_msec, event->button, event->state);
+		if (server->held && !server->seat->pointer_state.button_count) {
+			/* let go: the pointer is back with whatever it is over */
+			held_gone(&server->held_gone, NULL);
+			process_cursor_motion(server, event->time_msec);
+		}
 		return;
 	}
 
@@ -20423,6 +20864,11 @@ static void server_cursor_button(struct wl_listener *listener, void *data)
 			return;
 		}
 		if (!paper_moved(server)) {
+			/* a packet folded on this screen: taken hold of, as on the desk */
+			if ((event->button == BTN_LEFT || event->button == BTN_RIGHT)
+				&& drawer_press(server, event->button)) {
+				return;
+			}
 			paper_press(server, event);
 		}
 		return;
@@ -20754,6 +21200,9 @@ static void paper_press(struct desk_server *server, struct wlr_pointer_button_ev
 		focus_toplevel(toplevel);
 	}
 	wlr_seat_pointer_notify_button(server->seat, event->time_msec, event->button, event->state);
+	if (server->seat->pointer_state.button_count == 1) {
+		pointer_hold(server);
+	}
 }
 
 static void server_cursor_axis(struct wl_listener *listener, void *data)
@@ -21022,7 +21471,30 @@ static void desk_follow(struct desk_server *server)
 			&& screen_is_side(server, view_screen(view))) {
 			struct wlr_scene_node *node = &view->scene_tree->node;
 			wlr_scene_node_set_position(node, node->x - ddx, node->y - ddy);
+			/* folded, it opens out to where the window is now */
+			if (view->sheet.phase != SHEET_IDLE) {
+				view->sheet.x0 -= ddx;
+				view->sheet.y0 -= ddy;
+			}
 			view_sync_shadow(view);
+		}
+	}
+	/* and so do the sheets folded on one, lying there or on their way to
+	 * it (not one in the hand, which is where the hand is) */
+	wl_list_for_each(view, &server->toplevels, link) {
+		struct desk_sheet *s = &view->sheet;
+		if (s->phase == SHEET_IDLE || s->in_drawer || s->to_drawer
+			|| (s->tree && s->tree->node.parent == server->layer_drag)
+			|| !screen_is_side(server, sheet_screen(server, s))) {
+			continue;
+		}
+		s->x1 -= ddx;
+		s->y1 -= ddy;
+		s->hit_x -= ddx;
+		s->hit_y -= ddy;
+		if (s->tree) {
+			wlr_scene_node_set_position(&s->tree->node, s->tree->node.x - ddx,
+				s->tree->node.y - ddy);
 		}
 	}
 	bool moved = dx != server->desk_dx || dy != server->desk_dy;
@@ -21451,6 +21923,13 @@ static void server_new_output(struct wl_listener *listener, void *data)
 	 * mode it is to be lit in (output_set_dark). */
 	bool wait_dark = (server->dark || server->dark_away) && !output_is_window(wlr_output);
 	wlr_output_init_render(wlr_output, server->allocator, server->renderer);
+	if (wlr_output_is_wl(wlr_output)) {
+		/* A window on another Wayland desktop: the pointer drawn into the
+		 * window's own picture, since some desktops do not show the
+		 * pointer a window asks for over it (Gberfield, PR #29). */
+		wlr_output_lock_software_cursors(wlr_output, true);
+		wlr_log(WLR_INFO, "nested Wayland output: drawing cursor in the window");
+	}
 	/* --size picks the window's size under a nested backend too, not just
 	 * the headless one: an X11 window would otherwise come up at whatever
 	 * wlroots defaults to. */
@@ -21642,12 +22121,22 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data)
 	view_check_above(toplevel);
 	focus_toplevel(toplevel);
 	base_after_map(toplevel->server, toplevel);
-	wlr_log(WLR_INFO, "a window comes onto the desk: %s (%s) at %d,%d, %dx%d, %s",
+	/* asked to be opened out, or for the whole screen, before it was up --
+	 * a game made on the whole screen: too early to be done then
+	 * (xdg_toplevel_request_*), so now; opened out first, as for X */
+	if (toplevel->xdg_toplevel->requested.maximized) {
+		view_toggle_max_now(toplevel);
+	}
+	if (toplevel->xdg_toplevel->requested.fullscreen) {
+		view_set_fullscreen(toplevel, true);
+	}
+	wlr_log(WLR_INFO, "a window comes onto the desk: %s (%s) at %d,%d, %dx%d, %s%s",
 		view_title(toplevel), toplevel->xdg_toplevel->app_id ? toplevel->xdg_toplevel->app_id : "-",
 		toplevel->scene_tree->node.x, toplevel->scene_tree->node.y,
 		toplevel->outer_w, toplevel->outer_h,
 		toplevel->bare ? "its own frame" : toplevel->own_frame ? "its own frame, on paper"
-			: "on our paper");
+			: "on our paper",
+		toplevel->fullscreen ? ", on the whole screen" : toplevel->maximized ? ", opened out" : "");
 }
 
 static void xdg_toplevel_unmap(struct wl_listener *listener, void *data)
@@ -22054,7 +22543,9 @@ static void server_new_kde_deco(struct wl_listener *listener, void *data)
 enum {
 	XT_NORMAL, XT_DIALOG, XT_UTILITY, XT_TOOLBAR, XT_SPLASH,
 	XT_MENU, XT_DROPDOWN_MENU, XT_POPUP_MENU, XT_TOOLTIP, XT_NOTIFICATION,
-	XT_COMBO, XT_DND, XT_COUNT
+	XT_COMBO, XT_DND,
+	/* and what a window asks to be as it is mapped (xview_map_request) */
+	XS_STATE, XS_FULLSCREEN, XS_MAX_VERT, XS_MAX_HORZ, XT_COUNT
 };
 static const char *const xtype_names[XT_COUNT] = {
 	"_NET_WM_WINDOW_TYPE_NORMAL", "_NET_WM_WINDOW_TYPE_DIALOG",
@@ -22063,6 +22554,8 @@ static const char *const xtype_names[XT_COUNT] = {
 	"_NET_WM_WINDOW_TYPE_DROPDOWN_MENU", "_NET_WM_WINDOW_TYPE_POPUP_MENU",
 	"_NET_WM_WINDOW_TYPE_TOOLTIP", "_NET_WM_WINDOW_TYPE_NOTIFICATION",
 	"_NET_WM_WINDOW_TYPE_COMBO", "_NET_WM_WINDOW_TYPE_DND",
+	"_NET_WM_STATE", "_NET_WM_STATE_FULLSCREEN",
+	"_NET_WM_STATE_MAXIMIZED_VERT", "_NET_WM_STATE_MAXIMIZED_HORZ",
 };
 _Static_assert(XT_COUNT <= sizeof ((struct desk_server *)0)->xatom
 	/ sizeof ((struct desk_server *)0)->xatom[0], "xatom[] is too small");
@@ -22233,14 +22726,20 @@ static void xview_map(struct wl_listener *listener, void *data)
 	xview_place(view);
 	wl_list_insert(&server->toplevels, &view->link);
 	view_sync_shadow(view);
+	/* opened out first, so that leaving the whole screen leaves it so */
+	if (xs->maximized_horz || xs->maximized_vert) {
+		view_toggle_max_now(view);
+	}
 	if (xs->fullscreen) {
 		view_set_fullscreen(view, true);
-	} else if (xs->maximized_horz || xs->maximized_vert) {
-		view_toggle_max_now(view);
 	}
 	view_check_above(view);
 	focus_toplevel(view);
 	base_after_map(server, view);
+	wlr_log(WLR_INFO, "an X11 window comes onto the desk: %s (%s) at %d,%d, %dx%d%s",
+		view_title(view), xs->class ? xs->class : "-",
+		view->scene_tree->node.x, view->scene_tree->node.y, view->outer_w, view->outer_h,
+		view->fullscreen ? ", on the whole screen" : view->maximized ? ", opened out" : "");
 }
 
 /* Off the screen: the scene goes with it, and comes back new if it is
@@ -22295,6 +22794,44 @@ static void xview_commit(struct wl_listener *listener, void *data)
 	(void)data;
 	if (view->scene_tree && !view->unmanaged) {
 		view_repaint_chrome(view);
+	}
+}
+
+/* What a window asked to be before it was mapped: the whole screen, or
+ * opened out. wlroots 0.18 writes its own state over the window's as it
+ * maps it, and reads the window's only afterwards, so the wish is gone by
+ * then. It is read here, while it is still there, and handed to wlroots as
+ * ours; xview_map does the rest. Wine puts a game made on the whole screen
+ * there and asks no more (EWMH: honour _NET_WM_STATE when a withdrawn
+ * window asks to be mapped). */
+static void xview_map_request(struct wl_listener *listener, void *data)
+{
+	struct desk_toplevel *view = wl_container_of(listener, view, map_request);
+	(void)data;
+	struct desk_server *server = view->server;
+	struct wlr_xwayland_surface *xs = view->xsurface;
+	xcb_connection_t *xc = wlr_xwayland_get_xwm_connection(server->xwayland);
+	if (!xc || server->xatom[XS_STATE] == XCB_ATOM_NONE) {
+		return;
+	}
+	xcb_get_property_reply_t *r = xcb_get_property_reply(xc,
+		xcb_get_property(xc, 0, xs->window_id, server->xatom[XS_STATE], XCB_ATOM_ATOM, 0, 32),
+		NULL);
+	bool full = false, max = false;
+	if (r && r->type == XCB_ATOM_ATOM && r->format == 32) {
+		const xcb_atom_t *a = xcb_get_property_value(r);
+		int n = xcb_get_property_value_length(r) / 4;
+		for (int i = 0; i < n; i++) {
+			full = full || a[i] == server->xatom[XS_FULLSCREEN];
+			max = max || a[i] == server->xatom[XS_MAX_VERT] || a[i] == server->xatom[XS_MAX_HORZ];
+		}
+	}
+	free(r);
+	if (full && !xs->fullscreen) {
+		wlr_xwayland_surface_set_fullscreen(xs, true);
+	}
+	if (max && !xs->maximized_horz && !xs->maximized_vert) {
+		wlr_xwayland_surface_set_maximized(xs, true);
 	}
 }
 
@@ -22419,6 +22956,8 @@ static void xview_request_fullscreen(struct wl_listener *listener, void *data)
 	struct desk_toplevel *view = wl_container_of(listener, view, request_fullscreen);
 	(void)data;
 	if (xview_on_desk(view)) {
+		wlr_log(WLR_INFO, "%s asks %s the whole screen", view_title(view),
+			view->xsurface->fullscreen ? "for" : "to leave");
 		view_set_fullscreen(view, view->xsurface->fullscreen);
 	}
 }
@@ -22465,6 +23004,7 @@ static void xview_destroy(struct wl_listener *listener, void *data)
 	wl_list_remove(&view->destroy.link);
 	wl_list_remove(&view->associate.link);
 	wl_list_remove(&view->dissociate.link);
+	wl_list_remove(&view->map_request.link);
 	wl_list_remove(&view->request_configure.link);
 	wl_list_remove(&view->request_activate.link);
 	wl_list_remove(&view->request_move.link);
@@ -22496,6 +23036,7 @@ static void server_new_xwayland_surface(struct wl_listener *listener, void *data
 		{ &xs->events.destroy, &view->destroy, xview_destroy },
 		{ &xs->events.associate, &view->associate, xview_associate },
 		{ &xs->events.dissociate, &view->dissociate, xview_dissociate },
+		{ &xs->events.map_request, &view->map_request, xview_map_request },
 		{ &xs->events.request_configure, &view->request_configure, xview_request_configure },
 		{ &xs->events.request_activate, &view->request_activate, xview_request_activate },
 		{ &xs->events.request_move, &view->request_move, xview_request_move },
@@ -23294,6 +23835,8 @@ int main(int argc, char **argv)
 	wl_signal_add(&server.seat->events.start_drag, &server.start_drag);
 	server.drag_icon_gone.notify = drag_icon_gone;
 	wl_list_init(&server.drag_icon_gone.link);
+	server.held_gone.notify = held_gone;
+	wl_list_init(&server.held_gone.link);
 
 	/* Nested in somebody else's session, the usual name is a trap: a
 	 * desktop on X has no WAYLAND_DISPLAY of its own, so every program
@@ -23384,6 +23927,15 @@ int main(int argc, char **argv)
 	desk_ime_init(loop, slips_bus_changed, &server);
 	/* and what is playing, for its page */
 	desk_media_init(loop, media_changed, &server);
+	/* and programs asking for the screen to stay lit that don't ask the
+	 * Wayland way */
+	if (desk_saver_init(loop, saver_changed, saver_awake, &server)) {
+		wlr_log(WLR_INFO, "screen: org.freedesktop.ScreenSaver is the desk's: programs on the "
+			"bus can keep it lit");
+	} else {
+		wlr_log(WLR_INFO, "screen: org.freedesktop.ScreenSaver is somebody else's, or there is "
+			"no bus");
+	}
 #endif
 	wl_event_source_timer_update(server.tick, 1000);
 
@@ -23433,6 +23985,7 @@ int main(int argc, char **argv)
 	desk_tray_finish();
 	desk_ime_finish();
 	desk_media_finish();
+	desk_saver_finish();
 #endif
 	wl_display_destroy(server.wl_display);
 	if (lock_fd >= 0) {

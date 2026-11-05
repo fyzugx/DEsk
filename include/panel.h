@@ -38,7 +38,8 @@ struct desk_meters {
 };
 
 /* Cheap enough for a tick: a handful of small reads under /proc and /sys,
- * plus the volume no more than a few times a second. */
+ * plus the volume no more than a few times a second. The battery and the
+ * temperature are the last look's (desk_supply_latest). */
 void desk_meters_read(struct desk_meters *out);
 
 /* Returns false when the machine has no mixer to set. Both return at
@@ -66,7 +67,13 @@ struct desk_supply {
 	bool have_backlight;   /* a screen whose light the machine sets: a laptop's */
 	double backlight;      /* 0..1 */
 };
-void desk_supply_read(struct desk_supply *out);
+/* The last look at it, never a wait for one: the battery is the
+ * firmware's to answer for, and the firmware of some laptops takes half a
+ * second over it, so a look that is due (a second after the last) is taken
+ * on a thread of its own. Until the first is back there is no battery and
+ * the machine is on the mains. Returns how many looks are back, which goes
+ * up by one with each new reading. */
+unsigned desk_supply_latest(struct desk_supply *out);
 /* The backlight that reading is of: its name under class/backlight, its
  * full scale and where it is now. False when there is none. */
 bool desk_backlight_find(char *name, size_t n, double *max, double *now);
