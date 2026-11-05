@@ -136,6 +136,7 @@ static const char *const TAB_WORDS[2] = { "Shell", "System" };
 static const char *const NOTE_WORDS[][2] = {
 	{ "WINDOWS", "Windows" },
 	{ "DESK", "Desk" },
+	{ "DESK MAT", "Desk mat" },
 	{ "SCREEN", "Screen" },
 	{ "KEYBOARD AND POINTER", "Keyboard,\nmouse" },
 	{ "DAYS AND WEATHER", "Days,\nweather" },
@@ -266,11 +267,15 @@ static const struct prog P_BACKUP[] = { { "backintime-qt" }, { "deja-dup" }, { N
 static const struct prog P_TASKS[] = { { "xfce4-taskmanager" }, { "gnome-system-monitor" },
 	{ NULL } };
 static const struct prog P_ABOUT[] = { { "hardinfo2" }, { "cpu-x" }, { NULL } };
+static const struct prog P_MATPIC[] = { { "zenity" }, { NULL } };
 
 /* network-manager-gnome is only a transitional package now, which brings
  * nm-connection-editor and the panel applet */
 static const struct opens O_NETWORK = { P_NETWORK,
 	{ "nm-connection-editor", "network-manager-gnome" }, NULL };
+/* A picture for the mat, chosen in zenity's file dialog: a row on the Desk mat sheet, which
+ * starts this program as desk-settings --pick-photo (to use zenity, not to open it) */
+static const struct opens O_MATPIC = { P_MATPIC, { "zenity" }, NULL };
 static const struct opens O_BLUETOOTH = { P_BLUETOOTH, { "blueman" }, NULL };
 static const struct opens O_SOUND = { P_SOUND, { "pavucontrol" }, NULL };
 /* screens are arranged through the compositor, which has to offer it */
@@ -334,14 +339,17 @@ static const struct setting SETTINGS[] = {
 		LANG_WORDS, LANG_VALS, 0, NULL },
 	{ S_CHOICE, "clock", "Clock", "The clock on the desk, and the times on letters.",
 		CLOCK_WORDS, CLOCK_VALS, 0, NULL },
-	{ S_CHOICE, "desk_mat", "Desk mat",
-		"A mat on the desk under the windows. Photo lays the picture named by desk_mat_photo "
-		"in shell.conf.", MAT_WORDS, MAT_VALS, 0, NULL },
-	{ S_CHOICE, "desk_mat_size", "Size of the desk mat", "How much of the desk it covers.",
-		MATSZ_WORDS, MATSZ_VALS, 1, NULL },
 	{ S_CHECK, "lights_at_login", "Bring the lamp up slowly at login",
 		"The room starts dark and the lamp comes up as it is made; the clock counts how far. "
 		"Off, it is lit at once.", NULL, NULL, 1, NULL },
+	{ S_SECTION, NULL, "DESK MAT", NULL, NULL, NULL, 0, NULL },
+	{ S_CHOICE, "desk_mat", "Desk mat",
+		"A mat on the desk under the windows. Photo lays the picture chosen below.", MAT_WORDS, MAT_VALS, 0, NULL },
+	{ S_CHOICE, "desk_mat_size", "Size of the desk mat", "How much of the desk it covers.",
+		MATSZ_WORDS, MATSZ_VALS, 1, NULL },
+	{ S_ACTION, NULL, "Picture for the mat",
+		"Choose, from your files, the picture a Photo mat lays on the desk.", NULL, NULL, 0,
+		&O_MATPIC },
 	{ S_SECTION, NULL, "SCREEN", NULL, NULL, NULL, 0, NULL },
 	{ S_CHOICE, "screen_off", "Turn the screen off when the desk is left",
 		"After this long without a key or the pointer, the screen goes dark; either brings "
@@ -909,7 +917,8 @@ static void action_words(struct app *a, int i)
 	} else {
 		snprintf(a->aside[i], sizeof a->aside[i], "%s", TR("not installed"));
 	}
-	a->opt[i][0] = TR(a->opening == i ? "Opening\xe2\x80\xa6" : "Open \xe2\x80\xba");
+	a->opt[i][0] = TR(a->opening == i ? "Opening\xe2\x80\xa6"
+		: SETTINGS[i].opens == &O_MATPIC ? "Choose \xe2\x80\xba" : "Open \xe2\x80\xba");
 	a->opt[i][1] = a->aside[i];
 	a->opt[i][2] = NULL;
 	a->rows[i].options = a->opt[i];
@@ -1296,7 +1305,7 @@ static void icons_apply(struct app *a)
  * wait for, in a session of its own, in the home directory, with nothing of
  * this program's -- not the display's socket, not the sound's -- but the
  * environment, which is the session's: DEsk's, as it started this. */
-static bool launch(const char *path)
+static bool launch(const char *path, const char *arg)
 {
 	const char *name = strrchr(path, '/') ? strrchr(path, '/') + 1 : path;
 	const char *home = getenv("HOME");
@@ -1334,7 +1343,7 @@ static bool launch(const char *path)
 		if (home && *home && chdir(home) != 0) {
 			/* where it runs from matters little; it runs */
 		}
-		execl(path, name, (char *)NULL);
+		execl(path, name, arg, (char *)NULL);
 		_exit(127);
 	}
 	int st = 0;
@@ -2513,7 +2522,12 @@ static void open_row(struct app *a, int i)
 	char path[600];
 	if (k >= 0) {
 		const struct prog *p = &SETTINGS[i].opens->progs[k];
-		if (find_program(p->bin, path, sizeof path) && launch(path)) {
+		const char *self = SETTINGS[i].opens == &O_MATPIC ? "--pick-photo" : NULL;
+		char exe[600];
+		ssize_t en = self ? readlink("/proc/self/exe", exe, sizeof exe - 1) : 0;
+		exe[en > 0 ? en : 0] = '\0';
+		if (find_program(p->bin, path, sizeof path)
+			&& (self ? en > 0 && launch(exe, self) : launch(path, NULL))) {
 			fprintf(stderr, "desk-settings: opened %s\n", path);
 			/* one "Opening…" at a time: the last one used */
 			int was = a->opening;
@@ -2994,16 +3008,86 @@ static int check_rows(struct app *a)
 	return missing;
 }
 
+/* --pick-photo: the file dialog of zenity, for a picture to lay on the desk mat. What is
+ * chosen goes into shell.conf as the mat's photo, and the mat is put out on the desk.
+ * Nothing but a regular file with a plain absolute path is taken. Exits 0 when one was. */
+static int pick_photo(void)
+{
+	const char *home = getenv("HOME");
+	char start[600] = "", title[200], filter[400];
+	snprintf(title, sizeof title, "--title=%s", TR("Choose a picture for the desk mat"));
+	snprintf(filter, sizeof filter, "--file-filter=%s | *.png *.PNG *.jpg *.JPG *.jpeg *.JPEG "
+		"*.webp *.WEBP *.gif *.GIF *.bmp *.BMP *.tif *.TIF *.tiff *.TIFF", TR("Pictures"));
+	if (home && *home && strlen(home) < 500) {
+		snprintf(start, sizeof start, "--filename=%s/Pictures/", home);
+	}
+	char *const zargv[] = { "zenity", "--file-selection", title, filter, start[0] ? start : NULL,
+		NULL };
+	int fd[2];
+	if (pipe(fd) != 0) {
+		return 1;
+	}
+	pid_t pid = fork();
+	if (pid < 0) {
+		return 1;
+	}
+	if (pid == 0) {
+		dup2(fd[1], STDOUT_FILENO);
+		close(fd[0]);
+		close(fd[1]);
+		execvp("zenity", zargv);
+		_exit(127);
+	}
+	close(fd[1]);
+	char out[1024];
+	size_t got = 0;
+	ssize_t r;
+	while (got < sizeof out - 1 && (r = read(fd[0], out + got, sizeof out - 1 - got)) != 0) {
+		if (r < 0 && errno == EINTR) {
+			continue;
+		}
+		if (r < 0) {
+			break;
+		}
+		got += (size_t)r;
+	}
+	close(fd[0]);
+	int st = 0;
+	while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {
+		;
+	}
+	out[got] = '\0';
+	out[strcspn(out, "\n")] = '\0';
+	struct stat sb;
+	bool plain = out[0] == '/' && strlen(out) <= 400 && strrchr(out, '.');
+	for (const char *c = out; *c; c++) {
+		plain = plain && (unsigned char)*c >= 0x20 && *c != 0x7f;
+	}
+	if (!WIFEXITED(st) || WEXITSTATUS(st) != 0 || !plain || stat(out, &sb) != 0
+		|| !S_ISREG(sb.st_mode)) {
+		return 1;
+	}
+	char path[600];
+	conf_path(path, sizeof path);
+	bool ok = conf_write(path, "desk_mat_photo", out) && conf_write(path, "desk_mat", "photo")
+		&& conf_write(path, "desk_mat_out", "yes");
+	return ok ? 0 : 1;
+}
+
 int main(int argc, char **argv)
 {
 	desk_compat();
 	bool check = argc > 1 && !strcmp(argv[1], "--check");
+	const char *want_page = argc > 2 && !strcmp(argv[1], "--page") ? argv[2] : NULL;
 	if (argc > 1 && !strcmp(argv[1], "--version")) {
 		printf("%s\n", DESK_RELEASE);
 		return 0;
 	}
-	if (argc > 1 && !check) {
-		fprintf(stderr, "usage: desk-settings [--check | --version]\n");
+	if (argc > 1 && !strcmp(argv[1], "--pick-photo")) {
+		return pick_photo();
+	}
+	if (argc > 1 && !check && !want_page) {
+		fprintf(stderr, "usage: desk-settings [--page mat | --check | --version]\n");
 		return strcmp(argv[1], "--help") && strcmp(argv[1], "-h") ? 2 : 0;
 	}
 	const char *slow = getenv("DESK_SLOW");
@@ -3030,7 +3114,7 @@ int main(int argc, char **argv)
 	 * programs to the end; the shell's, all before it */
 	int sys = N_SETTINGS;
 	for (int i = 0; i < N_SETTINGS; i++) {
-		if (SETTINGS[i].kind == S_ACTION) {
+		if (SETTINGS[i].kind == S_ACTION && SETTINGS[i].opens != &O_MATPIC) {
 			sys = i;
 			break;
 		}
@@ -3072,7 +3156,17 @@ int main(int argc, char **argv)
 	exe_dir_read();
 	os_read();
 	words_apply(&a);
-	page_show(&a, 0);
+	/* --page: the sheet whose heading is the name (or "mat", for the desk mat's) */
+	int first = 0;
+	for (int pg = 0; want_page && pg < a.npages; pg++) {
+		const char *head = SETTINGS[a.pg_first[pg]].label;
+		if (SETTINGS[a.pg_first[pg]].kind == S_SECTION
+			&& (!strcasecmp(head, want_page) || (!strcasecmp(want_page, "mat")
+				&& !strcmp(head, "DESK MAT")))) {
+			first = pg;
+		}
+	}
+	page_show(&a, first);
 	if (check) {
 		return check_rows(&a) ? 1 : 0;
 	}

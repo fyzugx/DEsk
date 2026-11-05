@@ -1808,6 +1808,7 @@ static void prof_report(double now)
 
 static void server_schedule_frames(struct desk_server *server);
 static void settings_open(void);
+static void settings_open_page(const char *page);
 /* more than one screen (see there) */
 static struct wlr_output *first_output(struct desk_server *server);
 static struct wlr_output *screen_at(struct desk_server *server, double x, double y);
@@ -12051,7 +12052,8 @@ static bool drawer_press(struct desk_server *server, uint32_t button)
 	double cx = server->cursor->x, cy = server->cursor->y;
 	if (server->drawer_t > 0.004) {
 		int i = drawer_entry_at(server, cx, cy);
-		if (i >= 0 && (!right || server->drw[i].kind == DRAWER_SHEET)) {
+		if (i >= 0 && (!right || server->drw[i].kind == DRAWER_SHEET
+			|| server->drw[i].kind == DRAWER_MAT)) {
 			server->drw_press = i;
 			server->drw_px = cx;
 			server->drw_py = cy;
@@ -12108,9 +12110,18 @@ static bool drawer_release(struct desk_server *server)
 		return true;
 	}
 	if (right && (server->drw_press >= 0 || server->drw_press_sheet)) {
-		/* moved nowhere: a right click on a sheet is not a use of it */
+		/* moved nowhere: a right click on a sheet is not a use of it; on the
+		 * bag, it is for the mat's settings */
+		int i = server->drw_press;
 		server->drw_press = -1;
 		server->drw_press_sheet = NULL;
+		if (i >= 0 && i < server->drw_n && server->drw[i].kind == DRAWER_MAT) {
+			wlr_log(WLR_INFO, "opening the desk mat's settings from the bag");
+			settings_open_page("mat");
+			if (server->conf.drawer_closes) {
+				drawer_move_to(server, 0.0);
+			}
+		}
 		return true;
 	}
 	if (server->drw_press >= 0) {
@@ -15893,20 +15904,32 @@ static void render_unpublish(void)
 	}
 }
 
-/* Shell Settings, from its desktop file, or by name, or from beside this. */
+/* Shell Settings, at its first page. */
 static void settings_open(void)
 {
-	const struct desk_app_list *l = desk_apps_acquire();
-	const struct desk_app *app = desk_apps_find(l, "desk-settings.desktop");
-	if (app) {
-		desk_app_launch(app);
-	}
-	desk_apps_release(l);
-	if (app) {
-		return;
+	settings_open_page(NULL);
+}
+
+/* Shell Settings, at the page named (desk-settings --page), or the first:
+ * from its desktop file (which cannot be told a page, so only for the
+ * first), or by name, or from beside this. */
+static void settings_open_page(const char *page)
+{
+	if (!page) {
+		const struct desk_app_list *l = desk_apps_acquire();
+		const struct desk_app *app = desk_apps_find(l, "desk-settings.desktop");
+		if (app) {
+			desk_app_launch(app);
+		}
+		desk_apps_release(l);
+		if (app) {
+			return;
+		}
 	}
 	if (on_path("desk-settings")) {
-		spawn("desk-settings");
+		char *const argv[] = { (char *)"desk-settings", (char *)(page ? "--page" : NULL),
+			(char *)page, NULL };
+		spawn_argv(argv);
 		return;
 	}
 	char exe[512];
@@ -15916,7 +15939,7 @@ static void settings_open(void)
 	if (slash && (size_t)(slash - exe) + sizeof "/desk-settings" < sizeof exe) {
 		memcpy(slash, "/desk-settings", sizeof "/desk-settings");
 		if (access(exe, X_OK) == 0) {
-			char *const argv[] = { exe, NULL };
+			char *const argv[] = { exe, (char *)(page ? "--page" : NULL), (char *)page, NULL };
 			spawn_argv(argv);
 		}
 	}
