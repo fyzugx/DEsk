@@ -12118,19 +12118,24 @@ static double drawer_item_height(const struct desk_drawer_item *it)
 
 static void mat_roll_rgb(float rgb[3]);
 
-/* The desk mat's leather map case, from above in room units about its middle: a long
- * rolled cylinder of leather with the mat's cloth showing at one end, tied with a cord
- * and a bronze charm -- or, with the mat unrolled on the desk, the case lying flat and
+/* The desk mat's leather map case, from above in room units about where its open end
+ * lies: a long rolled cylinder standing back into the drawer, most of it out of sight
+ * under the desk, with the mat's cloth showing at the open end, a cord and a bronze
+ * charm near it -- or, with the mat unrolled on the desk, the case lying flat and
  * empty with its cord undone beside it. */
 static void tool_mat_bag(cairo_t *cr, bool out, unsigned seed)
 {
 	float cloth[3];
 	mat_roll_rgb(cloth);
-	const double L = 1.3, hh = out ? 0.36 : 0.50;
+	const double L = 2.5, hh = out ? 0.58 : 0.76;
+	cairo_save(cr);
+	/* drawn along x, then stood up the drawer with its open end toward you */
+	cairo_rotate(cr, -M_PI / 2.0);
+	cairo_translate(cr, L + 0.26 - 1.3, 0.0);
 	if (!out) {
 		/* the mat's rolled cloth, round, standing out of the open end */
 		double ch = hh * 0.84;
-		cairo_rectangle(cr, -L - 0.26, -ch, 0.30, ch * 2.0);
+		cairo_rectangle(cr, -L - 0.26, -ch, 0.40, ch * 2.0);
 		cairo_pattern_t *c = cairo_pattern_create_linear(0.0, -ch, 0.0, ch);
 		cairo_pattern_add_color_stop_rgb(c, 0.0, cloth[0] * 0.55, cloth[1] * 0.55, cloth[2] * 0.55);
 		cairo_pattern_add_color_stop_rgb(c, 0.3, fmin(cloth[0] * 1.25, 1.0), fmin(cloth[1] * 1.25, 1.0),
@@ -12143,8 +12148,8 @@ static void tool_mat_bag(cairo_t *cr, bool out, unsigned seed)
 		cairo_set_line_width(cr, 0.015);
 		cairo_stroke(cr);
 		for (int i = 1; i < 3; i++) {
-			cairo_move_to(cr, -L - 0.26 + i * 0.09, -ch);
-			cairo_line_to(cr, -L - 0.26 + i * 0.09, ch);
+			cairo_move_to(cr, -L - 0.26 + i * 0.12, -ch);
+			cairo_line_to(cr, -L - 0.26 + i * 0.12, ch);
 			cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.25);
 			cairo_stroke(cr);
 		}
@@ -12167,9 +12172,9 @@ static void tool_mat_bag(cairo_t *cr, bool out, unsigned seed)
 	cairo_save(cr);
 	cairo_clip_preserve(cr);
 	/* the worn, mottled hide */
-	for (int i = 0; i < 70; i++) {
+	for (int i = 0; i < 170; i++) {
 		double a = hash21((double)(seed % 977u) + i, 1.7), b = hash21((double)i, 5.1 + seed % 13u);
-		double r = 0.03 + 0.07 * hash21((double)i, 9.3);
+		double r = 0.04 + 0.10 * hash21((double)i, 9.3);
 		cairo_arc(cr, -L + a * L * 2.0, -hh + b * hh * 2.0, r, 0.0, 2.0 * M_PI);
 		cairo_set_source_rgba(cr, 0.12, 0.06, 0.02, 0.05 + 0.06 * hash21((double)i, 2.2));
 		cairo_fill(cr);
@@ -12190,13 +12195,15 @@ static void tool_mat_bag(cairo_t *cr, bool out, unsigned seed)
 	cairo_stroke(cr);
 	/* the cord, wound twice round the roll or, undone, lying in a loose curl */
 	double cx = 0.55, tx = 0.74, ty = hh * 0.25;
+	cairo_save(cr);
+	cairo_translate(cr, -L + (out ? 0.5 : 0.65), 0.0);
 	cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
 	cairo_set_source_rgb(cr, 0.20, 0.11, 0.06);
-	cairo_set_line_width(cr, 0.045);
+	cairo_set_line_width(cr, 0.065);
 	if (out) {
 		cx = 0.40;
 		tx = 1.05;
-		ty = 0.34;
+		ty = 0.40;
 		cairo_move_to(cr, -0.2, 0.05);
 		cairo_curve_to(cr, 0.1, 0.30, 0.2, -0.20, cx, 0.10);
 		cairo_curve_to(cr, 0.65, 0.40, 0.85, 0.0, tx, ty);
@@ -12211,30 +12218,32 @@ static void tool_mat_bag(cairo_t *cr, bool out, unsigned seed)
 		cairo_curve_to(cr, cx + 0.12, hh * 0.3, tx - 0.1, ty - 0.1, tx, ty);
 		cairo_stroke(cr);
 		/* a bead where the cord gathers */
-		desk_rounded_path(cr, cx + 0.01, -hh * 0.22, 0.10, 0.09, 0.02);
+		desk_rounded_path(cr, cx + 0.01, -hh * 0.22, 0.14, 0.12, 0.03);
 		cairo_set_source_rgb(cr, 0.55, 0.42, 0.22);
 		cairo_fill(cr);
 	}
 	/* the bronze charm on the cord's end, a stamped coin */
-	cairo_arc(cr, tx, ty + 0.11, 0.17, 0.0, 2.0 * M_PI);
+	cairo_arc(cr, tx, ty + 0.14, 0.24, 0.0, 2.0 * M_PI);
 	cairo_set_source_rgb(cr, 0.62, 0.45, 0.21);
 	cairo_fill_preserve(cr);
 	cairo_set_source_rgba(cr, 0.16, 0.09, 0.03, 0.9);
 	cairo_set_line_width(cr, 0.015);
 	cairo_stroke(cr);
-	cairo_arc(cr, tx, ty + 0.11, 0.125, 0.0, 2.0 * M_PI);
+	cairo_arc(cr, tx, ty + 0.14, 0.18, 0.0, 2.0 * M_PI);
 	cairo_set_source_rgba(cr, 0.95, 0.80, 0.50, 0.55);
 	cairo_set_line_width(cr, 0.012);
 	cairo_stroke(cr);
-	cairo_arc(cr, tx, ty + 0.11, 0.07, 0.0, 2.0 * M_PI);
+	cairo_arc(cr, tx, ty + 0.14, 0.10, 0.0, 2.0 * M_PI);
 	cairo_set_source_rgba(cr, 0.30, 0.18, 0.06, 0.55);
 	cairo_fill(cr);
+	cairo_restore(cr);
+	cairo_restore(cr);
 }
 
 static cairo_surface_t *mat_bag_image(const struct desk_drawer_item *it, double ppu, double turn,
 	double *ax, double *ay)
 {
-	double cw = 3.4 * ppu, ch = 1.8 * ppu;
+	double cw = 2.8 * ppu, ch = 7.0 * ppu;
 	double diag = hypot(cw, ch) + 4.0;
 	cairo_surface_t *img = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, (int)ceil(diag),
 		(int)ceil(diag));
