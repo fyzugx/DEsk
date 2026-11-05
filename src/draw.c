@@ -25688,8 +25688,13 @@ bool desk_clock_pick(int w, int h, double px, double py, double drawer_open,
 	return true;
 }
 
+static bool mat_box(int w, int h, double box[4]);
+
 bool desk_overlay_box(int which, int w, int h, double box[4])
 {
+	if (which == DESK_OVL_MAT) {
+		return mat_box(w, h, box);
+	}
 	if (which == DESK_OVL_SLIPS) {
 		return slips_box(w, h, box);
 	}
@@ -30761,6 +30766,670 @@ void desk_draw_gadgets(cairo_t *cr, int w, int h, time_t now, double drawer_open
 	}
 }
 
+/* ---- the desk mat -------------------------------------------------
+ *
+ * A sprite of its own (DESK_OVL_MAT) over the baked room and under everything
+ * else, so a new mat is a redraw and not a new room. */
+
+static const struct {
+	const char *name;
+	float rgb[3];
+} MAT_PRESETS[] = {
+	{ "green", { 0.12f, 0.29f, 0.20f } },
+	{ "navy", { 0.10f, 0.16f, 0.30f } },
+	{ "burgundy", { 0.36f, 0.09f, 0.13f } },
+	{ "charcoal", { 0.16f, 0.16f, 0.17f } },
+	{ "cream", { 0.80f, 0.75f, 0.62f } },
+};
+
+bool desk_mat_preset(const char *name, struct desk_mat *out)
+{
+	if (!name || !out) {
+		return false;
+	}
+	for (size_t i = 0; i < sizeof MAT_PRESETS / sizeof MAT_PRESETS[0]; i++) {
+		if (!strcasecmp(name, MAT_PRESETS[i].name)) {
+			out->kind = DESK_MAT_COLOR;
+			memcpy(out->rgb, MAT_PRESETS[i].rgb, sizeof out->rgb);
+			return true;
+		}
+	}
+	if (name[0] == '#' && strlen(name) == 7) {
+		for (int i = 1; i < 7; i++) {
+			if (!isxdigit((unsigned char)name[i])) {
+				return false;
+			}
+		}
+		unsigned v = (unsigned)strtoul(name + 1, NULL, 16);
+		out->kind = DESK_MAT_COLOR;
+		out->rgb[0] = (float)((v >> 16) & 0xff) / 255.0f;
+		out->rgb[1] = (float)((v >> 8) & 0xff) / 255.0f;
+		out->rgb[2] = (float)(v & 0xff) / 255.0f;
+		return true;
+	}
+	return false;
+}
+
+static pthread_mutex_t g_mat_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct desk_mat g_mat = { .size = DESK_MAT_MEDIUM };
+static uint64_t g_mat_gen = 1;          /* changes when what is shown does */
+static cairo_surface_t *g_mat_pic;      /* the photo read for g_mat_pic_path */
+static char g_mat_pic_path[512];        /* ...even when it could not be read: not tried twice */
+static bool g_mat_busy;                 /* the thread reading it is running */
+
+/* The path is whatever shell.conf says and its file may have been sent, so
+ * only a regular file of picture size is read, and a PNG only if its header
+ * says a picture's worth of pixels. A photo is shrunk to MAT_PIC_MAX. */
+#define MAT_PIC_MAX 2400
+#define MAT_FILE_MAX (64L << 20)
+#define MAT_PIC_PIXELS (48L << 20)
+/* A PNG is read in the compositor only up to this many pixels (16 MB once
+ * decoded); a larger one goes to the converter, a process of its own. */
+#define MAT_PNG_DIRECT (4L << 20)
+
+static cairo_surface_t *mat_pic_shrunk(cairo_surface_t *s)
+{
+	int pw = cairo_image_surface_get_width(s), ph = cairo_image_surface_get_height(s);
+	if (cairo_surface_status(s) != CAIRO_STATUS_SUCCESS || pw < 1 || ph < 1) {
+		cairo_surface_destroy(s);
+		return NULL;
+	}
+	if (pw <= MAT_PIC_MAX && ph <= MAT_PIC_MAX) {
+		return s;
+	}
+	double k = (double)MAT_PIC_MAX / (pw > ph ? pw : ph);
+	cairo_surface_t *d = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, (int)ceil(pw * k),
+		(int)ceil(ph * k));
+	if (cairo_surface_status(d) == CAIRO_STATUS_SUCCESS) {
+		cairo_t *cr = cairo_create(d);
+		cairo_scale(cr, k, k);
+		cairo_set_source_surface(cr, s, 0, 0);
+		cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_BEST);
+		cairo_paint(cr);
+		cairo_destroy(cr);
+	} else {
+		cairo_surface_destroy(d);
+		d = NULL;
+	}
+	cairo_surface_destroy(s);
+	return d;
+}
+
+/* The pixels a PNG says it has in its first 24 bytes, head: 0 if it is not one. */
+static unsigned long mat_png_pixels(const unsigned char head[24])
+{
+	if (memcmp(head, "\x89PNG\r\n\x1a\n", 8)) {
+		return 0;
+	}
+	unsigned long pw = (unsigned long)head[16] << 24 | (unsigned long)head[17] << 16
+		| (unsigned long)head[18] << 8 | head[19];
+	unsigned long ph = (unsigned long)head[20] << 24 | (unsigned long)head[21] << 16
+		| (unsigned long)head[22] << 8 | head[23];
+	return pw > 65535 || ph > 65535 ? 0 : pw * ph;
+}
+
+/* A PNG whose first 24 bytes are head, read through fn, if it has no more than
+ * max pixels: cairo allocates for the whole picture the moment it starts. */
+static cairo_surface_t *mat_png_decode(const unsigned char head[24], long max,
+	cairo_read_func_t fn, void *closure)
+{
+	unsigned long px = mat_png_pixels(head);
+	if (px == 0 || px > (unsigned long)max) {
+		return NULL;
+	}
+	cairo_surface_t *s = cairo_image_surface_create_from_png_stream(fn, closure);
+	return s ? mat_pic_shrunk(s) : NULL;
+}
+
+static cairo_status_t mat_fd_read(void *closure, unsigned char *data, unsigned int length)
+{
+	while (length > 0) {
+		ssize_t r = read(*(int *)closure, data, length);
+		if (r < 0 && errno == EINTR) {
+			continue;
+		}
+		if (r <= 0) {
+			return CAIRO_STATUS_READ_ERROR;
+		}
+		data += r;
+		length -= (unsigned int)r;
+	}
+	return CAIRO_STATUS_SUCCESS;
+}
+
+struct mat_mem {
+	const unsigned char *p;
+	size_t n, at;
+};
+
+static cairo_status_t mat_mem_read(void *closure, unsigned char *data, unsigned int length)
+{
+	struct mat_mem *m = closure;
+	if (length > m->n - m->at) {
+		return CAIRO_STATUS_READ_ERROR;
+	}
+	memcpy(data, m->p + m->at, length);
+	m->at += length;
+	return CAIRO_STATUS_SUCCESS;
+}
+
+/* A PNG file, if it is small enough to read here (else *big says it is for the
+ * converter). Opened without waiting, since a named pipe would never end, and
+ * read from that one descriptor, so what was checked is what is read. */
+static cairo_surface_t *mat_png_file(const char *path, bool *big)
+{
+	int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+	if (fd < 0) {
+		return NULL;
+	}
+	struct stat st;
+	unsigned char head[24];
+	cairo_surface_t *s = NULL;
+	if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 24
+		&& st.st_size <= MAT_FILE_MAX && pread(fd, head, sizeof head, 0) == (ssize_t)sizeof head) {
+		unsigned long px = mat_png_pixels(head);
+		*big = px > MAT_PNG_DIRECT && px <= MAT_PIC_PIXELS;
+		s = mat_png_decode(head, MAT_PNG_DIRECT, mat_fd_read, &fd);
+	}
+	close(fd);
+	return s;
+}
+
+/* What argv prints to stdout, up to MAT_FILE_MAX, and whether it exited 0.
+ * Its input and its words go nowhere. Nothing is kept on disk. */
+static unsigned char *mat_run(char *const argv[], size_t *len)
+{
+	int fd[2];
+	if (pipe(fd) != 0) {
+		return NULL;
+	}
+	fcntl(fd[0], F_SETFD, FD_CLOEXEC);
+	fcntl(fd[1], F_SETFD, FD_CLOEXEC);   /* the child has its stdout, the dup of it */
+	posix_spawn_file_actions_t fa;
+	posix_spawn_file_actions_init(&fa);
+	posix_spawn_file_actions_addopen(&fa, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+	posix_spawn_file_actions_adddup2(&fa, fd[1], STDOUT_FILENO);
+	posix_spawn_file_actions_addopen(&fa, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
+	pid_t pid;
+	int err = posix_spawnp(&pid, argv[0], &fa, NULL, argv, environ);
+	posix_spawn_file_actions_destroy(&fa);
+	close(fd[1]);
+	if (err != 0) {
+		close(fd[0]);
+		return NULL;
+	}
+	unsigned char *buf = malloc(MAT_FILE_MAX);
+	size_t got = 0;
+	ssize_t r = 0;
+	while (buf && got < MAT_FILE_MAX && (r = read(fd[0], buf + got, MAT_FILE_MAX - got)) != 0) {
+		if (r < 0 && errno == EINTR) {
+			continue;
+		}
+		if (r < 0) {
+			break;
+		}
+		got += (size_t)r;
+	}
+	bool whole = r == 0;   /* all of it, not cut short by the limit or an error */
+	close(fd[0]);
+	int status = 0;
+	pid_t w;
+	while ((w = waitpid(pid, &status, 0)) < 0 && errno == EINTR) {
+		;
+	}
+	if (!buf || !whole || w != pid || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+		free(buf);
+		return NULL;
+	}
+	*len = got;
+	return buf;
+}
+
+/* The photo at path (absolute): a small PNG as it is. Anything else, a large
+ * PNG too, is made into a PNG of the size wanted by gdk-pixbuf's thumbnailer,
+ * which only decodes pictures, or else by
+ * ImageMagick, which goes by what is inside a file and runs what that asks
+ * for, so it is given only a name it knows and told the decoder to use. */
+static cairo_surface_t *mat_pic_read(const char *path)
+{
+	const char *dot = strrchr(path, '.');
+	struct stat st;
+	if (path[0] != '/' || strlen(path) > 400 || !dot) {
+		return NULL;
+	}
+	if (!strcasecmp(dot, ".png")) {
+		bool big = false;
+		cairo_surface_t *png = mat_png_file(path, &big);
+		if (png || !big) {
+			return png;
+		}
+	}
+	if (stat(path, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size > MAT_FILE_MAX) {
+		return NULL;
+	}
+	static const char *const CODERS[][2] = { { ".png", "png" }, { ".jpg", "jpeg" }, { ".jpeg", "jpeg" },
+		{ ".webp", "webp" }, { ".gif", "gif" }, { ".bmp", "bmp" }, { ".tif", "tiff" },
+		{ ".tiff", "tiff" } };
+	const char *coder = NULL;
+	for (size_t i = 0; i < sizeof CODERS / sizeof CODERS[0]; i++) {
+		coder = !strcasecmp(dot, CODERS[i][0]) ? CODERS[i][1] : coder;
+	}
+	char size[16], area[16], in[460];
+	snprintf(size, sizeof size, "%d", MAT_PIC_MAX);
+	snprintf(area, sizeof area, "%ldMP", MAT_PIC_PIXELS >> 20);
+	snprintf(in, sizeof in, "%s:%s[0]", coder ? coder : "", path);
+	char *const pixbuf[] = { "/usr/bin/gdk-pixbuf-thumbnailer", "-s", size, (char *)path,
+		"/dev/stdout", NULL };
+	char *const magick[] = { "/usr/bin/magick", "-limit", "memory", "512MiB", "-limit", "map",
+		"512MiB", "-limit", "disk", "0", "-limit", "area", area, in, "-auto-orient",
+		"-resize", size, "PNG:-", NULL };
+	bool have_pixbuf = access(pixbuf[0], X_OK) == 0;
+	if (!have_pixbuf && (!coder || access(magick[0], X_OK) != 0)) {
+		return NULL;
+	}
+	/* a minute at most: timeout(1) in front of either */
+	char *argv[24] = { "timeout", "30" };
+	char *const *tool = have_pixbuf ? pixbuf : magick;
+	for (int i = 0; tool[i] && i < 21; i++) {
+		argv[i + 2] = tool[i];
+	}
+	size_t n = 0;
+	unsigned char *png = mat_run(argv, &n);
+	if (!png) {
+		return NULL;
+	}
+	struct mat_mem m = { png, n, 0 };
+	cairo_surface_t *s = n > 24 ? mat_png_decode(png, (long)MAT_PIC_MAX * MAT_PIC_MAX,
+		mat_mem_read, &m) : NULL;
+	free(png);
+	return s;
+}
+
+/* Reads the photo shell.conf names, and then the next if that changed meanwhile. */
+static void *mat_pic_thread(void *arg)
+{
+	(void)arg;
+	for (;;) {
+		char want[512];
+		pthread_mutex_lock(&g_mat_lock);
+		snprintf(want, sizeof want, "%s", g_mat.kind == DESK_MAT_PHOTO ? g_mat.photo : "");
+		if (!want[0] || !strcmp(want, g_mat_pic_path)) {
+			g_mat_busy = false;
+			pthread_mutex_unlock(&g_mat_lock);
+			return NULL;
+		}
+		pthread_mutex_unlock(&g_mat_lock);
+		cairo_surface_t *s = mat_pic_read(want);
+		if (!s) {
+			fprintf(stderr, "desk: mat: cannot read %s\n", want);
+		}
+		pthread_mutex_lock(&g_mat_lock);
+		if (g_mat_pic) {
+			cairo_surface_destroy(g_mat_pic);
+		}
+		g_mat_pic = s;
+		snprintf(g_mat_pic_path, sizeof g_mat_pic_path, "%s", want);
+		g_mat_gen++;
+		pthread_mutex_unlock(&g_mat_lock);
+	}
+}
+
+/* With g_mat_busy just set. */
+static void mat_pic_start(void)
+{
+	pthread_t th;
+	if (pthread_create(&th, NULL, mat_pic_thread, NULL) == 0) {
+		pthread_detach(th);
+		return;
+	}
+	pthread_mutex_lock(&g_mat_lock);
+	g_mat_busy = false;
+	pthread_mutex_unlock(&g_mat_lock);
+}
+
+bool desk_set_mat(const struct desk_mat *m)
+{
+	if (!m) {
+		return false;
+	}
+	pthread_mutex_lock(&g_mat_lock);
+	bool same = g_mat.kind == m->kind && g_mat.size == m->size
+		&& !memcmp(g_mat.rgb, m->rgb, sizeof g_mat.rgb)
+		&& (m->kind != DESK_MAT_PHOTO || !strcmp(g_mat.photo, m->photo));
+	bool photo = m->kind == DESK_MAT_PHOTO && m->photo[0];
+	/* one that could not be read is tried again when the settings are applied again */
+	bool start = photo && !g_mat_busy
+		&& (same ? !g_mat_pic && !strcmp(g_mat_pic_path, m->photo)
+			: strcmp(m->photo, g_mat_pic_path) != 0);
+	if (!same) {
+		g_mat = *m;
+		g_mat.photo[sizeof g_mat.photo - 1] = '\0';
+		g_mat_gen++;
+	}
+	if (!photo && g_mat_pic) {
+		cairo_surface_destroy(g_mat_pic);
+		g_mat_pic = NULL;
+		g_mat_pic_path[0] = '\0';
+	}
+	if (start) {
+		g_mat_pic_path[0] = '\0';
+		g_mat_busy = true;
+	}
+	pthread_mutex_unlock(&g_mat_lock);
+	if (start) {
+		mat_pic_start();
+	}
+	return !same;
+}
+
+static uint64_t mat_key(void)
+{
+	pthread_mutex_lock(&g_mat_lock);
+	uint64_t k = g_mat_gen;
+	pthread_mutex_unlock(&g_mat_lock);
+	return k;
+}
+
+/* Where the mat lies (x, y, w, h): centred, near the front edge, and never up
+ * to the console, clock and post box. Its size is in points, as the windows'
+ * are, so a larger screen shows more desk, not a larger mat: the sizes are
+ * a few places on the way from the least (0) to all the open desk (1), and
+ * it is never more than that. */
+#define MAT_OPEN_W 0.92   /* the open desk, as a share of the screen */
+#define MAT_OPEN_H 0.82
+static void mat_rect(int w, int h, double size, double r[4])
+{
+	static const double AT[] = { 0.0, DESK_MAT_SMALL, DESK_MAT_MEDIUM, DESK_MAT_LARGE };
+	static const double PW[] = { 480.0, 600.0, 900.0, 1160.0 };   /* points across, and */
+	static const double PH[] = { 320.0, 380.0, 530.0, 650.0 };    /* deep */
+	size = isfinite(size) ? clampf(size, 0.0, 1.0) : DESK_MAT_MEDIUM;
+	double k = desk_px_per_pt(w), ow = w * MAT_OPEN_W, oh = h * MAT_OPEN_H, mw, mh;
+	if (size >= AT[3]) {
+		double t = (size - AT[3]) / (1.0 - AT[3]);
+		mw = PW[3] * k + (ow - PW[3] * k) * t;
+		mh = PH[3] * k + (oh - PH[3] * k) * t;
+	} else {
+		int i = size < AT[1] ? 0 : size < AT[2] ? 1 : 2;
+		double t = (size - AT[i]) / (AT[i + 1] - AT[i]);
+		mw = (PW[i] + (PW[i + 1] - PW[i]) * t) * k;
+		mh = (PH[i] + (PH[i + 1] - PH[i]) * t) * k;
+	}
+	r[2] = fmin(mw, ow);
+	r[3] = fmin(mh, oh);
+	r[0] = (w - r[2]) * 0.5;
+	r[1] = h * 0.96 - r[3];
+}
+
+/* The mat's lift off the boards, in pixels: a thick felt blotter. */
+static double mat_lift(int w)
+{
+	return fmax(2.0, 4.0 * desk_px_per_pt(w));
+}
+
+/* it and the shadow it throws, or false when there is no mat */
+static bool mat_box(int w, int h, double box[4])
+{
+	pthread_mutex_lock(&g_mat_lock);
+	int kind = g_mat.kind;
+	double size = g_mat.size;
+	pthread_mutex_unlock(&g_mat_lock);
+	if (kind == DESK_MAT_NONE) {
+		return false;
+	}
+	double r[4], pad = 32.0 * desk_px_per_pt(w);
+	mat_rect(w, h, size, r);
+	box[0] = floor(r[0] - pad);
+	box[1] = floor(r[1] - pad);
+	box[2] = ceil(r[0] + r[2] + pad) - box[0];
+	box[3] = ceil(r[1] + r[3] + pad) - box[1];
+	return true;
+}
+
+bool desk_mat_size_parse(const char *s, double *out)
+{
+	if (!s || !out) {
+		return false;
+	}
+	if (!strcasecmp(s, "small")) {
+		*out = DESK_MAT_SMALL;
+	} else if (!strcasecmp(s, "medium")) {
+		*out = DESK_MAT_MEDIUM;
+	} else if (!strcasecmp(s, "large")) {
+		*out = DESK_MAT_LARGE;
+	} else if (!strcasecmp(s, "full")) {
+		*out = DESK_MAT_FULL;
+	} else {
+		char *end = NULL;
+		double v = strtod(s, &end);
+		if (end == s || strcmp(end, "%") || !isfinite(v) || v < 0.0 || v > 100.0) {
+			return false;
+		}
+		*out = v / 100.0;
+	}
+	return true;
+}
+
+/* How much of the lamp reaches each part of the desk, from the baked room
+ * drawn small, so that the grain averages out and the pool of the lamp, the
+ * dark toward the corners and the shadows at the back are left; against its
+ * brightest. The mat is darkened by it, as the boards are. Made again only
+ * for another room or size, and only from the compositor's thread (or
+ * desk-preview's), so it needs no lock. */
+#define MAT_LIGHT_W 16
+#define MAT_LIGHT_H 10
+static cairo_surface_t *g_mat_light;
+static unsigned g_mat_light_room;
+static int g_mat_light_w, g_mat_light_h;
+
+static cairo_surface_t *mat_light(int w, int h)
+{
+	unsigned room = desk_room_shown(w, h);
+	if (!room) {
+		return NULL;   /* no room yet: evenly lit, and drawn again when there is */
+	}
+	if (g_mat_light && g_mat_light_room == room && g_mat_light_w == w && g_mat_light_h == h) {
+		return g_mat_light;
+	}
+	/* a quarter of the size is plenty to average from, and a sixteenth of the pixels */
+	cairo_surface_t *full = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, (w + 3) / 4,
+		(h + 3) / 4);
+	cairo_t *fc = cairo_create(full);
+	cairo_scale(fc, 0.25, 0.25);
+	desk_draw_room(fc, w, h, 0.0);
+	cairo_destroy(fc);
+	cairo_surface_t *small = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, MAT_LIGHT_W,
+		MAT_LIGHT_H);
+	cairo_t *sc = cairo_create(small);
+	cairo_scale(sc, (double)MAT_LIGHT_W / ((w + 3) / 4), (double)MAT_LIGHT_H / ((h + 3) / 4));
+	cairo_set_source_surface(sc, full, 0, 0);
+	cairo_pattern_set_filter(cairo_get_source(sc), CAIRO_FILTER_GOOD);
+	cairo_paint(sc);
+	cairo_destroy(sc);
+	cairo_surface_destroy(full);
+	cairo_surface_flush(small);
+
+	double lum[MAT_LIGHT_W * MAT_LIGHT_H], ref = 0.02;
+	const unsigned char *px = cairo_image_surface_get_data(small);
+	int stride = cairo_image_surface_get_stride(small);
+	for (int y = 0; y < MAT_LIGHT_H; y++) {
+		const uint32_t *row = (const uint32_t *)(px + (size_t)y * stride);
+		for (int x = 0; x < MAT_LIGHT_W; x++) {
+			uint32_t c = row[x];
+			lum[y * MAT_LIGHT_W + x] = (0.30 * ((c >> 16) & 0xff) + 0.59 * ((c >> 8) & 0xff)
+				+ 0.11 * (c & 0xff)) / 255.0;
+			ref = fmax(ref, lum[y * MAT_LIGHT_W + x]);
+		}
+	}
+	cairo_surface_t *map = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, MAT_LIGHT_W,
+		MAT_LIGHT_H);
+	unsigned char *mp = cairo_image_surface_get_data(map);
+	int ms = cairo_image_surface_get_stride(map);
+	for (int y = 0; y < MAT_LIGHT_H; y++) {
+		uint32_t *row = (uint32_t *)(mp + (size_t)y * ms);
+		for (int x = 0; x < MAT_LIGHT_W; x++) {
+			/* a felt is lit more evenly than boards are: not all the way */
+			double f = clampf(lum[y * MAT_LIGHT_W + x] / ref, 0.0, 1.0);
+			f = 1.0 - 0.85 * (1.0 - f);
+			uint32_t g = (uint32_t)lround(f * 255.0);
+			row[x] = 0xff000000u | (g << 16) | (g << 8) | g;
+		}
+	}
+	cairo_surface_mark_dirty(map);
+	cairo_surface_destroy(small);
+	if (g_mat_light) {
+		cairo_surface_destroy(g_mat_light);
+	}
+	g_mat_light = map;
+	g_mat_light_room = room;
+	g_mat_light_w = w;
+	g_mat_light_h = h;
+	return map;
+}
+
+/* what the thread of the stitching is: light on a dark mat, dark on a
+ * light one */
+static void mat_thread(const float rgb[3], double out[3])
+{
+	double lum = 0.30 * rgb[0] + 0.59 * rgb[1] + 0.11 * rgb[2];
+	if (lum < 0.45) {
+		out[0] = 0.86;
+		out[1] = 0.76;
+		out[2] = 0.54;
+	} else {
+		out[0] = 0.30;
+		out[1] = 0.21;
+		out[2] = 0.12;
+	}
+}
+
+static void mat_paint(cairo_t *cr, int w, int h)
+{
+	struct desk_mat m;
+	cairo_surface_t *pic = NULL;
+	pthread_mutex_lock(&g_mat_lock);
+	m = g_mat;
+	if (m.kind == DESK_MAT_PHOTO && g_mat_pic && !strcmp(g_mat_pic_path, m.photo)) {
+		pic = cairo_surface_reference(g_mat_pic);
+	}
+	pthread_mutex_unlock(&g_mat_lock);
+	if (m.kind == DESK_MAT_NONE) {
+		return;
+	}
+	double r[4], k = desk_px_per_pt(w);
+	mat_rect(w, h, m.size, r);
+	double x = r[0], y = r[1], mw = r[2], mh = r[3], rad = 12.0 * k;
+	double lift = mat_lift(w);
+
+	/* Its shadow, as the windows' are: each edge leans away from the lamp by what
+	 * a mat this thick throws there. Hard where it touches, soft beyond. */
+	double lx, rx, ty, by, along;
+	shadow_dir(x, y + mh * 0.5, lift, &lx, &along);
+	shadow_dir(x + mw, y + mh * 0.5, lift, &rx, &along);
+	shadow_dir(x + mw * 0.5, y, lift, &along, &ty);
+	shadow_dir(x + mw * 0.5, y + mh, lift, &along, &by);
+	const int cast = 10;
+	for (int i = cast; i >= 1; i--) {
+		double g = 3.0 * lift * i / cast;
+		desk_rounded_path(cr, x + fmin(lx, 0.0) - g, y + fmin(ty, 0.0) - g,
+			mw + fmax(rx, 0.0) - fmin(lx, 0.0) + 2 * g,
+			mh + fmax(by, 0.0) - fmin(ty, 0.0) + 2 * g, rad + g);
+		cairo_set_source_rgba(cr, 0.04, 0.025, 0.012, 0.030);
+		cairo_fill(cr);
+	}
+	const int touch = 6;
+	for (int i = touch; i >= 1; i--) {
+		double g = 1.1 * lift * i / touch;
+		desk_rounded_path(cr, x + lx * 0.5 - g, y + ty * 0.5 - g,
+			mw + (rx - lx) * 0.5 + 2 * g, mh + (by - ty) * 0.5 + 2 * g, rad + g);
+		cairo_set_source_rgba(cr, 0.03, 0.018, 0.008, 0.085);
+		cairo_fill(cr);
+	}
+
+	cairo_save(cr);
+	desk_rounded_path(cr, x, y, mw, mh, rad);
+	cairo_clip(cr);
+	if (pic) {
+		/* cut to fill it, from the middle of the picture */
+		double pw = cairo_image_surface_get_width(pic), ph = cairo_image_surface_get_height(pic);
+		double k = fmax(mw / pw, mh / ph);
+		cairo_save(cr);
+		cairo_translate(cr, x + (mw - pw * k) * 0.5, y + (mh - ph * k) * 0.5);
+		cairo_scale(cr, k, k);
+		cairo_set_source_surface(cr, pic, 0, 0);
+		cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_BEST);
+		cairo_paint(cr);
+		cairo_restore(cr);
+	} else {
+		cairo_set_source_rgb(cr, m.rgb[0], m.rgb[1], m.rgb[2]);
+		cairo_paint(cr);
+		/* felt: a nap you can see, and nothing shiny */
+		overlay_grain(cr, x, y, mw, mh, 1.6);
+	}
+	/* the lamp on it: the baked room's own light, over the whole mat */
+	cairo_surface_t *lit = mat_light(w, h);
+	if (lit) {
+		cairo_set_operator(cr, CAIRO_OPERATOR_MULTIPLY);
+		cairo_set_source_surface(cr, lit, 0, 0);
+		cairo_pattern_t *lp = cairo_get_source(cr);
+		cairo_pattern_set_filter(lp, CAIRO_FILTER_BILINEAR);
+		cairo_pattern_set_extend(lp, CAIRO_EXTEND_PAD);
+		cairo_matrix_t mt;
+		cairo_matrix_init_scale(&mt, (double)MAT_LIGHT_W / w, (double)MAT_LIGHT_H / h);
+		cairo_pattern_set_matrix(lp, &mt);
+		cairo_paint(cr);
+		cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+	}
+	cairo_restore(cr);
+
+	/* its edge, rounded over: bright where it faces the lamp, dark away
+	 * from it */
+	double tx2 = 0.0, ty2 = 0.0, tz2 = 0.0;
+	lamp_toward(x + mw * 0.5, y + mh * 0.5, &tx2, &ty2, &tz2);
+	double hn = hypot(tx2, ty2);
+	double dxl = hn > 1e-6 ? tx2 / hn : -0.6, dyl = hn > 1e-6 ? ty2 / hn : -0.8;
+	double R = 0.5 * hypot(mw, mh);
+	cairo_pattern_t *edge = cairo_pattern_create_linear(x + mw * 0.5 + dxl * R,
+		y + mh * 0.5 + dyl * R, x + mw * 0.5 - dxl * R, y + mh * 0.5 - dyl * R);
+	cairo_pattern_add_color_stop_rgba(edge, 0.0, 1.0, 0.94, 0.80, 0.30);
+	cairo_pattern_add_color_stop_rgba(edge, 0.5, 1.0, 0.94, 0.80, 0.0);
+	cairo_pattern_add_color_stop_rgba(edge, 1.0, 0.0, 0.0, 0.0, 0.45);
+	desk_rounded_path(cr, x + 0.5, y + 0.5, mw - 1.0, mh - 1.0, rad);
+	cairo_set_source(cr, edge);
+	cairo_set_line_width(cr, fmax(1.0, 2.0 * k));
+	cairo_stroke(cr);
+	cairo_pattern_destroy(edge);
+
+	/* and stitched round, a little in from the edge: each stitch with the
+	 * shadow of the thread on the cloth under it */
+	double thread[3];
+	mat_thread(m.rgb, thread);
+	double in = 14.0 * k, sw = fmax(1.4, 2.7 * k);
+	double dash[2] = { 9.5 * k, 6.0 * k };
+	desk_rounded_path(cr, x + in, y + in, mw - 2 * in, mh - 2 * in, fmax(rad * 0.55, 2.0));
+	cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+	cairo_set_dash(cr, dash, 2, 0.0);
+	cairo_save(cr);
+	cairo_translate(cr, 0.5, 0.9);
+	cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.38);
+	cairo_set_line_width(cr, sw + 0.5);
+	cairo_stroke_preserve(cr);
+	cairo_restore(cr);
+	cairo_set_source_rgb(cr, thread[0], thread[1], thread[2]);
+	cairo_set_line_width(cr, sw);
+	cairo_stroke_preserve(cr);
+	cairo_save(cr);
+	cairo_translate(cr, -0.25, -0.4);
+	cairo_set_source_rgba(cr, 1.0, 0.97, 0.88, 0.28);
+	cairo_set_line_width(cr, sw * 0.4);
+	cairo_stroke(cr);
+	cairo_restore(cr);
+	cairo_set_dash(cr, NULL, 0, 0.0);
+	cairo_set_line_cap(cr, CAIRO_LINE_CAP_BUTT);
+	if (pic) {
+		cairo_surface_destroy(pic);
+	}
+}
+
 /* ---- what lies over the desk, a sprite at a time ----------------
  *
  * The compositor used to repaint everything drawn over the baked desk --
@@ -30776,6 +31445,8 @@ void desk_draw_gadgets(cairo_t *cr, int w, int h, time_t now, double drawer_open
 uint64_t desk_overlay_key(int which, time_t now, int unread)
 {
 	switch (which) {
+	case DESK_OVL_MAT:
+		return mat_key();
 	case DESK_OVL_CLOCK:
 		return desk_clock_key(now);
 	case DESK_OVL_POST:
@@ -30802,6 +31473,9 @@ void desk_draw_overlay(cairo_t *cr, int which, int w, int h, time_t now, int unr
 {
 	struct room_xf xf;
 	switch (which) {
+	case DESK_OVL_MAT:
+		mat_paint(cr, w, h);
+		break;
 	case DESK_OVL_CLOCK:
 		if (room_xform(w, h, 0.0, &xf)) {
 			desk_gadget_face(cr, &xf, DESK_GADGET_CLOCK, now);
@@ -30857,6 +31531,19 @@ void desk_draw_desktop(cairo_t *cr, int w, int h, time_t now, bool with_demo_win
 {
 	desk_light_desk(w, h);
 	desk_draw_room(cr, w, h, drawer_open);
+	/* the mat lies on the boards, under everything that stands or lies on
+	 * it (the compositor lays it as its own sprite, DESK_OVL_MAT) */
+	{
+		int ox0 = 0, oy0 = 0, ox1 = 0, oy1 = 0;
+		double clip0 = 0.0, clip1 = 0.0;
+		cairo_save(cr);
+		if (desk_desk_place(w, h, 0.0, &ox0, &oy0, &clip0)
+			&& desk_desk_place(w, h, drawer_open, &ox1, &oy1, &clip1)) {
+			cairo_translate(cr, ox1 - ox0, oy1 - oy0);
+		}
+		desk_draw_overlay(cr, DESK_OVL_MAT, w, h, now, 0);
+		cairo_restore(cr);
+	}
 	desk_draw_gadgets(cr, w, h, now, drawer_open);
 	desk_draw_console_idle(cr, w, h, drawer_open);
 	desk_draw_post_idle(cr, w, h, drawer_open, 2);

@@ -219,6 +219,9 @@ struct shell_conf {
 	double bounce;              /* how much the camera goes past and settles,
 	                             * and the head bobs walking: 1 as made, 0 none */
 	bool clock_12h;
+	char desk_mat[32];          /* the mat on the desk: none, a preset, #rrggbb or photo */
+	char desk_mat_photo[512];   /* the picture for photo */
+	double desk_mat_size;       /* desk_mat_size: 0 .. 1 */
 	char language[16];          /* "auto", "en", "ja", "zh", ... */
 	bool drawer_closes;         /* the drawer goes back after something is used */
 	bool take_sheet;            /* ALL APPS: the sheet is carried down for the window */
@@ -254,6 +257,8 @@ struct shell_conf {
 	long mtime_ns;
 	off_t size;
 };
+
+static bool mat_apply(const struct shell_conf *c);
 
 /* One thing in the drawer: a program, kept there; the screwdriver (Shell
  * Settings); or a sheet folded away into it, which is there only while it is. */
@@ -10178,6 +10183,12 @@ static void terminal_open(void)
  *   sound = off | quiet | normal          the desk's sounds
  *   letter_sound = yes | no               a letter arriving in the post box
  *                                         is heard
+ *   desk_mat = none | green | navy | burgundy | charcoal | cream | #rrggbb | photo
+ *                                         a mat on the desk under the windows
+ *                                         (none)
+ *   desk_mat_photo = /path/to/picture     the picture, for desk_mat = photo
+ *   desk_mat_size = small | medium | large | full, or 0% to 100%
+ *                                         how much of the desk it covers (medium)
  *   camera_bounce = normal | low | off    how far the camera goes past where
  *                                         it is looking and settles back, and
  *                                         how the head bobs walking up to the
@@ -10276,6 +10287,9 @@ static void shell_conf_defaults(struct shell_conf *c)
 	c->motion = 1.0;
 	c->bounce = 1.0;
 	c->clock_12h = false;
+	snprintf(c->desk_mat, sizeof c->desk_mat, "none");
+	c->desk_mat_photo[0] = '\0';
+	c->desk_mat_size = DESK_MAT_MEDIUM;
 	snprintf(c->language, sizeof c->language, "auto");
 	c->drawer_closes = true;
 	c->take_sheet = true;
@@ -10337,6 +10351,27 @@ static bool conf_other(struct shell_conf *c, const char *path, const char *key, 
 			c->scale = c->scale < 0.5 ? 0.5 : (c->scale > 4.0 ? 4.0 : c->scale);
 		} else {
 			wlr_log(WLR_ERROR, "%s: scale is auto or a number, not \"%s\"", path, val);
+		}
+		return true;
+	}
+	if (!strcmp(key, "desk_mat")) {
+		struct desk_mat probe = { 0 };
+		if (!strcasecmp(val, "none") || !strcasecmp(val, "photo") || desk_mat_preset(val, &probe)) {
+			snprintf(c->desk_mat, sizeof c->desk_mat, "%s", val);
+		} else {
+			wlr_log(WLR_ERROR, "%s: desk_mat is none, green, navy, burgundy, charcoal, cream, "
+				"#rrggbb or photo, not \"%s\"", path, val);
+		}
+		return true;
+	}
+	if (!strcmp(key, "desk_mat_photo")) {
+		snprintf(c->desk_mat_photo, sizeof c->desk_mat_photo, "%s", val);
+		return true;
+	}
+	if (!strcmp(key, "desk_mat_size")) {
+		if (!desk_mat_size_parse(val, &c->desk_mat_size)) {
+			wlr_log(WLR_ERROR, "%s: desk_mat_size is small, medium, large, full or a percentage, "
+				"not \"%s\"", path, val);
 		}
 		return true;
 	}
@@ -10805,6 +10840,7 @@ static void shell_conf_poll(struct desk_server *server)
 	if (first) {
 		motion_set(motion_of(c));
 		desk_set_clock_12h(c->clock_12h);
+		mat_apply(c);
 		/* before the first look at what is installed */
 		desk_lang_set(lang);
 		desk_apps_set_language(strcmp(c->language, "auto") ? desk_lang_code(lang) : "");
@@ -10989,11 +11025,29 @@ static void windows_keep_off_tray(struct desk_server *server);
 static double ui_scale_for(struct desk_server *server, struct wlr_output *out);
 static void overlay_update(struct desk_server *server, bool force);
 
+/* The mat shell.conf asks for. True when that is not what lies on the desk. */
+static bool mat_apply(const struct shell_conf *c)
+{
+	struct desk_mat m = { .size = c->desk_mat_size };
+	if (!strcasecmp(c->desk_mat, "photo") && c->desk_mat_photo[0]) {
+		desk_mat_preset("charcoal", &m);   /* the cloth until the picture is read */
+		m.kind = DESK_MAT_PHOTO;
+		snprintf(m.photo, sizeof m.photo, "%s", c->desk_mat_photo);
+	} else if (!desk_mat_preset(c->desk_mat, &m)) {
+		m.kind = DESK_MAT_NONE;
+		if (!strcasecmp(c->desk_mat, "photo")) {
+			wlr_log(WLR_ERROR, "desk_mat is photo, but desk_mat_photo names no picture");
+		}
+	}
+	return desk_set_mat(&m);
+}
+
 static void shell_apply_all(struct desk_server *server)
 {
 	motion_set(motion_of(&server->conf));
 	g_bounce = server->conf.bounce;
 	desk_set_clock_12h(server->conf.clock_12h);
+	mat_apply(&server->conf);
 	overlay_update(server, true);
 	/* a new size for things: the room is traced again for it, as for a
 	 * new screen */
@@ -14380,6 +14434,10 @@ static void overlay_update(struct desk_server *server, bool force)
 		}
 		server->ovl[i].key = key;
 		sprite_draw(server, i, now, unread);
+		if (i == DESK_OVL_MAT && server->ovl[i].node) {
+			/* under the rest, however late its picture was first made */
+			wlr_scene_node_lower_to_bottom(&server->ovl[i].node->node);
+		}
 	}
 	overlay_place(server);
 }

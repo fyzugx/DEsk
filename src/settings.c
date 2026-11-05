@@ -204,6 +204,13 @@ static const char *const BOUNCE_WORDS[] = { "Normal", "Low", "None", NULL };
 static const char *const BOUNCE_VALS[] = { "normal", "low", "off" };
 static const char *const CLOCK_WORDS[] = { "24-hour", "12-hour", NULL };
 static const char *const CLOCK_VALS[] = { "24h", "12h" };
+/* the mat on the desk (shell.conf desk_mat, desk_mat_size) */
+static const char *const MAT_WORDS[] = { "None", "Green", "Navy", "Burgundy", "Charcoal", "Cream",
+	"Photo", NULL };
+static const char *const MAT_VALS[] = { "none", "green", "navy", "burgundy", "charcoal", "cream",
+	"photo" };
+static const char *const MATSZ_WORDS[] = { "Small", "Medium", "Large", "Full", NULL };
+static const char *const MATSZ_VALS[] = { "small", "medium", "large", "full" };
 static const char *const SOUND_WORDS[] = { "Off", "Quiet", "Normal", NULL };
 static const char *const SOUND_VALS[] = { "off", "quiet", "normal" };
 /* each language in its own words, as a language is always offered */
@@ -336,6 +343,11 @@ static const struct setting SETTINGS[] = {
 		LANG_WORDS, LANG_VALS, 0, NULL },
 	{ S_CHOICE, "clock", "Clock", "The clock on the desk, and the times on letters.",
 		CLOCK_WORDS, CLOCK_VALS, 0, NULL },
+	{ S_CHOICE, "desk_mat", "Desk mat",
+		"A mat on the desk under the windows. Photo lays the picture named by desk_mat_photo "
+		"in shell.conf.", MAT_WORDS, MAT_VALS, 0, NULL },
+	{ S_CHOICE, "desk_mat_size", "Size of the desk mat", "How much of the desk it covers.",
+		MATSZ_WORDS, MATSZ_VALS, 1, NULL },
 	{ S_CHECK, "lights_at_login", "Bring the lamp up slowly at login",
 		"The room starts dark and the lamp comes up as it is made; the clock counts how far. "
 		"Off, it is lit at once.", NULL, NULL, 1, NULL },
@@ -1034,6 +1046,10 @@ static bool conf_write(const char *path, const char *key, const char *value)
 			"#   motion = brisk | normal | gentle   how long things that move take\n"
 			"#   camera_bounce = normal | low | off the view swinging past and settling\n"
 			"#   clock = 24h | 12h\n"
+			"#   desk_mat = none | green | navy | burgundy | charcoal | cream | #rrggbb | photo\n"
+			"#                                      a mat on the desk, under the windows\n"
+			"#   desk_mat_photo = /path/to/picture  the picture, for desk_mat = photo\n"
+			"#   desk_mat_size = small | medium | large | full, or a percentage\n"
 			"#   language = auto | en | ja | zh | ko | es | fr | de\n"
 			"#                                      the desk's words; auto: the locale's\n"
 			"#   lights_at_login = yes | no         the room starts dark, the lamp comes up\n"

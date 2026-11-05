@@ -517,6 +517,35 @@ static const char *const WORDS[][DESK_LANG_COUNT] = {
 		"Movimiento",
 		"Mouvement",
 		"Bewegung" },
+	{ "Desk mat", "デスクマット", "桌垫", "데스크 매트", "Tapete del escritorio",
+		"Sous-main", "Schreibunterlage" },
+	{ "A mat on the desk under the windows. Photo lays the picture named by desk_mat_photo "
+		"in shell.conf.",
+		"ウィンドウの下に敷くデスクマットです。「写真」は shell.conf の desk_mat_photo で"
+		"指定した画像を敷きます。",
+		"铺在窗口下面的桌垫。选“照片”会铺上 shell.conf 中 desk_mat_photo 指定的图片。",
+		"창 아래 책상에 까는 매트입니다. ‘사진’은 shell.conf의 desk_mat_photo에 적은 "
+		"그림을 깝니다.",
+		"Un tapete sobre el escritorio, bajo las ventanas. «Foto» pone la imagen que indica "
+		"desk_mat_photo en shell.conf.",
+		"Un sous-main posé sur le bureau, sous les fenêtres. « Photo » étale l'image que "
+		"désigne desk_mat_photo dans shell.conf.",
+		"Eine Unterlage auf dem Schreibtisch, unter den Fenstern. „Foto“ legt das Bild aus, "
+		"das desk_mat_photo in der shell.conf nennt." },
+	{ "Size of the desk mat", "デスクマットの大きさ", "桌垫大小", "데스크 매트 크기",
+		"Tamaño del tapete", "Taille du sous-main", "Größe der Unterlage" },
+	{ "How much of the desk it covers.", "机の上でどれだけを覆うか。", "覆盖桌面的多少。",
+		"책상을 얼마나 덮을지.", "Cuánto del escritorio cubre.", "Quelle part du bureau il couvre.",
+		"Wie viel vom Schreibtisch sie bedeckt." },
+	{ "Small", "小", "小", "작게", "Pequeño", "Petit", "Klein" },
+	{ "Large", "大", "大", "크게", "Grande", "Grand", "Groß" },
+	{ "Full", "いっぱい", "铺满", "가득", "Completo", "Plein", "Voll" },
+	{ "Photo", "写真", "照片", "사진", "Foto", "Photo", "Foto" },
+	{ "Green", "緑", "绿色", "초록", "Verde", "Vert", "Grün" },
+	{ "Navy", "紺", "藏青", "남색", "Azul marino", "Marine", "Marineblau" },
+	{ "Burgundy", "ワイン", "酒红", "자주", "Burdeos", "Bordeaux", "Burgund" },
+	{ "Charcoal", "チャコール", "炭灰", "숯색", "Carbón", "Anthracite", "Anthrazit" },
+	{ "Cream", "クリーム", "米色", "크림", "Crema", "Crème", "Creme" },
 	{ "Camera bounce",
 		"カメラの揺れ",
 		"镜头晃动",
