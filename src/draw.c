@@ -12113,7 +12113,7 @@ static double drawer_item_height(const struct desk_drawer_item *it)
 	if (it->look >= 0 && it->look < DESK_DOCK_COUNT) {
 		return TOOL_HEIGHT[it->look];
 	}
-	return it->look == DESK_LOOK_PACKET ? 0.12 : it->look == DESK_LOOK_MAT ? 0.20 : 0.03;
+	return it->look == DESK_LOOK_PACKET ? 0.12 : it->look == DESK_LOOK_MAT ? (it->mat_out ? 0.12 : 0.95) : 0.03;
 }
 
 static void mat_roll_rgb(float rgb[3]);
@@ -12470,8 +12470,22 @@ static void drawer_lay(cairo_t *cr, struct room_render *rr, const struct desk_dr
 		drawer_shadow(cr, img, x - ax, y - ay, iw, ih, dx * 0.25, dy * 0.25, 0.50,
 			fmax(1.3, 0.025 * ppu), ks);
 	}
-	drawer_shadow(cr, img, x - ax, y - ay, iw, ih, dx, dy, lifted ? 0.30 : 0.34,
+	drawer_shadow(cr, img, x - ax, y - ay, iw, ih, dx, dy,
+		lifted ? 0.30 : hgt > 0.5 ? 0.55 : 0.34,
 		fmax(2.0, (0.04 + hgt * 0.30) * ppu), ks);
+	/* The map case runs back under the desk's front edge, which stands over it: the
+	 * edge's shadow falls on it, as dark as the back of the drawer under it and gone
+	 * most of the way out, so it goes into the dark rather than being cut off by it. */
+	double felt[4] = { 0 };
+	bool tuck = it->look == DESK_LOOK_MAT && drawer_felt_rect(rr, felt);
+	double lip = felt[1], lu, lv;
+	/* where the desk's edge hides the felt: the shadow starts there, not at the felt's back */
+	if (tuck && room_project(&rr->cam, v3(0.0, DRAWER_FELT_Y, RM_ZN - RM_DR_PULL + 0.60), &lu, &lv)) {
+		lip = lv * rr->h;
+	}
+	if (tuck) {
+		cairo_push_group(cr);
+	}
 	cairo_save(cr);
 	cairo_translate(cr, x - ax, y - ay - up);
 	cairo_scale(cr, 1.0 / ks, 1.0 / ks);
@@ -12484,6 +12498,20 @@ static void drawer_lay(cairo_t *cr, struct room_render *rr, const struct desk_dr
 		cairo_mask_surface(cr, img, 0, 0);
 	}
 	cairo_restore(cr);
+	if (tuck) {
+		cairo_pattern_t *sh = cairo_pattern_create_linear(0.0, lip, 0.0, lip + (felt[1] + felt[3] - lip) * 0.80);
+		cairo_pattern_add_color_stop_rgba(sh, 0.0, 0.03, 0.04, 0.025, 1.0);
+		cairo_pattern_add_color_stop_rgba(sh, 0.40, 0.03, 0.04, 0.025, 0.95);
+		cairo_pattern_add_color_stop_rgba(sh, 0.70, 0.03, 0.04, 0.025, 0.50);
+		cairo_pattern_add_color_stop_rgba(sh, 1.0, 0.03, 0.04, 0.025, 0.0);
+		cairo_set_operator(cr, CAIRO_OPERATOR_ATOP);
+		cairo_set_source(cr, sh);
+		cairo_paint(cr);
+		cairo_pattern_destroy(sh);
+		cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+		cairo_pop_group_to_source(cr);
+		cairo_paint(cr);
+	}
 	cairo_surface_destroy(img);
 	if (lifted && it->name[0]) {
 		/* chalked on the felt, the way a tailor marks cloth */
