@@ -10970,6 +10970,7 @@ static void windows_keep_off_tray(struct desk_server *server);
 
 static double ui_scale_for(struct desk_server *server, struct wlr_output *out);
 static void overlay_update(struct desk_server *server, bool force);
+static void side_desks_paint(struct desk_server *server, bool force);
 
 /* The mat shell.conf asks for. True when that is not what lies on the desk. */
 static bool mat_apply(const struct shell_conf *c)
@@ -10995,6 +10996,9 @@ static void shell_apply_all(struct desk_server *server)
 	desk_set_clock_12h(server->conf.clock_12h);
 	mat_apply(&server->conf);
 	overlay_update(server, true);
+	/* and the mat on the other screens: they repaint only for what changed, which a
+	 * new mat, size or span is (desk_mat_key) */
+	side_desks_paint(server, false);
 	/* a new size for things: the room is traced again for it, as for a
 	 * new screen */
 	struct wlr_output *out = first_output(server);
