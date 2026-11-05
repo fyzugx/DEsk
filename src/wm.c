@@ -12588,8 +12588,11 @@ static void side_desks_paint(struct desk_server *server, bool force)
 	int level = (int)desk_gfx_level();
 	bool drew = false;
 	/* the screens a stretched mat lies across, all that are on, together; the
-	 * desk's at 0,0, as the side desks have it */
+	 * desk's at 0,0, as the side desks have it. Along the screens it may go
+	 * as far as they do, but across it keeps to the band they all have, or it
+	 * would run off the shorter ones (cy0, cy1) */
 	int ux0 = 0, uy0 = 0, ux1 = dw, uy1 = dh;
+	int cy0 = 0, cy1 = dh;
 	struct desk_output *u;
 	wl_list_for_each(u, &server->outputs, link) {
 		struct wlr_box ub = { 0 };
@@ -12601,9 +12604,16 @@ static void side_desks_paint(struct desk_server *server, bool force)
 			uy0 = ub.y < uy0 ? ub.y : uy0;
 			ux1 = ub.x + ub.width > ux1 ? ub.x + ub.width : ux1;
 			uy1 = ub.y + ub.height > uy1 ? ub.y + ub.height : uy1;
+			cy0 = ub.y > cy0 ? ub.y : cy0;
+			cy1 = ub.y + ub.height < cy1 ? ub.y + ub.height : cy1;
 		}
 	}
-	if (desk_set_mat_screens(ux0, uy0, ux1 - ux0, uy1 - uy0)) {
+	if (cy1 - cy0 < dh / 3) {
+		/* screens that hardly share a height (one above another): the lot */
+		cy0 = uy0;
+		cy1 = uy1;
+	}
+	if (desk_set_mat_screens(ux0, cy0, ux1 - ux0, cy1 - cy0)) {
 		/* the desk's own screen's part of it is drawn again by the overlay
 		 * tick, which sees the key change */
 		force = true;
