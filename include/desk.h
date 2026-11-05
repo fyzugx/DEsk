@@ -1052,8 +1052,8 @@ enum desk_mat_kind {
 	DESK_MAT_COLOR,    /* rgb, with felt over it */
 	DESK_MAT_PHOTO,    /* a picture, cut to fill it */
 };
-/* How big: 0, the smallest, to 1, nearly all of the desk the windows lie
- * on. The words are four places on that. */
+/* How big: 0, the least, to 1, all the open desk. The words are four places
+ * on that, and the sizes between them are in points (draw.c mat_rect). */
 #define DESK_MAT_SMALL 0.15
 #define DESK_MAT_MEDIUM 0.50
 #define DESK_MAT_LARGE 0.80
