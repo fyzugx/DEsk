@@ -30725,6 +30725,9 @@ static bool g_mat_busy;                 /* the thread reading it is running */
 #define MAT_PIC_MAX 2400
 #define MAT_FILE_MAX (64L << 20)
 #define MAT_PIC_PIXELS (48L << 20)
+/* A PNG is read in the compositor only up to this many pixels (16 MB once
+ * decoded); a larger one goes to the converter, a process of its own. */
+#define MAT_PNG_DIRECT (4L << 20)
 
 static cairo_surface_t *mat_pic_shrunk(cairo_surface_t *s)
 {
@@ -30754,19 +30757,26 @@ static cairo_surface_t *mat_pic_shrunk(cairo_surface_t *s)
 	return d;
 }
 
-/* A PNG whose first 24 bytes are head, read through fn, once its header has
- * been looked at: cairo allocates for the whole picture the moment it starts. */
-static cairo_surface_t *mat_png_decode(const unsigned char head[24], cairo_read_func_t fn,
-	void *closure)
+/* The pixels a PNG says it has in its first 24 bytes, head: 0 if it is not one. */
+static unsigned long mat_png_pixels(const unsigned char head[24])
 {
 	if (memcmp(head, "\x89PNG\r\n\x1a\n", 8)) {
-		return NULL;
+		return 0;
 	}
 	unsigned long pw = (unsigned long)head[16] << 24 | (unsigned long)head[17] << 16
 		| (unsigned long)head[18] << 8 | head[19];
 	unsigned long ph = (unsigned long)head[20] << 24 | (unsigned long)head[21] << 16
 		| (unsigned long)head[22] << 8 | head[23];
-	if (pw == 0 || ph == 0 || pw > 65535 || ph > 65535 || pw * ph > MAT_PIC_PIXELS) {
+	return pw > 65535 || ph > 65535 ? 0 : pw * ph;
+}
+
+/* A PNG whose first 24 bytes are head, read through fn, if it has no more than
+ * max pixels: cairo allocates for the whole picture the moment it starts. */
+static cairo_surface_t *mat_png_decode(const unsigned char head[24], long max,
+	cairo_read_func_t fn, void *closure)
+{
+	unsigned long px = mat_png_pixels(head);
+	if (px == 0 || px > (unsigned long)max) {
 		return NULL;
 	}
 	cairo_surface_t *s = cairo_image_surface_create_from_png_stream(fn, closure);
@@ -30805,9 +30815,10 @@ static cairo_status_t mat_mem_read(void *closure, unsigned char *data, unsigned 
 	return CAIRO_STATUS_SUCCESS;
 }
 
-/* A PNG file. Opened without waiting, since a named pipe would never end,
- * and read from that one descriptor, so what was checked is what is read. */
-static cairo_surface_t *mat_png_file(const char *path)
+/* A PNG file, if it is small enough to read here (else *big says it is for the
+ * converter). Opened without waiting, since a named pipe would never end, and
+ * read from that one descriptor, so what was checked is what is read. */
+static cairo_surface_t *mat_png_file(const char *path, bool *big)
 {
 	int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
 	if (fd < 0) {
@@ -30818,7 +30829,9 @@ static cairo_surface_t *mat_png_file(const char *path)
 	cairo_surface_t *s = NULL;
 	if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 24
 		&& st.st_size <= MAT_FILE_MAX && pread(fd, head, sizeof head, 0) == (ssize_t)sizeof head) {
-		s = mat_png_decode(head, mat_fd_read, &fd);
+		unsigned long px = mat_png_pixels(head);
+		*big = px > MAT_PNG_DIRECT && px <= MAT_PIC_PIXELS;
+		s = mat_png_decode(head, MAT_PNG_DIRECT, mat_fd_read, &fd);
 	}
 	close(fd);
 	return s;
@@ -30874,8 +30887,9 @@ static unsigned char *mat_run(char *const argv[], size_t *len)
 	return buf;
 }
 
-/* The photo at path (absolute): a PNG as it is. Anything else is made into
- * one by gdk-pixbuf's thumbnailer, which only decodes pictures, or else by
+/* The photo at path (absolute): a small PNG as it is. Anything else, a large
+ * PNG too, is made into a PNG of the size wanted by gdk-pixbuf's thumbnailer,
+ * which only decodes pictures, or else by
  * ImageMagick, which goes by what is inside a file and runs what that asks
  * for, so it is given only a name it knows and told the decoder to use. */
 static cairo_surface_t *mat_pic_read(const char *path)
@@ -30886,12 +30900,16 @@ static cairo_surface_t *mat_pic_read(const char *path)
 		return NULL;
 	}
 	if (!strcasecmp(dot, ".png")) {
-		return mat_png_file(path);
+		bool big = false;
+		cairo_surface_t *png = mat_png_file(path, &big);
+		if (png || !big) {
+			return png;
+		}
 	}
 	if (stat(path, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size > MAT_FILE_MAX) {
 		return NULL;
 	}
-	static const char *const CODERS[][2] = { { ".jpg", "jpeg" }, { ".jpeg", "jpeg" },
+	static const char *const CODERS[][2] = { { ".png", "png" }, { ".jpg", "jpeg" }, { ".jpeg", "jpeg" },
 		{ ".webp", "webp" }, { ".gif", "gif" }, { ".bmp", "bmp" }, { ".tif", "tiff" },
 		{ ".tiff", "tiff" } };
 	const char *coder = NULL;
@@ -30923,7 +30941,8 @@ static cairo_surface_t *mat_pic_read(const char *path)
 		return NULL;
 	}
 	struct mat_mem m = { png, n, 0 };
-	cairo_surface_t *s = n > 24 ? mat_png_decode(png, mat_mem_read, &m) : NULL;
+	cairo_surface_t *s = n > 24 ? mat_png_decode(png, (long)MAT_PIC_MAX * MAT_PIC_MAX,
+		mat_mem_read, &m) : NULL;
 	free(png);
 	return s;
 }
@@ -31014,20 +31033,39 @@ static uint64_t mat_key(void)
 }
 
 /* Where the mat lies (x, y, w, h): centred, near the front edge, and never up
- * to the console, clock and post box. */
+ * to the console, clock and post box. Its size is in points, as the windows'
+ * are, so a larger screen shows more desk, not a larger mat: the sizes are
+ * a few places on the way from the least (0) to all the open desk (1), and
+ * it is never more than that. */
+#define MAT_OPEN_W 0.92   /* the open desk, as a share of the screen */
+#define MAT_OPEN_H 0.82
 static void mat_rect(int w, int h, double size, double r[4])
 {
+	static const double AT[] = { 0.0, DESK_MAT_SMALL, DESK_MAT_MEDIUM, DESK_MAT_LARGE };
+	static const double PW[] = { 480.0, 600.0, 900.0, 1160.0 };   /* points across, and */
+	static const double PH[] = { 320.0, 380.0, 530.0, 650.0 };    /* deep */
 	size = isfinite(size) ? clampf(size, 0.0, 1.0) : DESK_MAT_MEDIUM;
-	r[2] = w * (0.34 + 0.58 * size);
-	r[3] = h * (0.36 + 0.46 * size);
+	double k = desk_px_per_pt(w), ow = w * MAT_OPEN_W, oh = h * MAT_OPEN_H, mw, mh;
+	if (size >= AT[3]) {
+		double t = (size - AT[3]) / (1.0 - AT[3]);
+		mw = PW[3] * k + (ow - PW[3] * k) * t;
+		mh = PH[3] * k + (oh - PH[3] * k) * t;
+	} else {
+		int i = size < AT[1] ? 0 : size < AT[2] ? 1 : 2;
+		double t = (size - AT[i]) / (AT[i + 1] - AT[i]);
+		mw = (PW[i] + (PW[i + 1] - PW[i]) * t) * k;
+		mh = (PH[i] + (PH[i + 1] - PH[i]) * t) * k;
+	}
+	r[2] = fmin(mw, ow);
+	r[3] = fmin(mh, oh);
 	r[0] = (w - r[2]) * 0.5;
 	r[1] = h * 0.96 - r[3];
 }
 
 /* The mat's lift off the boards, in pixels: a thick felt blotter. */
-static double mat_lift(int w, int h)
+static double mat_lift(int w)
 {
-	return fmax(2.0, 0.0045 * fmin(w, h));
+	return fmax(2.0, 4.0 * desk_px_per_pt(w));
 }
 
 /* it and the shadow it throws, or false when there is no mat */
@@ -31040,7 +31078,7 @@ static bool mat_box(int w, int h, double box[4])
 	if (kind == DESK_MAT_NONE) {
 		return false;
 	}
-	double r[4], pad = 0.035 * fmin(w, h);
+	double r[4], pad = 32.0 * desk_px_per_pt(w);
 	mat_rect(w, h, size, r);
 	box[0] = floor(r[0] - pad);
 	box[1] = floor(r[1] - pad);
@@ -31179,10 +31217,10 @@ static void mat_paint(cairo_t *cr, int w, int h)
 	if (m.kind == DESK_MAT_NONE) {
 		return;
 	}
-	double r[4], u = fmin(w, h);
+	double r[4], k = desk_px_per_pt(w);
 	mat_rect(w, h, m.size, r);
-	double x = r[0], y = r[1], mw = r[2], mh = r[3], rad = 0.014 * u;
-	double lift = mat_lift(w, h);
+	double x = r[0], y = r[1], mw = r[2], mh = r[3], rad = 12.0 * k;
+	double lift = mat_lift(w);
 
 	/* Its shadow, as the windows' are: each edge leans away from the lamp by what
 	 * a mat this thick throws there. Hard where it touches, soft beyond. */
@@ -31259,7 +31297,7 @@ static void mat_paint(cairo_t *cr, int w, int h)
 	cairo_pattern_add_color_stop_rgba(edge, 1.0, 0.0, 0.0, 0.0, 0.45);
 	desk_rounded_path(cr, x + 0.5, y + 0.5, mw - 1.0, mh - 1.0, rad);
 	cairo_set_source(cr, edge);
-	cairo_set_line_width(cr, fmax(1.0, 0.0022 * u));
+	cairo_set_line_width(cr, fmax(1.0, 2.0 * k));
 	cairo_stroke(cr);
 	cairo_pattern_destroy(edge);
 
@@ -31267,8 +31305,8 @@ static void mat_paint(cairo_t *cr, int w, int h)
 	 * shadow of the thread on the cloth under it */
 	double thread[3];
 	mat_thread(m.rgb, thread);
-	double in = 0.015 * u, sw = fmax(1.4, 0.0030 * u);
-	double dash[2] = { 0.0105 * u, 0.0068 * u };
+	double in = 14.0 * k, sw = fmax(1.4, 2.7 * k);
+	double dash[2] = { 9.5 * k, 6.0 * k };
 	desk_rounded_path(cr, x + in, y + in, mw - 2 * in, mh - 2 * in, fmax(rad * 0.55, 2.0));
 	cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
 	cairo_set_dash(cr, dash, 2, 0.0);
