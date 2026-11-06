@@ -123,6 +123,13 @@ report() {
 	# where screen sharing cannot start) -- and what shares the screen
 	grep -h -m 1 'put together on the processor' "$state/session.log" 2>/dev/null \
 		|| echo "screen: put together on the GPU (or no session.log to say)"
+	# what the clock reads its battery from, once a second (a laptop's is
+	# its firmware's to answer for) -- and a once-a-second round long
+	# enough to see, the screen standing still while it was done
+	for b in /sys/class/power_supply/*; do
+		[ -r "$b/type" ] && echo "power supply: ${b##*/}, $(cat "$b/type")"
+	done
+	grep -h 'once-a-second round took' "$state/session.log" 2>/dev/null | head -n 3
 	pkg_version xdg-desktop-portal-wlr
 
 	section "Settings"

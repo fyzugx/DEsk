@@ -221,6 +221,15 @@ static const char *const LANG_VALS[] = { "auto", "en", "ja", "zh", "ko", "es", "
 static const char *const SCREEN_OFF_WORDS[] = { "Never", "1 min", "2 min", "5 min", "10 min",
 	"15 min", "30 min", NULL };
 static const char *const SCREEN_OFF_VALS[] = { "never", "1", "2", "5", "10", "15", "30" };
+/* The drawer's terminal (app.terminal): the programs filed as a terminal,
+ * each by its name, found where the desk finds programs (terminals_find);
+ * Automatic, the first of DEsk's usual ones that is installed (apps.c);
+ * and one shell.conf names that is none of these, as it is written
+ * (val_choice). */
+#define TERMINALS_MAX 24
+static const char *TERMINAL_WORDS[TERMINALS_MAX + 3] = { "Automatic", NULL };
+static const char *TERMINAL_VALS[TERMINALS_MAX + 3] = { "auto", NULL };
+static int g_terminals = 1;
 static const char *const SPEED_WORDS[] = { "Slow", "Normal", "Fast", NULL };
 static const char *const SPEED_VALS[] = { "slow", "normal", "fast" };
 /* the layouts most keyboards are; shell.conf takes any that xkb knows */
@@ -370,6 +379,9 @@ static const struct setting SETTINGS[] = {
 		"Off, only its buttons click.", NULL, NULL, 1, NULL },
 	{ S_CHECK, "natural_scrolling", "Natural scrolling on the touchpad",
 		"The page goes the way the fingers do, as on a phone.", NULL, NULL, 0, NULL },
+	{ S_CHECK, "natural_scrolling_mouse", "Natural scrolling on the mouse",
+		"The wheel the other way round: the page goes the way the wheel turns.", NULL, NULL,
+		0, NULL },
 	{ S_CHOICE, "pointer_speed", "Pointer speed", "For mice and touchpads alike.",
 		SPEED_WORDS, SPEED_VALS, 1, NULL },
 	{ S_CHECK, "left_handed", "Buttons for the left hand",
@@ -441,6 +453,10 @@ static const struct setting SETTINGS[] = {
 		"Which program opens web links, mail and each kind of file. The drawer's web "
 		"browser, file manager and text editor are the ones chosen here.", NULL, NULL, 0,
 		&O_DEFAULTS },
+	{ S_CHOICE, "app.terminal", "Terminal",
+		"The terminal the drawer and Super+Enter open, which Default programs has no say "
+		"in. Automatic is the first of the usual ones that is installed.",
+		TERMINAL_WORDS, TERMINAL_VALS, 0, NULL },
 	{ S_SECTION, NULL, "THIS COMPUTER", NULL, NULL, NULL, 0, NULL },
 	{ S_ACTION, NULL, "Your name and picture",
 		"As the sign on the front door shows them, and the login screen.", NULL, NULL, 0,
@@ -660,6 +676,15 @@ static int val_choice(const struct setting *st, const char *v)
 	}
 	if (!strcmp(st->key, "clock") && !strcmp(v, "24")) {
 		return 0;
+	}
+	if (!strcmp(st->key, "app.terminal") && v[0] && g_terminals < TERMINALS_MAX + 2) {
+		/* a terminal not filed as one, or not installed: as it is written */
+		char *own = strdup(v);
+		if (own) {
+			TERMINAL_WORDS[g_terminals] = TERMINAL_VALS[g_terminals] = own;
+			TERMINAL_WORDS[g_terminals + 1] = NULL;
+			return g_terminals++;
+		}
 	}
 	return -1;
 }
@@ -1052,6 +1077,7 @@ static bool conf_write(const char *path, const char *key, const char *value)
 			"#   lock_on_screen_off = yes | no      and the desk locks when it does\n"
 			"#   tap_to_click = yes | no            a touchpad: a tap is a click\n"
 			"#   natural_scrolling = yes | no       a touchpad: the page follows the fingers\n"
+			"#   natural_scrolling_mouse = yes | no a mouse: the page follows the wheel\n"
 			"#   pointer_speed = slow | normal | fast\n"
 			"#   left_handed = yes | no             the buttons the other way round\n"
 			"#   keyboard_layout = system | <xkb>   us, jp, de...; system: the machine's\n"
@@ -1064,7 +1090,9 @@ static bool conf_write(const char *path, const char *key, const char *value)
 			"#   fold_into_drawer = yes | no        folded windows go into the drawer\n"
 			"#   take_sheet = yes | no              ALL APPS carries the sheet down\n"
 			"#   sound = off | quiet | normal       the sounds of things on the desk\n"
-			"#   letter_sound = yes | no            a letter heard arriving\n", out);
+			"#   letter_sound = yes | no            a letter heard arriving\n"
+			"#   app.terminal = auto | <desktop id> the drawer's terminal, and Super+Enter's\n",
+			out);
 	}
 	if (!done) {
 		fprintf(out, "%s = %s\n", key, value);
@@ -1250,6 +1278,101 @@ static bool icon_name_in(const char *dir, const char *bin, char *out, size_t n)
 	}
 	closedir(d);
 	return found;
+}
+
+/* In one applications folder: the programs filed as a terminal, by their
+ * names, that none of the n_before folders before it has an entry for --
+ * an entry there, a terminal or not, is the one that stands. */
+static void terminals_in(const char *dir, char before[][1024], int n_before)
+{
+	DIR *d = opendir(dir);
+	if (!d) {
+		return;
+	}
+	struct dirent *de;
+	while ((de = readdir(d))) {
+		size_t l = strlen(de->d_name);
+		if (l < 9 || strcmp(de->d_name + l - 8, ".desktop")) {
+			continue;
+		}
+		bool had = false;
+		for (int i = 0; i < n_before && !had; i++) {
+			char other[1300];
+			int ol = snprintf(other, sizeof other, "%s/%s", before[i], de->d_name);
+			had = ol > 0 && (size_t)ol < sizeof other && access(other, F_OK) == 0;
+		}
+		if (had) {
+			continue;
+		}
+		char path[1024];
+		int pl = snprintf(path, sizeof path, "%s/%s", dir, de->d_name);
+		FILE *f = pl > 0 && (size_t)pl < sizeof path ? fopen(path, "re") : NULL;
+		if (!f) {
+			continue;
+		}
+		char line[1024], name[128] = "";
+		bool entry = false, terminal = false, hidden = false;
+		while (fgets(line, sizeof line, f)) {
+			line[strcspn(line, "\r\n")] = '\0';
+			if (line[0] == '[') {
+				if (entry) {
+					break;   /* the actions' sections are other things */
+				}
+				entry = !strcmp(line, "[Desktop Entry]");
+			} else if (entry && !strncmp(line, "Name=", 5) && !name[0]) {
+				if (snprintf(name, sizeof name, "%s", line + 5) >= (int)sizeof name) {
+					name[0] = '\0';
+				}
+			} else if (entry && !strncmp(line, "Categories=", 11)) {
+				terminal = strstr(line + 11, "TerminalEmulator") != NULL;
+			} else if (entry && (!strcmp(line, "NoDisplay=true")
+					|| !strcmp(line, "Hidden=true"))) {
+				hidden = true;
+			}
+		}
+		fclose(f);
+		if (!terminal || hidden || !name[0] || g_terminals > TERMINALS_MAX) {
+			continue;
+		}
+		char *id = strdup(de->d_name), *word = strdup(name);
+		if (!id || !word) {
+			free(id);
+			free(word);
+			continue;
+		}
+		/* in the order of their names */
+		int at = g_terminals;
+		while (at > 1 && strcasecmp(TERMINAL_WORDS[at - 1], word) > 0) {
+			TERMINAL_WORDS[at] = TERMINAL_WORDS[at - 1];
+			TERMINAL_VALS[at] = TERMINAL_VALS[at - 1];
+			at--;
+		}
+		TERMINAL_WORDS[at] = word;
+		TERMINAL_VALS[at] = id;
+		TERMINAL_WORDS[++g_terminals] = NULL;
+	}
+	closedir(d);
+}
+
+/* The terminals to choose from, where the desk finds programs: the user's
+ * own folder first, so that an entry there stands for one of the same
+ * name in the system's. */
+static void terminals_find(void)
+{
+	static char before[16][1024];
+	int n_before = 0;
+	char dirs[2048];
+	const char *home = getenv("HOME");
+	const char *dh = getenv("XDG_DATA_HOME");
+	const char *dd = getenv("XDG_DATA_DIRS");
+	snprintf(dirs, sizeof dirs, "%s%s:%s", dh && *dh ? dh : home ? home : "",
+		dh && *dh ? "" : "/.local/share", dd && *dd ? dd : "/usr/local/share:/usr/share");
+	for (char *dir = strtok(dirs, ":"); dir && n_before < 16; dir = strtok(NULL, ":")) {
+		char *apps = before[n_before];
+		if (snprintf(apps, sizeof before[0], "%s/applications", dir) < (int)sizeof before[0]) {
+			terminals_in(apps, before, n_before++);
+		}
+	}
 }
 
 /* The icon of the program bin, as its desktop entry names it, found where
@@ -3048,6 +3171,7 @@ int main(int argc, char **argv)
 	if (slow && atof(slow) > 0.0) {
 		g_slow = atof(slow);
 	}
+	terminals_find();
 	struct app a;
 	memset(&a, 0, sizeof a);
 	a.w = a.own_w = FORM_W;

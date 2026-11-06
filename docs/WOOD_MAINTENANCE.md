@@ -47,3 +47,14 @@ that is repainted on changes rather than on every animation frame.
 The feature was exercised in a modified DEsk v0.1.2 development session;
 the upstream-rebased version of this change still needs a fresh build and
 regression test before merging.
+
+## DEsk 0.1.5 port (November 2026)
+
+This draft PR is rebased logically onto the v0.1.5 source through a merge commit.
+It preserves the original Wood Maintenance v0.1.8 behavior and adapts two upstream
+changes: the new pointer-hold members in `struct desk_server`, and the profiled
+`tick_chore` scheduler in the compositor's periodic callback.
+
+The source patches were checked for exact integration, including the Shell Settings
+controls. A native compile and manual regression test on DEsk 0.1.5 are still
+required before marking this PR ready for review.

@@ -14,7 +14,7 @@ iOS 6 のころのように画面の中の物を本物そっくりに描く考�
 部屋はレイトレースで描かれ、一つの電気スタンドがそのすべてを照らします。
 フラットな懐古スキンではなく、ウォルナットの木目・引き出しのフェルト・紙の繊維・レザーのステッチをピクセル単位で組んでいます。
 
-**v0.1.4 (BETA)** — v0.1.3 に修正（モニターが眠ってもセッションが終わらない、起動の画面がグラフィックカードの横に残るノート PC でも正しい画面に机が出る、など）、GTK 4 のアプリの紙の色、2 つ目の配列のアラビア語などを足した版です。直したこと・中身・分かっている制限は [RELEASE-NOTES.ja.md](RELEASE-NOTES.ja.md) に。
+**v0.1.5 (BETA)** — v0.1.4 の修正版です（ノート PC で 1.5 秒ごとに画面が止まる、2 つ目の画面で畳んだ窓が飛ぶ、表示の道具で消した画面が点かない、全画面のゲームが紙で開く、X11 のアプリ同士のドラッグ、ログイン中に入れたアプリが本棚に出ない、通知の絵文字、など）。直したこと・中身・分かっている制限は [RELEASE-NOTES.ja.md](RELEASE-NOTES.ja.md) に。
 
 discordのサーバーを作りました！是非参加してください。
 リンク： https://discord.gg/bscPSCsram
@@ -55,6 +55,8 @@ sudo sh scripts/install_fedora.sh
 ```
 
 終わったらログアウトして、ログイン画面で **DEsk** を選びます。
+
+**NixOS**：コミュニティが保守する flake が `packaging/nix` にあります。システムへの加え方はその README に。
 
 - 入れるものを見せて、先に聞きます。`--yes` で、すすめる答えのまま進みます。`--no-apps` なら、おすすめのプログラムは入れず DEsk だけにします。
 - 最初のログインで一度だけ部屋を描きます。GPU なら数秒、無ければもう少しかかります。次からはすぐに始まります。
@@ -785,10 +787,11 @@ Debian 13 / Trixie で、ビルドに要るものだけを手で入れるなら:
 ```sh
 sudo apt install gcc libc6-dev meson ninja-build pkg-config python3 \
   libwlroots-0.18-dev libwayland-dev wayland-protocols libxkbcommon-dev \
-  libcairo2-dev libpixman-1-dev libfontconfig-dev libdrm-dev libpam0g-dev libinput-dev \
+  libcairo2-dev libpango1.0-dev libpixman-1-dev libfontconfig-dev libdrm-dev libpam0g-dev \
+  libinput-dev \
   libegl-dev libgles-dev libgbm-dev libsystemd-dev libpulse-dev \
   libxcb1-dev libxcb-icccm4-dev libxcb-ewmh-dev xwayland \
-  fonts-urw-base35 fonts-noto-cjk fonts-klee grim curl
+  fonts-urw-base35 fonts-noto-cjk fonts-klee fonts-noto-color-emoji grim curl
 ```
 
 ### 動作環境 — 最低と推奨
@@ -1086,6 +1089,7 @@ Xfce と MATE の昔ながらの GTK のソフトが中心なのは、メニュ�
 - キーボードの**音量・ミュート・再生のキー**（XF86AudioRaiseVolume・LowerVolume・Mute・
   Play・Pause・Next・Prev）は DEsk が受けます（Wayland ではコンポジタにしか見え
   ないので）。音量は時計とつまみと同じミキサー、再生は時計の MEDIA と同じプレーヤー。
+  ミュート中に音量を上げるとミュートが外れます（下げてもミュートのまま）。
 - アプリが自分の窓を前に出すこと（xdg-activation：メールのリンクからブラウザ、
   二度目の起動で前の窓など）、動画の拡大縮小（viewporter）、フレームの時刻
   （presentation-time）に応えます。
@@ -1095,10 +1099,15 @@ Xfce と MATE の昔ながらの GTK のソフトが中心なのは、メニュ�
   DEsk は、つながっている画面の組ごとに、ツールが決めた配置を
   `~/.config/desk/displays.conf` に覚え、同じ組がそろうと（起動時・抜き差し）
   そのとおりに戻します。机が描かれるのは位置 (0,0) の画面です（ほかの画面は下の
-  「画面が二つ以上のとき」）。
+  「画面が二つ以上のとき」）。ツールで消した画面は、ツールでまた点けられます。
+  そのときツールがほかの画面と重なる位置（多くは 0,0）を言ってきたら、点いている
+  画面の右隣に置きます（消した画面の位置はツールに伝わらないため）。モードを
+  言わなければ、消す前のモードで点けます。
 - 離席（ext-idle-notify・idle-inhibit・wlr-output-power-management）：swayidle や
   wlopm も使えます。動画を再生しているプレーヤーやブラウザ（Wayland のもの）は、窓が
-  見えている間、画面を点けたままにできます。
+  見えている間、画面を点けたままにできます。X11 のアプリ（Spotify・VLC など）と
+  Flatpak のアプリ（ポータル経由）が頼む org.freedesktop.ScreenSaver の Inhibit も
+  受けます（DEsk がその名前を取ります。ほかのスクリーンセーバーが持っていればそちら）。
 - 画面共有：xdg-desktop-portal-wlr は、どの画面を共有するかを slurp などで聞きます
   が、それにはレイヤーシェルが要るので、DEsk では `desk-screen-chooser` が普通の窓
   （zenity。無ければ kdialog・yad）で聞きます。画面が一つなら聞かずにそれを共有
@@ -1106,7 +1115,7 @@ Xfce と MATE の昔ながらの GTK のソフトが中心なのは、メニュ�
   （wlroots 0.18 にその仕組みが無いため）。
 - まだ無いもの：外のロッカーのための ext-session-lock（DEsk には自前の画面ロックが
   あります）、レイヤーシェル（slurp での範囲選択など）、wlr-gamma-control（夜間の色
-  温度）、X11 のアプリのための org.freedesktop.ScreenSaver の Inhibit。
+  温度）。
 
 ## 画面ロック — 玄関の前
 
@@ -1205,6 +1214,9 @@ Shell Settings の「Camera bounce」（カメラの揺れ）で低く、また�
   `screen_off = never` でも避けられます）
 - 動画のプレーヤーやブラウザ（Wayland の idle-inhibit）は、窓が見えている間だけ
   画面を点けたままにできます（畳まれた・引き出しの中・ロック中は数えません）
+- X11 のアプリや Flatpak のアプリは、セッションバスの org.freedesktop.ScreenSaver で
+  頼みます。こちらは窓では見分けられないので、頼んでいる間ずっと点けたまま（ロック中は
+  数えません）。頼んだアプリが解かずに終わっても、バスから去った時点で解けます
 - ext-idle-notify も同じ操作で知らせるので、swayidle も使えます。
   wlr-output-power-management で wlopm も
 - 試すとき：`DESK_IDLE_TEST_S=8` で分の代わりに秒
@@ -1508,12 +1520,14 @@ Retina のような高密度の画面では 2 画素です。**画面が大き�
 - 窓は置けます。机の画面と同じ紙の窓で、角の Fold / Unfold / Discard もそのまま使えます。
 - 新しい窓は**ポインタのある画面**に出ます（X11 のアプリが場所を指定したときはその画面）。
 - Unfold（最大化）はその画面いっぱい、全画面もその画面いっぱいです。
+- その画面で Fold（畳む）と、畳んだ紙は**その画面の手前**に置かれます。クリックで開き、
+  運んで離せば離した所に置けます（引き出しにしまう設定のときは引き出しへ）。
 - 机の画面で引き出しを出したり、本棚・Control Panel・ポストに向き直ったりしても、
-  ほかの画面の窓は動きません。本棚などを見ているあいだも、ほかの画面の窓には手が届き
-  ます。引き出しが出ているあいだに、ほかの画面をクリックすると引き出しが戻ります
+  ほかの画面の窓と畳んだ紙は動きません。本棚などを見ているあいだも、ほかの画面の窓と
+  紙には手が届きます。引き出しが出ているあいだに、ほかの画面をクリックすると引き出しが戻ります
   （机の画面で、引き出しより上をクリックしたときと同じです）。
-- 画面を外したり、表示の道具で消したりすると、そこにあった窓は残った画面の近い所へ
-  移ります。最大化・全画面だった窓は、移った画面に合わせます。
+- 画面を外したり、表示の道具で消したりすると、そこにあった窓は残った画面の近い所へ、
+  畳んだ紙は残った画面の手前へ移ります。最大化・全画面だった窓は、移った画面に合わせます。
 - 机の画面より大きく描くもの（部屋、引き出し、向き直るときのフィルム、本棚に寄るとき）
   は、机の画面の分だけに切って描くので、隣の画面にははみ出しません。
 - タッチパネルのように「どの画面のものか」を名乗る入力機器は、その画面に合わせます。
@@ -1936,9 +1950,9 @@ Wayland に対応していないアプリ — 古いアプリ、多くのゲー�
 - 全画面（F11 など）は、枠と影を外して画面全体を覆います。戻すと元の紙に戻ります。
 - コピー＆ペーストは X と Wayland のあいだでも通ります。選択して中クリックで貼る
   primary selection も同じです。
-- ドラッグ＆ドロップは、Wayland 同士と Wayland → X で動きます。**X → Wayland は
-  動きません**（wlroots 0.18 の Xwayland が対応していません）。その向きにドラッグした
-  直後は、X のアプリで最初の 1 クリックがドラッグの終わりとして消費されます。
+- ドラッグ＆ドロップは、Wayland 同士、X 同士、Wayland → X で動きます。**X → Wayland は
+  動きません**（wlroots 0.18 の Xwayland が対応していません）。その向きのドラッグは、
+  放した所で何も落とさずに終わります。
 - Xwayland が落ちても DEsk は落ちません。次の X11 アプリが接続したときに起動し直します。
   起動途中で落ちたときは作り直します（1 分に 3 回まで）。
 
@@ -2137,6 +2151,7 @@ DEsk のもの）で、その上に描いたフォルダーとメモ帳にフォ
 | **KEYBOARD AND POINTER** | | | |
 | Tap the touchpad to click | `tap_to_click` | yes | タッチパッドのタップでクリック |
 | Natural scrolling on the touchpad | `natural_scrolling` | no | 指を動かした方向にページが動く（タッチパッドだけ） |
+| Natural scrolling on the mouse | `natural_scrolling_mouse` | no | ホイールを回した方向にページが動く（マウスだけ） |
 | Pointer speed | `pointer_speed` | normal | Slow / Normal / Fast（shell.conf には libinput の -1〜1 も書ける） |
 | Buttons for the left hand | `left_handed` | no | 主なボタンを右に |
 | Keyboard layout | `keyboard_layout` | system | このコンピュータの設定（localectl）／英語（US・UK）・日本語・ドイツ語など 15。shell.conf には xkb の配列ならどれでも（`us(intl)` など） |
@@ -2277,7 +2292,9 @@ DEsk は GNOME や KDE のように**一揃いのデスクトップ**として�
 決め方は上から順に:
 
 1. `shell.conf` の `app.terminal` / `app.browser` / `app.files` / `app.editor`
-   （.desktop の id。例 `app.editor = pluma.desktop`）
+   （.desktop の id。例 `app.editor = pluma.desktop`）。端末は Shell Settings の
+   System →「Look and language」の **Terminal** でも選べます（入っている端末が名前で
+   並びます。Automatic＝`auto` は下の順のまま）
 2. freedesktop.org の順の既定アプリの表：`~/.config/desk-mimeapps.list`（DEsk の
    中だけ）、`~/.config/mimeapps.list`（Shell Settings の「Default programs」＝
    xfce4-mime-settings が書くもの）、同じ二つを `$XDG_CONFIG_DIRS`、

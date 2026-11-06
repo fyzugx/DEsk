@@ -88,6 +88,12 @@ void desk_apps_finish(void);
  * locale's). Set before the first scan; after it, rescan. */
 void desk_apps_set_language(const char *code);
 void desk_apps_rescan(void);
+/* Called now and then (it keeps its own time, a look every few seconds):
+ * if a folder of desktop files has changed since the last scan -- a program
+ * installed or taken away -- read them again on a thread of their own and
+ * say in why which folder; true then. The new list lands as a new
+ * generation. */
+bool desk_apps_look(char *why, size_t n);
 void desk_apps_shutdown(void);
 
 /* Borrow the current snapshot. Never NULL once init has been called; before

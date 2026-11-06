@@ -288,47 +288,18 @@ static void network(struct desk_meters *m)
 
 /* ---- the cell ---------------------------------------------------- */
 
+/* the last look at the battery and the thermal zones, taken on a thread of
+ * its own (supply_look) */
+static unsigned supply_last(struct desk_supply *s, double *temp_c);
+
+/* The battery is the clock's reading of it, so the two never disagree. */
 static void battery(struct desk_meters *m)
 {
-	m->have_battery = false;
-	m->battery = 1.0;
-	m->on_mains = true;
-	DIR *d = opendir("/sys/class/power_supply");
-	if (!d) {
-		return;
-	}
-	struct dirent *e;
-	while ((e = readdir(d)) != NULL) {
-		if (e->d_name[0] == '.') {
-			continue;
-		}
-		char p[512], buf[64];
-		snprintf(p, sizeof p, "/sys/class/power_supply/%s/type", e->d_name);
-		if (!read_first_line(p, buf, sizeof buf)) {
-			continue;
-		}
-		if (strncmp(buf, "Battery", 7) == 0) {
-			/* a mouse's or a headset's is not the machine's */
-			snprintf(p, sizeof p, "/sys/class/power_supply/%s/scope", e->d_name);
-			if (read_first_line(p, buf, sizeof buf) && strncmp(buf, "Device", 6) == 0) {
-				continue;
-			}
-			snprintf(p, sizeof p, "/sys/class/power_supply/%s/capacity", e->d_name);
-			double c = read_number(p, -1.0);
-			if (c >= 0.0) {
-				m->have_battery = true;
-				m->battery = c / 100.0;
-			}
-			snprintf(p, sizeof p, "/sys/class/power_supply/%s/status", e->d_name);
-			if (read_first_line(p, buf, sizeof buf)) {
-				m->on_mains = strncmp(buf, "Discharging", 11) != 0;
-			}
-		} else if (strncmp(buf, "Mains", 5) == 0) {
-			snprintf(p, sizeof p, "/sys/class/power_supply/%s/online", e->d_name);
-			m->on_mains = read_number(p, 1.0) > 0.5;
-		}
-	}
-	closedir(d);
+	struct desk_supply s;
+	supply_last(&s, NULL);
+	m->have_battery = s.have_battery;
+	m->battery = s.have_battery ? s.battery : 1.0;
+	m->on_mains = s.on_mains;
 }
 
 /* /sys, or the stand-in for it a test points DESK_SYSFS at */
@@ -604,7 +575,7 @@ void desk_meters_read(struct desk_meters *out)
 	memset(out, 0, sizeof *out);
 	out->cpu = cpu_busy();
 	out->mem = mem_used();
-	out->temp_c = temperature();
+	supply_last(NULL, &out->temp_c);
 	out->load = 0.0;
 	char buf[128];
 	if (read_first_line("/proc/loadavg", buf, sizeof buf)) {
@@ -801,7 +772,8 @@ const char *desk_sys_root(void)
 	return sys_root();
 }
 
-void desk_supply_read(struct desk_supply *out)
+/* A look at it all, as long as the machine takes to answer (supply_look). */
+static void supply_read(struct desk_supply *out)
 {
 	memset(out, 0, sizeof *out);
 	out->batt_w = -1.0;
@@ -943,4 +915,75 @@ void desk_supply_read(struct desk_supply *out)
 		out->draw_w = gpu;
 		snprintf(out->source, sizeof out->source, "GPU");
 	}
+}
+
+/* ---- the firmware's answers, on a thread of their own ------------
+ *
+ * A laptop's battery is the firmware's to answer for: the kernel asks the
+ * embedded controller, and keeps the answer for a second (the ACPI
+ * battery's cache_time) -- so a look every second is a question to the
+ * controller every time. Some controllers take half a second to answer.
+ * On the compositor's thread that was the whole screen standing still for
+ * half a second in every second and a half, the pointer with it (Riennas's
+ * HP). So the look is taken on a thread of its own, as the mixer is asked,
+ * and the reading is whatever the last look found: a second behind the
+ * battery at worst, which nobody watching a battery can tell. Most
+ * laptops' thermal zones are the same firmware's, and are read with it.
+ * Until the first look is back there is no battery, and the machine is on
+ * the mains. */
+static pthread_mutex_t g_look_lock = PTHREAD_MUTEX_INITIALIZER;
+static bool g_looking;
+static double g_look_at = -1.0;   /* when the last look was started */
+static unsigned g_looks;          /* looks back so far */
+static struct desk_supply g_look_supply = {
+	.on_mains = true, .batt_w = -1.0, .hours = -1.0, .draw_w = -1.0,
+};
+static double g_look_temp = -1000.0;
+
+static void *supply_look(void *arg)
+{
+	(void)arg;
+	struct desk_supply s;
+	supply_read(&s);
+	double t = temperature();
+	pthread_mutex_lock(&g_look_lock);
+	g_look_supply = s;
+	g_look_temp = t;
+	g_looks++;
+	g_looking = false;
+	pthread_mutex_unlock(&g_look_lock);
+	return NULL;
+}
+
+static unsigned supply_last(struct desk_supply *s, double *temp_c)
+{
+	double at = now_sec();
+	pthread_mutex_lock(&g_look_lock);
+	if (s) {
+		*s = g_look_supply;
+	}
+	if (temp_c) {
+		*temp_c = g_look_temp;
+	}
+	unsigned n = g_looks;
+	bool start = !g_looking && (g_look_at < 0.0 || at - g_look_at >= 0.95);
+	if (start) {
+		g_looking = true;
+		g_look_at = at;
+	}
+	pthread_mutex_unlock(&g_look_lock);
+	pthread_t th;
+	if (start && pthread_create(&th, NULL, supply_look, NULL) == 0) {
+		pthread_detach(th);
+	} else if (start) {
+		pthread_mutex_lock(&g_look_lock);
+		g_looking = false;
+		pthread_mutex_unlock(&g_look_lock);
+	}
+	return n;
+}
+
+unsigned desk_supply_latest(struct desk_supply *out)
+{
+	return supply_last(out, NULL);
 }

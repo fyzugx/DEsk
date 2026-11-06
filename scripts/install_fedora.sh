@@ -204,6 +204,7 @@ build|Wayland protocols|wayland-protocols-devel
 build|keyboards (xkbcommon)|libxkbcommon-devel
 build|touchpads and mice (libinput)|libinput-devel
 build|drawing (cairo)|cairo-devel
+build|letters: emoji and every script (Pango)|pango-devel
 build|drawing: pixels (pixman)|pixman-devel
 build|typefaces (fontconfig)|fontconfig-devel
 build|the display (libdrm)|libdrm-devel

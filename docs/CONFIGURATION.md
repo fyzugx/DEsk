@@ -76,7 +76,8 @@ or power-saving setting, or `screen_off = never`, avoids it.
 | Key | Values | Default | |
 | --- | --- | --- | --- |
 | `tap_to_click` | `yes`, `no` | `yes` | |
-| `natural_scrolling` | `yes`, `no` | `no` | |
+| `natural_scrolling` | `yes`, `no` | `no` | A touchpad. |
+| `natural_scrolling_mouse` | `yes`, `no` | `no` | A mouse's wheel. |
 | `pointer_speed` | `slow`, `normal`, `fast`, or `-1` to `1` | `normal` | |
 | `left_handed` | `yes`, `no` | `no` | |
 | `keyboard_layout` | `system`, or an xkb layout (`us`, `jp`, `de`, `us(intl)`) | `system` | |
@@ -98,7 +99,7 @@ or power-saving setting, or `screen_off = never`, avoids it.
 | `drawer_closes` | `yes`, `no` | `yes` | Close the drawer after something in it is used. |
 | `fold_into_drawer` | `yes`, `no` | `no` | Folded windows go into the drawer instead of lying on the desk. |
 | `take_sheet` | `yes`, `no` | `yes` | A program taken from ALL APPS has its sheet carried down first. |
-| `app.terminal`, `app.browser`, `app.files`, `app.editor` | a desktop file id (`xfce4-terminal.desktop`) | | The standard programs, instead of DEsk's choice. |
+| `app.terminal`, `app.browser`, `app.files`, `app.editor` | a desktop file id (`xfce4-terminal.desktop`) | | The standard programs, instead of DEsk's choice. Shell Settings sets `app.terminal` (System, Look and language: Terminal); the others follow Default programs. |
 
 ### Sound
 
