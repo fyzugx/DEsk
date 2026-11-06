@@ -517,6 +517,50 @@ static const char *const WORDS[][DESK_LANG_COUNT] = {
 		"Movimiento",
 		"Mouvement",
 		"Bewegung" },
+	{ "Desk mat", "デスクマット", "桌垫", "데스크 매트", "Tapete del escritorio",
+		"Sous-main", "Schreibunterlage" },
+	{ "A mat on the desk under the windows. Photo lays the picture named by desk_mat_photo "
+		"in shell.conf.",
+		"ウィンドウの下に敷くデスクマットです。「写真」は shell.conf の desk_mat_photo で"
+		"指定した画像を敷きます。",
+		"铺在窗口下面的桌垫。选“照片”会铺上 shell.conf 中 desk_mat_photo 指定的图片。",
+		"창 아래 책상에 까는 매트입니다. ‘사진’은 shell.conf의 desk_mat_photo에 적은 "
+		"그림을 깝니다.",
+		"Un tapete sobre el escritorio, bajo las ventanas. «Foto» pone la imagen que indica "
+		"desk_mat_photo en shell.conf.",
+		"Un sous-main posé sur le bureau, sous les fenêtres. « Photo » étale l'image que "
+		"désigne desk_mat_photo dans shell.conf.",
+		"Eine Unterlage auf dem Schreibtisch, unter den Fenstern. „Foto“ legt das Bild aus, "
+		"das desk_mat_photo in der shell.conf nennt." },
+	{ "Stretch the mat across every screen",
+		"マットをすべての画面にまたがらせる", "让桌垫横跨所有屏幕", "매트를 모든 화면에 펼치기",
+		"Extender el tapete por todas las pantallas", "Étendre le sous-main sur tous les écrans",
+		"Unterlage über alle Bildschirme ziehen" },
+	{ "One mat over all the screens, its photo running on from one to the next. Off, the mat "
+		"is on the desk's own screen.",
+		"一枚のマットをすべての画面にかけ、写真が画面から画面へ続きます。オフのときは机の画面だけです。",
+		"一张桌垫铺在所有屏幕上，照片从一个屏幕延续到下一个。关闭时只在桌子所在的屏幕上。",
+		"매트 한 장을 모든 화면에 걸쳐 깔고 사진이 화면에서 화면으로 이어집니다. 끄면 책상 화면에만 깔립니다.",
+		"Un solo tapete sobre todas las pantallas, con su foto continuando de una a otra. "
+		"Apagado, el tapete queda en la pantalla del escritorio.",
+		"Un seul sous-main sur tous les écrans, sa photo se prolongeant de l'un à l'autre. "
+		"Désactivé, il reste sur l'écran du bureau.",
+		"Eine Unterlage über alle Bildschirme, ihr Foto läuft von einem zum nächsten weiter. "
+		"Aus, liegt sie nur auf dem Bildschirm des Schreibtischs." },
+	{ "Size of the desk mat", "デスクマットの大きさ", "桌垫大小", "데스크 매트 크기",
+		"Tamaño del tapete", "Taille du sous-main", "Größe der Unterlage" },
+	{ "How much of the desk it covers.", "机の上でどれだけを覆うか。", "覆盖桌面的多少。",
+		"책상을 얼마나 덮을지.", "Cuánto del escritorio cubre.", "Quelle part du bureau il couvre.",
+		"Wie viel vom Schreibtisch sie bedeckt." },
+	{ "Small", "小", "小", "작게", "Pequeño", "Petit", "Klein" },
+	{ "Large", "大", "大", "크게", "Grande", "Grand", "Groß" },
+	{ "Full", "いっぱい", "铺满", "가득", "Completo", "Plein", "Voll" },
+	{ "Photo", "写真", "照片", "사진", "Foto", "Photo", "Foto" },
+	{ "Green", "緑", "绿色", "초록", "Verde", "Vert", "Grün" },
+	{ "Navy", "紺", "藏青", "남색", "Azul marino", "Marine", "Marineblau" },
+	{ "Burgundy", "ワイン", "酒红", "자주", "Burdeos", "Bordeaux", "Burgund" },
+	{ "Charcoal", "チャコール", "炭灰", "숯색", "Carbón", "Anthracite", "Anthrazit" },
+	{ "Cream", "クリーム", "米色", "크림", "Crema", "Crème", "Creme" },
 	{ "Camera bounce",
 		"カメラの揺れ",
 		"镜头晃动",

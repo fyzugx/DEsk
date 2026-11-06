@@ -1026,7 +1026,8 @@ void desk_lock_settle(void);
  * The shaded ones go under the shade the open drawer throws over the desk
  * -- a flat colour, desk_desk_shade's, over everything above clip. */
 enum desk_ovl {
-	DESK_OVL_CLOCK = 0,   /* the tray clock: a new face every minute */
+	DESK_OVL_MAT = 0,     /* the desk mat, under everything else on the desk */
+	DESK_OVL_CLOCK,       /* the tray clock: a new face every minute */
 	DESK_OVL_ALLAPPS,     /* the plate on the screen's edge */
 	DESK_OVL_CONSOLE,     /* the console's nameplate and lenses */
 	DESK_OVL_POST,        /* the post box's plate, and a letter */
@@ -1040,6 +1041,59 @@ bool desk_overlay_shaded(int which);
 /* Where on the screen an overlay element can draw, when that is known
  * without drawing it (x, y, w, h); false to have it found by looking. */
 bool desk_overlay_box(int which, int w, int h, double box[4]);
+
+/* ---- the desk mat ----------------------------------------------------
+ *
+ * A mat laid on the desk under the windows: a plain colour with the grain
+ * of felt, or a photograph the user has chosen. It is drawn over the baked
+ * room, not traced into it, so changing it costs a redraw and never a new
+ * room (shell.conf desk_mat, desk_mat_photo, desk_mat_size).
+ *
+ * New looks go in as a new kind, or as another preset in the table in
+ * draw.c; nothing else has to know. */
+enum desk_mat_kind {
+	DESK_MAT_NONE = 0,
+	DESK_MAT_COLOR,    /* rgb, with felt over it */
+	DESK_MAT_PHOTO,    /* a picture, cut to fill it */
+};
+/* How big: 0, the least, to 1, all the open desk. The words are four places
+ * on that, and the sizes between them are in points (draw.c mat_rect). */
+#define DESK_MAT_SMALL 0.15
+#define DESK_MAT_MEDIUM 0.50
+#define DESK_MAT_LARGE 0.80
+#define DESK_MAT_FULL 1.00
+struct desk_mat {
+	int kind;          /* desk_mat_kind */
+	float rgb[3];      /* DESK_MAT_COLOR; the cloth a photo that cannot be read falls back to */
+	char photo[512];   /* DESK_MAT_PHOTO: the picture's path */
+	double size;       /* 0 .. 1, as above */
+	bool span;         /* one mat across every screen, not one on the desk's own */
+};
+/* The preset named (green, navy, burgundy, charcoal, cream) or a colour
+ * written #rrggbb, as a mat: false for anything else. Leaves size alone. */
+bool desk_mat_preset(const char *name, struct desk_mat *out);
+/* A size as shell.conf writes it: small, medium, large, full, or a
+ * percentage (60%). False for anything else. */
+bool desk_mat_size_parse(const char *s, double *out);
+/* What the mat is now. True when that is a change, in which case what lies
+ * over the desk wants drawing again. A photo is read on a thread of its
+ * own (a PNG; or by gdk-pixbuf's thumbnailer or ImageMagick, which are not
+ * linked, only run; a file that is not a picture of a sane size is not
+ * read at all); until it lands the mat is
+ * the plain cloth, and desk_overlay_key changes when it does. */
+bool desk_set_mat(const struct desk_mat *m);
+/* The screens the mat may stretch across (desk_mat.span): the box all of
+ * them fill together, in the coordinates the desk's screen has its top
+ * left at 0,0 in (the layout's). True when that has changed. Without
+ * span, or with one screen, the mat is the desk's own screen's. */
+bool desk_set_mat_screens(int x, int y, int w, int h);
+/* What the mat puts on the desk beside the desk's own screen: the part of
+ * it that falls on x, y, w, h (laid out as for desk_draw_side_desk, which
+ * calls this before it dims the desk away from the lamp). Nothing with no
+ * span, or no mat. */
+void desk_draw_mat_side(cairo_t *cr, int x, int y, int w, int h, int desk_w, int desk_h);
+/* A key that changes when what desk_draw_mat_side draws would. */
+uint64_t desk_mat_key(void);
 
 /* ---- the clock on the back of the desk ----------------------------
  *
