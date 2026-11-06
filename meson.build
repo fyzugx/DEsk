@@ -368,3 +368,5 @@ install_data('session/desk.png',
 test('words', import('python').find_installation(),
   args: [files('scripts/check-words.py'), meson.project_source_root()],
 )
+test('window-drag', executable('window-drag-test', 'tests/window-drag.c',
+  include_directories: include_directories('include'), dependencies: wlroots, c_args: '-UNDEBUG'))

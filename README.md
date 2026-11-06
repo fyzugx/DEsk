@@ -496,6 +496,8 @@ GPU's to trace.
 | Key | |
 | --- | --- |
 | `Super+Enter` | terminal |
+| `Super` + left-drag | move the window under the pointer |
+| `Super` + right-drag | resize the window from the edge nearest the pointer |
 | `Super+Q` / `Alt+F4` | close the focused window |
 | `Super+M` | fold / unfold the focused sheet |
 | `Super+D` | open / close the drawer |
@@ -510,6 +512,9 @@ GPU's to trace.
 | `Print` / `Alt+Print` | screenshot of the screen / of the window in front |
 | `Super+L` | lock the screen: the front door; type the password, Enter (or click the key) |
 | `Super+Esc` / `Alt+Esc` | log out (asking the windows to close first) |
+
+These drags apply to ordinary, unmaximized windows; restore a maximized or
+fullscreen window first. Programs holding the pointer keep control of it.
 
 ## Reporting a problem
 
