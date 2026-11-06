@@ -38,6 +38,7 @@
 #include "panel.h"
 #include "power.h"
 #include "sound.h"
+#include "window-drag.h"
 /* What a letter is, bus or no bus: without one the box is simply empty. */
 #include "post.h"
 #include "ime.h"
@@ -762,6 +763,7 @@ struct desk_server {
 	char kb_applied[160];               /* the layouts the keyboards have now */
 	enum desk_cursor_mode cursor_mode;
 	struct desk_toplevel *grabbed;
+	uint32_t super_grab_button;
 	double grab_x, grab_y;
 	struct wlr_box grab_geobox;
 	uint32_t resize_edges;
@@ -20789,6 +20791,20 @@ static void server_cursor_button(struct wl_listener *listener, void *data)
 	} else if (server->buttons_down) {
 		server->buttons_down--;
 	}
+	if (server->super_grab_button && event->state == WL_POINTER_BUTTON_STATE_RELEASED
+		&& event->button == server->super_grab_button) {
+		server->super_grab_button = 0;
+		if (server->cursor_mode == DESK_CUR_RESIZE && server->grabbed && server->grabbed->sizing) {
+			server->grabbed->sz_released = real_sec();
+			server_schedule_frames(server);
+		}
+		reset_cursor_mode(server);
+		if (!locked(server)) {
+			wlr_cursor_set_xcursor(server->cursor, server->cursor_mgr, "default");
+			process_cursor_motion(server, event->time_msec);
+		}
+		return;
+	}
 	/* a click on the dark screen -- or on it lit again, before it can have
 	 * been seen -- wakes it and lands on nothing, nor does its letting go */
 	if (!input_seen(server, "a click")) {
@@ -20815,6 +20831,10 @@ static void server_cursor_button(struct wl_listener *listener, void *data)
 		return;
 	}
 	if (event->state == WL_POINTER_BUTTON_STATE_RELEASED) {
+		if (server->super_grab_button) {
+			wlr_seat_pointer_notify_button(server->seat, event->time_msec, event->button, event->state);
+			return;
+		}
 		if (event->button == BTN_LEFT && paper_release(server)) {
 			return;
 		}
@@ -20850,6 +20870,10 @@ static void server_cursor_button(struct wl_listener *listener, void *data)
 			held_gone(&server->held_gone, NULL);
 			process_cursor_motion(server, event->time_msec);
 		}
+		return;
+	}
+	if (server->super_grab_button) {
+		wlr_seat_pointer_notify_button(server->seat, event->time_msec, event->button, event->state);
 		return;
 	}
 
@@ -21155,6 +21179,25 @@ static void paper_press(struct desk_server *server, struct wlr_pointer_button_ev
 	double sx, sy;
 	struct wlr_surface *surface = NULL;
 	struct desk_toplevel *toplevel = view_at(server, server->cursor->x, server->cursor->y, &surface, &sx, &sy);
+	struct wlr_keyboard *keyboard = wlr_seat_get_keyboard(server->seat);
+	if (toplevel && toplevel->scene_tree && !toplevel->unmanaged && !toplevel->ime_popup
+		&& !toplevel->fullscreen && !toplevel->maximized && toplevel->sheet.phase == SHEET_IDLE
+		&& !server->active_constraint && !server->seat->drag && server->buttons_down == 1
+		&& server->cursor_mode == DESK_CUR_PASSTHROUGH && keyboard
+		&& (wlr_keyboard_get_modifiers(keyboard) & WLR_MODIFIER_LOGO)
+		&& (event->button == BTN_LEFT || event->button == BTN_RIGHT)) {
+		uint32_t edges = desk_drag_resize_edges(
+			server->cursor->x - toplevel->scene_tree->node.x,
+			server->cursor->y - toplevel->scene_tree->node.y,
+			toplevel->outer_w, toplevel->outer_h);
+		begin_interactive(toplevel, event->button == BTN_LEFT ? DESK_CUR_MOVE : DESK_CUR_RESIZE, edges);
+		server->super_grab_button = event->button;
+		focus_toplevel(toplevel);
+		if (event->button == BTN_LEFT) {
+			wlr_cursor_set_xcursor(server->cursor, server->cursor_mgr, "fleur");
+		}
+		return;
+	}
 	if (toplevel && view_framed(toplevel)) {
 		focus_toplevel(toplevel);
 		double lx = server->cursor->x - toplevel->scene_tree->node.x;
