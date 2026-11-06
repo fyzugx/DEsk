@@ -50,6 +50,7 @@ One `key = value` per line; `#` starts a comment.
 | `scale` | `auto`, a number from `0.5` to `4`, or a percentage (`125%`) | `auto` | Pixels per point. `auto` follows the screen's density. |
 | `graphics` | `ultra`, `high`, `medium`, `low`, `2d` | `high` (`2d` when the screen is drawn on the CPU) | How much is drawn. |
 | `motion` | `brisk`, `normal`, `gentle` | `normal` | How long movements take. |
+| `binder_ink` | `faded`, `normal`, `dark`, `darkest`, or `0` to `1` | `normal` | How dark the names on the bookcase's binders are typed. |
 | `camera_bounce` | `normal`, `low`, `off` | `normal` | How far the view swings past and settles. |
 | `language` | `auto`, `en`, `ja`, `zh`, `ko`, `es`, `fr`, `de` | `auto` | The desk's words and the names programs are filed under. `auto` follows `LC_ALL`, `LC_MESSAGES`, `LANG`. |
 | `clock` | `24h`, `12h` | `24h` | |
