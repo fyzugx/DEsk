@@ -7,42 +7,6 @@ self:
 }:
 let
   cfg = config.programs.desk;
-  settingType = lib.types.attrsOf settingValueType;
-  settingValueType =
-    lib.types.oneOf [
-      lib.types.bool
-      lib.types.int
-      lib.types.float
-      (lib.types.strMatching "[^\n\r]*")
-      settingType
-    ]
-    // {
-      description = "single-line string, boolean, number or attribute set of DEsk settings";
-    };
-  flattenSettings =
-    prefix: attrs:
-    lib.concatLists (
-      lib.mapAttrsToList (
-        name: value:
-        let
-          key = if prefix == "" then name else "${prefix}.${name}";
-        in
-        if builtins.isAttrs value then
-          flattenSettings key value
-        else
-          [
-            {
-              name = key;
-              inherit value;
-            }
-          ]
-      ) attrs
-    );
-  settingsEntries = flattenSettings "" cfg.settings;
-  flatSettings = builtins.listToAttrs settingsEntries;
-  settingLine =
-    key: value:
-    "${key} = ${if builtins.isBool value then (if value then "yes" else "no") else toString value}";
   portalConfig =
     (pkgs.formats.ini { }).generate "other-wlr-portals.conf"
       config.xdg.portal.wlr.settings;
@@ -71,46 +35,9 @@ in
       default = true;
       description = "Install the upstream-style desktop applications, control tools and session helpers. Does not replace the host's networking configuration.";
     };
-    settings = lib.mkOption {
-      type = settingType;
-      default = { };
-      example = lib.literalExpression ''
-        {
-          graphics = "high";
-          natural_scrolling = true;
-          scale = 1.25;
-          app.terminal = "org.kde.konsole.desktop";
-          app.files = "org.kde.dolphin.desktop";
-        }
-      '';
-      description = ''
-        Machine defaults written to /etc/xdg/desk/shell.conf. Nested attributes
-        become dotted keys; values may be single-line strings, booleans or
-        numbers. Personal desk/shell.conf settings take precedence. An empty
-        attribute set leaves the file unmanaged. This file is public: do not
-        put passwords or other secrets here.
-      '';
-    };
   };
 
   config = lib.mkIf cfg.enable {
-    assertions = [
-      {
-        assertion = lib.all (
-          key:
-          builtins.match "[A-Za-z0-9_.-]+" key != null
-          && builtins.stringLength (settingLine key flatSettings.${key}) < 500
-        ) (builtins.attrNames flatSettings);
-        message = "programs.desk.settings keys must use letters, digits, _, . or - and each line must be shorter than 500 characters.";
-      }
-      {
-        assertion = builtins.length settingsEntries == builtins.length (builtins.attrNames flatSettings);
-        message = "programs.desk.settings must not define the same dotted key in both nested and flat form.";
-      }
-    ];
-    environment.etc."xdg/desk/shell.conf" = lib.mkIf (flatSettings != { }) {
-      text = lib.generators.toKeyValue { mkKeyValue = settingLine; } flatSettings;
-    };
     environment.systemPackages = [
       cfg.package
     ]

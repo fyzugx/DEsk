@@ -2,7 +2,7 @@
 
 This flake builds DEsk from the same repository checkout, with a private
 wlroots 0.18.3. The build adjusts paths and session integration for NixOS;
-the module can generate machine-wide defaults for DEsk's existing settings.
+it does not add DEsk settings or application-selection features.
 
 It was contributed by picarica (PR #48) and is maintained by the community:
 DEsk's own releases are not built or tested with Nix. If it stops building,
@@ -71,20 +71,18 @@ app.files = org.kde.dolphin.desktop
 app.editor = org.kde.kate.desktop
 ```
 
-To declare machine defaults with the NixOS module:
+There is no `programs.desk.settings` option. Machine defaults can still be
+declared with NixOS's existing file-management option, without modifying DEsk:
 
 ```nix
-programs.desk.settings = {
-  app.terminal = "org.kde.konsole.desktop";
-  natural_scrolling = true;
-};
+environment.etc."xdg/desk/shell.conf".text = ''
+  app.terminal = org.kde.konsole.desktop
+  natural_scrolling = yes
+'';
 ```
 
-This writes `/etc/xdg/desk/shell.conf`. Nested attributes become dotted keys,
-and booleans become `yes` or `no`; values can also be single-line strings or
-numbers. An empty settings set leaves the file unmanaged. Personal settings
-take precedence, and applications named by desktop ID must be installed
-separately. Settings in the Nix store are public, so do not put secrets in them.
+Personal settings take precedence; this does not overwrite the user's file.
+Settings in the Nix store are public, so do not put secrets in them.
 
 ## Validation
 
