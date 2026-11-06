@@ -198,8 +198,8 @@ stdenv.mkDerivation (finalAttrs: {
     grep -Fx "TryExec=$out/bin/desk-session" "$out/share/wayland-sessions/desk.desktop"
     for entry in "$out"/share/applications/*.desktop; do
       # DEsk is a new desktop identifier, not in the validator's registry.
-      # Keep OnlyShowIn=DEsk in the real entry so other desktops hide it.
-      sed '/^OnlyShowIn=DEsk;$/d' "$entry" > "$TMPDIR/$(basename "$entry")"
+      # Keep DEsk visibility rules in the installed entries.
+      sed '/^OnlyShowIn=DEsk;$/d; /^NotShowIn=DEsk;$/d' "$entry" > "$TMPDIR/$(basename "$entry")"
       desktop-file-validate "$TMPDIR/$(basename "$entry")"
     done
     test -f "$out/share/desk/xdg-desktop-portal-wlr/DEsk"
