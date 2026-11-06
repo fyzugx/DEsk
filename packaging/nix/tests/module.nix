@@ -40,6 +40,12 @@ let
       })
     ];
   };
+  sshAgent = evaluated.extendModules {
+    modules = [ { programs.ssh.startAgent = true; } ];
+  };
+  gcrAgent = evaluated.extendModules {
+    modules = [ ({ lib, ... }: { services.gnome.gcr-ssh-agent.enable = lib.mkDefault true; }) ];
+  };
 in
 assert builtins.all (entry: entry.assertion) cfg.assertions;
 assert builtins.isString cfg.system.build.toplevel.drvPath;
@@ -58,6 +64,13 @@ assert cfg.services.udisks2.enable;
 assert cfg.services.upower.enable;
 assert cfg.services.tumbler.enable;
 assert cfg.services.gnome.gnome-keyring.enable;
+assert !cfg.services.gnome.gcr-ssh-agent.enable;
+assert builtins.all (entry: entry.assertion) sshAgent.config.assertions;
+assert sshAgent.config.programs.ssh.startAgent;
+assert sshAgent.config.services.gnome.gnome-keyring.enable;
+assert !sshAgent.config.services.gnome.gcr-ssh-agent.enable;
+assert builtins.all (entry: entry.assertion) gcrAgent.config.assertions;
+assert gcrAgent.config.services.gnome.gcr-ssh-agent.enable;
 assert cfg.programs.thunar.enable;
 assert !cfg.networking.networkmanager.enable;
 assert !cfg.hardware.bluetooth.enable;

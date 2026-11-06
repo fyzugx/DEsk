@@ -74,6 +74,8 @@ in
     programs.dconf.enable = lib.mkDefault true;
     programs.xwayland.enable = lib.mkDefault true;
     services.gnome.gnome-keyring.enable = lib.mkDefault true;
+    # Override the keyring-derived option default, but not another desktop's mkDefault.
+    services.gnome.gcr-ssh-agent.enable = lib.mkOverride 1499 false;
     services.dbus.enable = true;
     services.upower.enable = lib.mkDefault true;
     services.udisks2.enable = lib.mkDefault true;
