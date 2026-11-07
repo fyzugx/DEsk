@@ -34,6 +34,7 @@
 #include "apps.h"
 #include "panel.h"
 #include "post.h"
+#include "run.h"
 
 #include <strings.h>
 
@@ -30837,56 +30838,6 @@ static cairo_surface_t *mat_png_file(const char *path, bool *big)
 	return s;
 }
 
-/* What argv prints to stdout, up to MAT_FILE_MAX, and whether it exited 0.
- * Its input and its words go nowhere. Nothing is kept on disk. */
-static unsigned char *mat_run(char *const argv[], size_t *len)
-{
-	int fd[2];
-	if (pipe(fd) != 0) {
-		return NULL;
-	}
-	fcntl(fd[0], F_SETFD, FD_CLOEXEC);
-	fcntl(fd[1], F_SETFD, FD_CLOEXEC);   /* the child has its stdout, the dup of it */
-	posix_spawn_file_actions_t fa;
-	posix_spawn_file_actions_init(&fa);
-	posix_spawn_file_actions_addopen(&fa, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
-	posix_spawn_file_actions_adddup2(&fa, fd[1], STDOUT_FILENO);
-	posix_spawn_file_actions_addopen(&fa, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
-	pid_t pid;
-	int err = posix_spawnp(&pid, argv[0], &fa, NULL, argv, environ);
-	posix_spawn_file_actions_destroy(&fa);
-	close(fd[1]);
-	if (err != 0) {
-		close(fd[0]);
-		return NULL;
-	}
-	unsigned char *buf = malloc(MAT_FILE_MAX);
-	size_t got = 0;
-	ssize_t r = 0;
-	while (buf && got < MAT_FILE_MAX && (r = read(fd[0], buf + got, MAT_FILE_MAX - got)) != 0) {
-		if (r < 0 && errno == EINTR) {
-			continue;
-		}
-		if (r < 0) {
-			break;
-		}
-		got += (size_t)r;
-	}
-	bool whole = r == 0;   /* all of it, not cut short by the limit or an error */
-	close(fd[0]);
-	int status = 0;
-	pid_t w;
-	while ((w = waitpid(pid, &status, 0)) < 0 && errno == EINTR) {
-		;
-	}
-	if (!buf || !whole || w != pid || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-		free(buf);
-		return NULL;
-	}
-	*len = got;
-	return buf;
-}
-
 /* The photo at path (absolute): a small PNG as it is. Anything else, a large
  * PNG too, is made into a PNG of the size wanted by gdk-pixbuf's thumbnailer,
  * which only decodes pictures, or else by
@@ -30916,28 +30867,43 @@ static cairo_surface_t *mat_pic_read(const char *path)
 	for (size_t i = 0; i < sizeof CODERS / sizeof CODERS[0]; i++) {
 		coder = !strcasecmp(dot, CODERS[i][0]) ? CODERS[i][1] : coder;
 	}
-	char size[16], area[16], in[460];
+	char size[16], geom[24], area[16], in[460];
 	snprintf(size, sizeof size, "%d", MAT_PIC_MAX);
+	/* inside the square, and never larger: a bare 2400 is the width only, and a
+	 * tall picture would come back taller than a picture is read */
+	snprintf(geom, sizeof geom, "%dx%d>", MAT_PIC_MAX, MAT_PIC_MAX);
 	snprintf(area, sizeof area, "%ldMP", MAT_PIC_PIXELS >> 20);
 	snprintf(in, sizeof in, "%s:%s[0]", coder ? coder : "", path);
 	char *const pixbuf[] = { "/usr/bin/gdk-pixbuf-thumbnailer", "-s", size, (char *)path,
 		"/dev/stdout", NULL };
 	char *const magick[] = { "/usr/bin/magick", "-limit", "memory", "512MiB", "-limit", "map",
 		"512MiB", "-limit", "disk", "0", "-limit", "area", area, in, "-auto-orient",
-		"-resize", size, "PNG:-", NULL };
+		"-resize", geom, "PNG:-", NULL };
 	bool have_pixbuf = access(pixbuf[0], X_OK) == 0;
 	if (!have_pixbuf && (!coder || access(magick[0], X_OK) != 0)) {
 		return NULL;
 	}
-	/* a minute at most: timeout(1) in front of either */
-	char *argv[24] = { "timeout", "30" };
-	char *const *tool = have_pixbuf ? pixbuf : magick;
-	for (int i = 0; tool[i] && i < 21; i++) {
-		argv[i + 2] = tool[i];
+	/* timeout(1) in front of either, half a minute at most. The thumbnailer has no
+	 * limits of its own (ImageMagick is given its above), so prlimit(1) holds it to a
+	 * gigabyte of heap: a small file can say a picture of a quarter of a gigapixel. */
+	char *argv[24];
+	int ac = 0;
+	argv[ac++] = "timeout";
+	argv[ac++] = "30";
+	if (have_pixbuf && access("/usr/bin/prlimit", X_OK) == 0) {
+		argv[ac++] = "/usr/bin/prlimit";
+		argv[ac++] = "--data=1073741824";
 	}
+	char *const *tool = have_pixbuf ? pixbuf : magick;
+	for (int i = 0; tool[i] && ac < 23; i++) {
+		argv[ac++] = tool[i];
+	}
+	argv[ac] = NULL;
 	size_t n = 0;
-	unsigned char *png = mat_run(argv, &n);
-	if (!png) {
+	bool whole = false;
+	unsigned char *png = desk_run_capture(argv, MAT_FILE_MAX, &n, &whole);
+	if (!png || !whole) {
+		free(png);
 		return NULL;
 	}
 	struct mat_mem m = { png, n, 0 };
@@ -30966,6 +30932,13 @@ static void *mat_pic_thread(void *arg)
 			fprintf(stderr, "desk: mat: cannot read %s\n", want);
 		}
 		pthread_mutex_lock(&g_mat_lock);
+		if (g_mat.kind != DESK_MAT_PHOTO || strcmp(g_mat.photo, want) != 0) {
+			/* not the photo that is wanted any more (it was changed, or put away,
+			 * while this was read): not kept, and the next is looked at */
+			pthread_mutex_unlock(&g_mat_lock);
+			cairo_surface_destroy(s);
+			continue;
+		}
 		if (g_mat_pic) {
 			cairo_surface_destroy(g_mat_pic);
 		}
@@ -30979,8 +30952,15 @@ static void *mat_pic_thread(void *arg)
 /* With g_mat_busy just set. */
 static void mat_pic_start(void)
 {
+	/* a thread of its own blocks every signal, as the others do: they are the main
+	 * thread's to take */
+	sigset_t all, was;
+	sigfillset(&all);
+	pthread_sigmask(SIG_SETMASK, &all, &was);
 	pthread_t th;
-	if (pthread_create(&th, NULL, mat_pic_thread, NULL) == 0) {
+	bool ok = pthread_create(&th, NULL, mat_pic_thread, NULL) == 0;
+	pthread_sigmask(SIG_SETMASK, &was, NULL);
+	if (ok) {
 		pthread_detach(th);
 		return;
 	}
@@ -31068,7 +31048,9 @@ static double mat_lift(int w)
 	return fmax(2.0, 4.0 * desk_px_per_pt(w));
 }
 
-/* it and the shadow it throws, or false when there is no mat */
+/* it and the shadow it throws; with no mat, a box with nothing in it, which is
+ * not to be found by drawing it and looking (a screen's worth of nothing, each
+ * time the room is new) */
 static bool mat_box(int w, int h, double box[4])
 {
 	pthread_mutex_lock(&g_mat_lock);
@@ -31076,7 +31058,8 @@ static bool mat_box(int w, int h, double box[4])
 	double size = g_mat.size;
 	pthread_mutex_unlock(&g_mat_lock);
 	if (kind == DESK_MAT_NONE) {
-		return false;
+		box[0] = box[1] = box[2] = box[3] = 0.0;
+		return true;
 	}
 	double r[4], pad = 32.0 * desk_px_per_pt(w);
 	mat_rect(w, h, size, r);

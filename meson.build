@@ -74,7 +74,7 @@ foreach spec : [
 endforeach
 
 draw_sources = ['src/draw.c', 'src/apps.c', 'src/panel.c', 'src/agenda.c', 'src/fonts.c', 'src/i18n.c',
-  'src/memo.c', 'src/user.c']
+  'src/memo.c', 'src/user.c', 'src/run.c']
 draw_deps = [cairo, fontconfig, math, threads]
 # The room is a distance field marched once per pixel, which is what
 # graphics hardware is for. Without EGL we simply do not build that path

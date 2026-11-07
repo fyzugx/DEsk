@@ -1035,7 +1035,8 @@ void desk_draw_overlay(cairo_t *cr, int which, int w, int h, time_t now, int unr
 bool desk_overlay_on_desk(int which);
 bool desk_overlay_shaded(int which);
 /* Where on the screen an overlay element can draw, when that is known
- * without drawing it (x, y, w, h); false to have it found by looking. */
+ * without drawing it (x, y, w, h); false to have it found by looking. A box
+ * with no width or height is known too: there is nothing to draw. */
 bool desk_overlay_box(int which, int w, int h, double box[4]);
 
 /* ---- the desk mat ----------------------------------------------------

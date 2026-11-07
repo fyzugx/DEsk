@@ -1,16 +1,16 @@
 /* What day it is, and what it is like out at the front door (occasion.h). */
 
-/* pipe2, readlink and posix_spawn's company are glibc's and the BSDs' */
+/* readlink is glibc's and the BSDs' */
 #define _DEFAULT_SOURCE
 #define _GNU_SOURCE
 #include "occasion.h"
+#include "run.h"
 
 #include <errno.h>
 #include <fcntl.h>
 #include <math.h>
 #include <pthread.h>
 #include <signal.h>
-#include <spawn.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -256,47 +256,14 @@ static void wmo(int code, int *wx, double *heavy)
  * not be run or said nothing */
 static bool run_out(char *const argv[], char *out, size_t n)
 {
-	int fd[2];
-	if (pipe2(fd, O_CLOEXEC) < 0) {
+	size_t got;
+	unsigned char *b = desk_run_capture(argv, n - 1, &got, NULL);
+	if (!b) {
 		return false;
 	}
-	posix_spawn_file_actions_t fa;
-	posix_spawn_file_actions_init(&fa);
-	posix_spawn_file_actions_adddup2(&fa, fd[1], 1);
-	posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0);
-	posix_spawn_file_actions_addopen(&fa, 2, "/dev/null", O_WRONLY, 0);
-	/* not the compositor's signal mask: the child's own */
-	posix_spawnattr_t at;
-	posix_spawnattr_init(&at);
-	sigset_t none;
-	sigemptyset(&none);
-	posix_spawnattr_setsigmask(&at, &none);
-	posix_spawnattr_setflags(&at, POSIX_SPAWN_SETSIGMASK);
-	pid_t pid;
-	int err = posix_spawnp(&pid, argv[0], &fa, &at, argv, environ);
-	posix_spawn_file_actions_destroy(&fa);
-	posix_spawnattr_destroy(&at);
-	close(fd[1]);
-	if (err != 0) {
-		close(fd[0]);
-		return false;
-	}
-	size_t got = 0;
-	while (got + 1 < n) {
-		ssize_t k = read(fd[0], out + got, n - 1 - got);
-		if (k > 0) {
-			got += (size_t)k;
-		} else if (k < 0 && errno == EINTR) {
-			continue;
-		} else {
-			break;
-		}
-	}
+	memcpy(out, b, got);
 	out[got] = '\0';
-	close(fd[0]);
-	int st;
-	while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {
-	}
+	free(b);
 	return got > 0;
 }
 
