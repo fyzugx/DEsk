@@ -11976,8 +11976,10 @@ static void mat_toggle(struct desk_server *server)
 	c->desk_mat_out = !c->desk_mat_out;
 	wlr_log(WLR_INFO, "desk mat: %s", c->desk_mat_out ? "unrolled" : "rolled up");
 	shell_conf_put("desk_mat_out", c->desk_mat_out ? "yes" : "no");
+	/* the mat's key moves on by itself when it changes: only it is drawn again,
+	 * not every sprite (the poll of shell.conf does the rest when it sees the file) */
 	mat_apply(c);
-	overlay_update(server, true);
+	overlay_update(server, false);
 	server->drw_dirty = true;
 	server_schedule_frames(server);
 }

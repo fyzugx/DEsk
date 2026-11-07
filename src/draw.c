@@ -12477,7 +12477,8 @@ static void drawer_lay(cairo_t *cr, struct room_render *rr, const struct desk_dr
 	 * edge's shadow falls on it, as dark as the back of the drawer under it and gone
 	 * most of the way out, so it goes into the dark rather than being cut off by it. */
 	double felt[4] = { 0 };
-	bool tuck = it->look == DESK_LOOK_MAT && drawer_felt_rect(rr, felt);
+	/* (not while it is lifted in a hand: it is off the felt, and out from under the edge) */
+	bool tuck = !lifted && it->look == DESK_LOOK_MAT && drawer_felt_rect(rr, felt);
 	double lip = felt[1], lu, lv;
 	/* where the desk's edge hides the felt: the shadow starts there, not at the felt's back */
 	if (tuck && room_project(&rr->cam, v3(0.0, DRAWER_FELT_Y, RM_ZN - RM_DR_PULL + 0.60), &lu, &lv)) {
