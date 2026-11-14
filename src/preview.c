@@ -761,9 +761,39 @@ static int write_lock(const char *path, int w, int h)
 	"[--memo] [--lock] [--boot[=u,u,...]] [--agenda] [--book] [--book-anim[=u,u,...]] " \
 	"[--lang en|ja|zh|ko|es|fr|de] [--binder-anim=N[:u,u,...]]\n"
 
+/* DESK_MAT (a preset, #rrggbb or photo), DESK_MAT_PHOTO and DESK_MAT_SIZE
+ * (small, medium, large), as shell.conf says them, for a picture of a mat. */
+static void preview_mat(void)
+{
+	const char *name = getenv("DESK_MAT");
+	if (!name) {
+		return;
+	}
+	struct desk_mat m = { .size = DESK_MAT_MEDIUM };
+	if (getenv("DESK_MAT_SIZE")) {
+		desk_mat_size_parse(getenv("DESK_MAT_SIZE"), &m.size);
+	}
+	if (!strcmp(name, "photo") && getenv("DESK_MAT_PHOTO")) {
+		desk_mat_preset("charcoal", &m);
+		m.kind = DESK_MAT_PHOTO;
+		snprintf(m.photo, sizeof m.photo, "%s", getenv("DESK_MAT_PHOTO"));
+	} else if (!desk_mat_preset(name, &m)) {
+		return;
+	}
+	desk_set_mat(&m);
+	/* a photo is read on a thread, and the key changes when it is there
+	 * (or when it could not be read): wait for that */
+	uint64_t was = desk_overlay_key(DESK_OVL_MAT, 0, 0);
+	for (int i = 0; i < 400 && m.kind == DESK_MAT_PHOTO
+		&& desk_overlay_key(DESK_OVL_MAT, 0, 0) == was; i++) {
+		nanosleep(&(struct timespec){ 0, 50000000 }, NULL);
+	}
+}
+
 int main(int argc, char **argv)
 {
 	desk_compat();
+	preview_mat();
 	/* DESK_LOCK_DECOR=halloween: the bookcase dressed too (--shelf, and
 	 * the room through the door) */
 	if (getenv("DESK_LOCK_DECOR") && !strcmp(getenv("DESK_LOCK_DECOR"), "halloween")) {
