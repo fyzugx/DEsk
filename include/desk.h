@@ -191,6 +191,7 @@ struct desk_tuner {
 	int want;                          /* the jack the plug went into, not answered yet; -1 */
 	int failed;                        /* the jack that did not take; -1 */
 	double pos;                        /* the first jack on the board, between two while sliding */
+	double plug_x, plug_y;             /* where the plug is, in the board's units */
 	char read1[128], read2[96];        /* the readout: a name, and how it stands */
 	char read3[128], read4[96];        /* the other readout: what is in use now */
 	const char *left;                  /* the left button's word, or NULL */
@@ -236,6 +237,11 @@ int desk_tuner_hit(const struct desk_tuner *t, const struct desk_tuner_place *pl
  * hole on the shelf (_REST), or where the cord comes up (_CORD). False for
  * a jack slid off the board. */
 bool desk_tuner_spot(const struct desk_tuner *t, int what, int i, double *x, double *y);
+/* The cord and its plug, over the board: n points in the board's units,
+ * the plug's end first. ring_x >= 0 rings the jack it would go into;
+ * held lifts the plug off the board. */
+void desk_draw_cord(cairo_t *cr, const struct desk_tuner_place *pl, const double *x,
+	const double *y, int n, double ring_x, double ring_y, bool held);
 /* the glass over the guarded set, which is drawn rather than baked */
 bool desk_console_guard_hit(int w, int h, double px, double py, double open);
 /* Is the pointer on the set as it stands on the desk, seen from the desk's

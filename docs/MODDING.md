@@ -47,8 +47,10 @@ stderr when nested). `DESK_PROFILE=1` adds frame timings.
 
 `DESK_HAND=file` drives the desk from a script, for trying a change the
 same way every time (nested or `--headless`): a line at a time, `move X Y`,
-`glide X Y MS`, `press`, `release`, `click`, `key NAME` (`super+NAME` with
-Super), `choose wifi|bt|vol`, `wait MS`, `shot PATH` (the desk's screen),
+`glide X Y MS`, `by DX DY MS`, `press`, `release`, `click`, `key NAME`
+(`super+NAME` with Super), `choose wifi|bt|vol`, with a tuner out `plug MS`,
+`jack N MS` and `hole MS` (glide to its plug, its N-th jack or the hole on
+its shelf), `wait MS`, `shot PATH` (the desk's screen),
 `shotall PATH` (every screen) and `quit`; see `hand_cb` in `wm.c`. With
 `DESK_SLOW=4` the screenshots catch what moves part way.
 

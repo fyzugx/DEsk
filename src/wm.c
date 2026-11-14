@@ -569,6 +569,8 @@ struct desk_game_constraint {
 	struct wl_listener destroy;
 };
 
+#define CCD_CORD_N 14   /* points along the tuner's cord */
+
 struct desk_server {
 	struct wl_display *wl_display;
 	struct wlr_backend *backend;
@@ -1105,19 +1107,33 @@ struct desk_server {
 	bool ccd_chose;                     /* sel has been turned by hand */
 	char ccd_sel_id[160];               /* ...to this one, by devices.c's id */
 	int ccd_off, ccd_hot_at;
-	/* the order of the jacks, by id (ccd_list) */
+	/* the order of the jacks, by id (ccd_list), and what it was last */
 	char ccd_order[DESK_TUNER_MAX][160];
 	int ccd_norder;
 	bool ccd_resort, ccd_scanned;
-	/* the one put through, its answer awaited (want: 1 a jack, 2 let go
-	 * of); the one put through by hand; one that did not go through */
-	int ccd_want;
+	uint64_t ccd_list_key;
+	/* the plug: in the hand (grab), the hand where on it and the plug where
+	 * the hand has it; let go, on its way from there to the jack it belongs
+	 * in (home, -1 the hole). The one it was put in, its answer awaited
+	 * (want: 1 a jack, 2 the hole), and one that did not go through. */
+	bool ccd_grab;
+	double ccd_grab_dx, ccd_grab_dy, ccd_hand_x, ccd_hand_y;
+	double ccd_from_x, ccd_from_y, ccd_from_at, ccd_creep_at;
+	int ccd_home, ccd_want;
 	char ccd_want_id[160], ccd_plug_id[160], ccd_fail_id[160];
+	/* its cord, plug first, in the board's units: the points now and a
+	 * step ago, and as last drawn (s); stepped while it moves (on) */
+	double ccd_cord_x[CCD_CORD_N], ccd_cord_y[CCD_CORD_N];
+	double ccd_cord_ox[CCD_CORD_N], ccd_cord_oy[CCD_CORD_N];
+	double ccd_cord_sx[CCD_CORD_N], ccd_cord_sy[CCD_CORD_N];
+	double ccd_cord_len, ccd_cord_acc, ccd_cord_at, ccd_cord_still, ccd_cord_wake;
+	double ccd_cord_drawn, ccd_cord_cost;
+	bool ccd_cord_on, ccd_cord_slow;
 	struct wl_event_source *ccd_blink;  /* the busy lamps' next blink */
-	/* the card's picture, and what it was drawn from */
-	struct wlr_scene_buffer *ccd_card;
+	/* the card's picture, and what it was drawn from; the cord's over it */
+	struct wlr_scene_buffer *ccd_card, *ccd_cord;
 	int ccd_card_w, ccd_card_h;
-	uint64_t ccd_card_key;
+	uint64_t ccd_card_key, ccd_cord_key;
 
 	/* Turning to the post box. The same kind of look as the console: 0 at
 	 * the desk, 1 in front of the box with its door down. */
@@ -3546,6 +3562,7 @@ static void console_toggle(struct desk_server *server);
 static void post_toggle(struct desk_server *server);
 static void card_gone(struct desk_server *server);
 static void ccd_gone(struct desk_server *server);
+static void ccd_let_go(struct desk_server *server);
 static bool ccd_out(const struct desk_server *server);
 static bool console_dying(const struct desk_server *server);
 static void console_power_reset(struct desk_server *server);
@@ -8489,6 +8506,8 @@ static void node_show_within(struct wlr_scene_buffer *b, int pw, int ph, double 
  * and so is the tuner's right-hand button. */
 
 #define CCD_OPEN_S 0.45
+#define CCD_PLUG_S 0.18                  /* the plug back to its jack */
+#define CCD_CORD_DT (1.0 / 120.0)        /* the cord's step */
 
 /* Smoother than smoothstep: still at both ends to the second order, so a
  * thing driven by a mechanism starts and stops without a jolt. */
@@ -8611,6 +8630,14 @@ static int ccd_plug_in(struct desk_server *server, const struct desk_dev_list *L
 	return -1;
 }
 
+/* The cord stirred: stepped on frames until it is still again. */
+static void ccd_wake(struct desk_server *server)
+{
+	server->ccd_cord_on = true;
+	server->ccd_cord_still = server->ccd_cord_wake = real_sec();
+	server_schedule_frames(server);
+}
+
 static bool ccd_build(struct desk_server *server, struct desk_tuner *t)
 {
 	memset(t, 0, sizeof *t);
@@ -8650,7 +8677,9 @@ static bool ccd_build(struct desk_server *server, struct desk_tuner *t)
 		break;
 	}
 	t->right = TR("Settings");
-	t->hot = server->ccd_hot;
+	/* held, the plug's ring shows where it would go, over the board, so
+	 * the board is not drawn again for every jack it passes */
+	t->hot = server->ccd_grab ? -1 : server->ccd_hot;
 	t->hot_at = server->ccd_hot_at;
 	t->clock = floor(real_sec() * 4.0);
 	bool shown = L.read && L.have && !L.off;
@@ -8676,6 +8705,18 @@ static bool ccd_build(struct desk_server *server, struct desk_tuner *t)
 		server->ccd_pos = server->ccd_off;
 	}
 	t->pos = server->ccd_pos;
+	t->plug_x = server->ccd_cord_x[0];
+	t->plug_y = server->ccd_cord_y[0];
+	/* the plug's jack another now (put through, or not; the list read
+	 * again): it goes there from wherever it is */
+	int home = shown ? ccd_plug_in(server, &L, map, t->n) : -1;
+	if (home != server->ccd_home && server->ccd_home > -2 && !server->ccd_grab) {
+		server->ccd_from_x = server->ccd_cord_x[0];
+		server->ccd_from_y = server->ccd_cord_y[0];
+		server->ccd_from_at = real_sec();
+		ccd_wake(server);
+	}
+	server->ccd_home = home;
 
 	/* the readout: the one the keys are on, and how it stands */
 	if (!L.read) {
@@ -8760,6 +8801,9 @@ static void ccd_hide(struct desk_server *server)
 	if (server->ccd_card) {
 		wlr_scene_node_set_enabled(&server->ccd_card->node, false);
 	}
+	if (server->ccd_cord) {
+		wlr_scene_node_set_enabled(&server->ccd_cord->node, false);
+	}
 }
 
 static void ccd_gone(struct desk_server *server)
@@ -8767,16 +8811,38 @@ static void ccd_gone(struct desk_server *server)
 	server->ccd_which = -1;
 	server->ccd_pull = server->ccd_pull_to = 0.0;
 	server->ccd_pulling = false;
-	/* nothing of it kept while it is put away: the picture, and the
+	server->ccd_grab = false;
+	server->ccd_cord_on = false;
+	/* nothing of it kept while it is put away: the pictures, and the
 	 * blinking */
 	if (server->ccd_card) {
 		wlr_scene_node_destroy(&server->ccd_card->node);
 		server->ccd_card = NULL;
 	}
+	if (server->ccd_cord) {
+		wlr_scene_node_destroy(&server->ccd_cord->node);
+		server->ccd_cord = NULL;
+	}
 	if (server->ccd_blink) {
 		wl_event_source_remove(server->ccd_blink);
 		server->ccd_blink = NULL;
 	}
+}
+
+/* The plug let go of, or taken out of the hand -- the card going, the
+ * desk locked, the list changed under it: back from wherever it is to
+ * where it belongs, on its cord. */
+static void ccd_let_go(struct desk_server *server)
+{
+	if (!server->ccd_grab) {
+		return;
+	}
+	server->ccd_grab = false;
+	server->ccd_hot = -1;
+	server->ccd_from_x = server->ccd_cord_x[0];
+	server->ccd_from_y = server->ccd_cord_y[0];
+	server->ccd_from_at = real_sec();
+	ccd_wake(server);
 }
 
 static void node_show_within(struct wlr_scene_buffer *b, int pw, int ph, double x, double y,
@@ -8793,6 +8859,230 @@ static bool ccd_where(struct desk_server *server, struct desk_tuner_place *pl, d
 	return true;
 }
 
+/* Where the plug goes, not held: from where it was let go to the jack it
+ * belongs in (or the hole), on a short ease, and after that with the jack
+ * as the row slides. The plug and its cord keep real time (real_sec), not
+ * the desk's: in 2D the desk's runs a hundred times fast so that what
+ * eases gets there at once, and a cord that is swung by the hand cannot. A jack slid off the board has its plug waiting under
+ * the end of the row it went off. */
+static void ccd_plug_to(struct desk_server *server, const struct desk_tuner *t, double now,
+	double *x, double *y)
+{
+	if (server->ccd_home < 0 || server->ccd_home >= t->n) {
+		desk_tuner_spot(t, DESK_TUNER_REST, 0, x, y);
+	} else {
+		desk_tuner_spot(t, DESK_TUNER_JACK, server->ccd_home, x, y);
+	}
+	double u = (now - server->ccd_from_at) / CCD_PLUG_S;
+	if (u < 1.0) {
+		double e = ccd_ease(0.0, 1.0, u);
+		*x = server->ccd_from_x + (*x - server->ccd_from_x) * e;
+		*y = server->ccd_from_y + (*y - server->ccd_from_y) * e;
+	}
+}
+
+/* One step of the cord, CCD_CORD_DT long, in the board's units (1200 by
+ * 320): each point carries on as it was going, a little slowed, and falls;
+ * then each piece is pulled back to its length, three times over, with one
+ * end where the plug is and the other in the shelf. What is not wanted of
+ * it is drawn back under the shelf by a weight, as an operator's cords
+ * were, so it hangs a little slack whatever the reach. How far the point
+ * that moved most moved. */
+static double ccd_cord_step(struct desk_server *server, double px, double py, double ax,
+	double ay)
+{
+	double *x = server->ccd_cord_x, *y = server->ccd_cord_y;
+	double *ox = server->ccd_cord_ox, *oy = server->ccd_cord_oy;
+	const int n = CCD_CORD_N;
+	double want = fmax(hypot(px - ax, py - ay) * 1.15 + 30.0, 120.0) / (n - 1);
+	server->ccd_cord_len += (want - server->ccd_cord_len) * 0.1;
+	double len = server->ccd_cord_len;
+	for (int i = 1; i < n - 1; i++) {
+		/* never more than so far a step, however hard it is yanked */
+		double vx = clampf_d((x[i] - ox[i]) * 0.975, -24.0, 24.0);
+		double vy = clampf_d((y[i] - oy[i]) * 0.975 + 1800.0 * CCD_CORD_DT * CCD_CORD_DT,
+			-24.0, 24.0);
+		ox[i] = x[i];
+		oy[i] = y[i];
+		x[i] += vx;
+		y[i] += vy;
+	}
+	x[0] = px;
+	y[0] = py;
+	x[n - 1] = ax;
+	y[n - 1] = ay;
+	for (int it = 0; it < 3; it++) {
+		for (int i = 0; i < n - 1; i++) {
+			double dx = x[i + 1] - x[i], dy = y[i + 1] - y[i], d = hypot(dx, dy);
+			if (d < 1e-6) {
+				continue;
+			}
+			double f = (d - len) / d;
+			double a = i == 0 ? 0.0 : i + 1 == n - 1 ? 1.0 : 0.5;
+			x[i] += dx * f * a;
+			y[i] += dy * f * a;
+			x[i + 1] -= dx * f * (1.0 - a);
+			y[i + 1] -= dy * f * (1.0 - a);
+		}
+		/* the shelf under it, and the edges of the card */
+		for (int i = 1; i < n - 1; i++) {
+			y[i] = fmin(y[i], 312.0);
+			x[i] = clampf_d(x[i], 8.0, 1192.0);
+		}
+	}
+	/* and never stretched past twice its length a piece, from the shelf
+	 * up, whatever three passes could not mend */
+	for (int i = n - 2; i >= 1; i--) {
+		double dx = x[i] - x[i + 1], dy = y[i] - y[i + 1], d = hypot(dx, dy);
+		if (d > 2.0 * len) {
+			x[i] = x[i + 1] + dx * 2.0 * len / d;
+			y[i] = y[i + 1] + dy * 2.0 * len / d;
+		}
+	}
+	double moved = 0.0;
+	for (int i = 1; i < n - 1; i++) {
+		moved = fmax(moved, fabs(x[i] - ox[i]) + fabs(y[i] - oy[i]));
+	}
+	return moved;
+}
+
+/* The cord laid out straight from the plug to the shelf, and let hang, so
+ * it is already still when it is first seen. */
+static void ccd_cord_lay(struct desk_server *server, const struct desk_tuner *t)
+{
+	double px, py, ax, ay;
+	server->ccd_from_at = -1e9;
+	ccd_plug_to(server, t, real_sec(), &px, &py);
+	desk_tuner_spot(t, DESK_TUNER_CORD, 0, &ax, &ay);
+	for (int i = 0; i < CCD_CORD_N; i++) {
+		double f = (double)i / (CCD_CORD_N - 1);
+		server->ccd_cord_x[i] = server->ccd_cord_ox[i] = px + (ax - px) * f;
+		server->ccd_cord_y[i] = server->ccd_cord_oy[i] = py + (ay - py) * f;
+	}
+	server->ccd_cord_len = hypot(px - ax, py - ay) / (CCD_CORD_N - 1) + 1.0;
+	for (int s = 0; s < 240; s++) {
+		ccd_cord_step(server, px, py, ax, ay);
+	}
+	memcpy(server->ccd_cord_sx, server->ccd_cord_x, sizeof server->ccd_cord_sx);
+	memcpy(server->ccd_cord_sy, server->ccd_cord_y, sizeof server->ccd_cord_sy);
+	server->ccd_cord_on = false;
+}
+
+static void ccd_row(struct desk_server *server, int by);
+
+/* The cord on a frame: stepped up to now a fixed step at a time -- no more
+ * than four steps a frame, so a machine that has fallen behind drops time
+ * rather than falling further behind -- and the points it is drawn from
+ * taken no oftener than 60 times a second, or 30 while drawing it costs
+ * more than a frame can spare. Held at an end of the row, the plug slides
+ * the row along. True while it is still moving. */
+static bool ccd_cord_tick(struct desk_server *server, const struct desk_tuner *t, double now)
+{
+	double px, py, ax, ay;
+	desk_tuner_spot(t, DESK_TUNER_CORD, 0, &ax, &ay);
+	if (server->ccd_grab) {
+		px = clampf_d(server->ccd_hand_x, 20.0, 1180.0);
+		py = clampf_d(server->ccd_hand_y, 20.0, 300.0);
+	} else {
+		ccd_plug_to(server, t, now, &px, &py);
+	}
+	server->ccd_cord_acc += clampf_d(now - server->ccd_cord_at, 0.0, 0.1);
+	server->ccd_cord_at = now;
+	int steps = 0;
+	double moved = 0.0;
+	while (server->ccd_cord_acc >= CCD_CORD_DT && steps < 4) {
+		moved = fmax(moved, ccd_cord_step(server, px, py, ax, ay));
+		server->ccd_cord_acc -= CCD_CORD_DT;
+		steps++;
+	}
+	if (steps == 4) {
+		server->ccd_cord_acc = 0.0;
+	}
+	if (steps > 0 && (moved > 0.04 || now - server->ccd_from_at < CCD_PLUG_S)) {
+		server->ccd_cord_still = now;
+	}
+	bool creep = server->ccd_grab
+		&& (server->ccd_hot == DESK_TUNER_PREV || server->ccd_hot == DESK_TUNER_NEXT);
+	if (creep && now - server->ccd_creep_at > 0.22) {
+		server->ccd_creep_at = now;
+		ccd_row(server, server->ccd_hot == DESK_TUNER_PREV ? -1 : 1);
+	}
+	/* still for a quarter of a second -- or stirred four seconds ago and
+	 * not yet still, which a cord should never be -- and it is left be */
+	bool on = creep || (now - server->ccd_cord_still < 0.25
+		&& (server->ccd_grab || now - server->ccd_cord_wake < 4.0));
+	double gap = (server->ccd_cord_slow ? 1.0 / 30.0 : 1.0 / 60.0) - 0.002;
+	if (now - server->ccd_cord_drawn >= gap || !on) {
+		memcpy(server->ccd_cord_sx, server->ccd_cord_x, sizeof server->ccd_cord_sx);
+		memcpy(server->ccd_cord_sy, server->ccd_cord_y, sizeof server->ccd_cord_sy);
+		server->ccd_cord_drawn = now;
+	}
+	server->ccd_cord_on = on;
+	return on;
+}
+
+/* The cord's picture over the card's: only as big as the cord and its
+ * plug, so that a frame of it moving is only that much to draw and to
+ * send, and drawn again only when what it is drawn from has moved. */
+static void ccd_cord_put(struct desk_server *server, const struct desk_tuner *t,
+	const struct desk_tuner_place *pl, int m, double clip)
+{
+	const double *x = server->ccd_cord_sx, *y = server->ccd_cord_sy;
+	double rx = -1.0, ry = -1.0;
+	if (server->ccd_grab && (server->ccd_hot == DESK_TUNER_REST
+			|| (server->ccd_hot == DESK_TUNER_JACK && server->ccd_hot_at < t->n))) {
+		if (!desk_tuner_spot(t, server->ccd_hot, server->ccd_hot_at, &rx, &ry)) {
+			rx = -1.0;
+		}
+	}
+	double x0 = x[0], y0 = y[0], x1 = x[0], y1 = y[0];
+	for (int i = 1; i < CCD_CORD_N; i++) {
+		x0 = fmin(x0, x[i]);
+		y0 = fmin(y0, y[i]);
+		x1 = fmax(x1, x[i]);
+		y1 = fmax(y1, y[i]);
+	}
+	if (rx >= 0.0) {
+		x0 = fmin(x0, rx);
+		y0 = fmin(y0, ry);
+		x1 = fmax(x1, rx);
+		y1 = fmax(y1, ry);
+	}
+	const double pad = 40.0;   /* the plug, its shadow, the ring round a jack */
+	double k = pl->k;
+	int bx = (int)floor(m + (x0 - pad) * k), by = (int)floor(m + (y0 - pad) * k);
+	int bw = (int)ceil(m + (x1 + pad) * k) - bx, bh = (int)ceil(m + (y1 + pad) * k) - by;
+	uint64_t key = 1469598103934665603ull;
+	key = key_add(key, x, sizeof server->ccd_cord_sx);
+	key = key_add(key, y, sizeof server->ccd_cord_sy);
+	key = key_add(key, &rx, sizeof rx);
+	key = key_add(key, &ry, sizeof ry);
+	key = key_add(key, &k, sizeof k);
+	key = key_add(key, &server->ccd_grab, sizeof server->ccd_grab);
+	if (!server->ccd_cord || server->ccd_cord_key != key) {
+		double t0 = real_sec();
+		struct desk_buf *b = buf_create(bw, bh);
+		struct desk_tuner_place at = *pl;
+		at.x = m - bx;
+		at.y = m - by;
+		desk_draw_cord(b->cr, &at, x, y, CCD_CORD_N, rx, ry, server->ccd_grab);
+		scene_put(&server->ccd_cord, server->layer_console, b, 0, 0, NULL);
+		wlr_scene_buffer_set_source_box(server->ccd_cord, NULL);
+		server->ccd_cord->point_accepts_input = shadow_accepts;
+		server->ccd_cord_key = key;
+		/* what drawing it costs: past half a frame at 60, it is drawn at 30 */
+		server->ccd_cord_cost += (real_sec() - t0 - server->ccd_cord_cost) * 0.2;
+		if (server->ccd_cord_cost > 0.008) {
+			server->ccd_cord_slow = true;
+		} else if (server->ccd_cord_cost < 0.003) {
+			server->ccd_cord_slow = false;
+		}
+	}
+	wlr_scene_node_raise_to_top(&server->ccd_cord->node);
+	node_show_within(server->ccd_cord, bw, bh, pl->x - m + bx, pl->y - m + by, 1.0, 0.0, 0.0,
+		server->desk_w, clip);
+}
+
 static void ccd_paint(struct desk_server *server);
 
 static int ccd_blink_cb(void *data)
@@ -8805,12 +9095,13 @@ static int ccd_blink_cb(void *data)
 
 /* The card where it is now, drawn again only when what is on it has
  * changed, and cut off at the top of the controls it is coming out from
- * under. */
+ * under; the cord over it. */
 static void ccd_paint(struct desk_server *server)
 {
 	int w = server->desk_w;
 	if (server->ccd_which < 0 || !console_up(server) || server->cc_t < 0.9995
 		|| server->ccd_pull <= 0.0) {
+		ccd_let_go(server);
 		ccd_hide(server);
 		return;
 	}
@@ -8825,6 +9116,9 @@ static void ccd_paint(struct desk_server *server)
 	if (!ccd_where(server, &pl, &clip, &m)) {
 		ccd_hide(server);
 		return;
+	}
+	if (server->ccd_cord_len <= 0.0) {
+		ccd_cord_lay(server, &t);
 	}
 	int tw = (int)ceil(pl.w) + 2 * m, th = (int)ceil(pl.h) + 2 * m;
 	uint64_t key = 1469598103934665603ull;
@@ -8878,8 +9172,17 @@ static void ccd_paint(struct desk_server *server)
 		server->ccd_card_w = tw;
 		server->ccd_card_h = th;
 	}
-	wlr_scene_node_raise_to_top(&server->ccd_card->node);
+	/* the card over the set and the cord over the card, moved only when
+	 * something has come over them: moving a picture is a frame, and the
+	 * frame would paint it again */
+	if (server->ccd_cord) {
+		wlr_scene_node_raise_to_top(&server->ccd_cord->node);
+		wlr_scene_node_place_below(&server->ccd_card->node, &server->ccd_cord->node);
+	} else {
+		wlr_scene_node_raise_to_top(&server->ccd_card->node);
+	}
 	node_show_within(server->ccd_card, tw, th, pl.x - m, pl.y - m, 1.0, 0.0, 0.0, w, clip);
+	ccd_cord_put(server, &t, &pl, m, clip);
 }
 
 static void ccd_pull(struct desk_server *server, double to)
@@ -8896,6 +9199,7 @@ static void ccd_pull(struct desk_server *server, double to)
 static void ccd_put_back(struct desk_server *server)
 {
 	if (ccd_out(server)) {
+		ccd_let_go(server);
 		ccd_pull(server, 0.0);
 	}
 }
@@ -8917,9 +9221,13 @@ static void ccd_open(struct desk_server *server, int which)
 	server->ccd_chose = false;
 	server->ccd_sel_id[0] = '\0';
 	server->ccd_pos = -1.0;
+	server->ccd_grab = false;
 	server->ccd_resort = server->ccd_scanned = true;
 	server->ccd_want = 0;
 	server->ccd_plug_id[0] = server->ccd_fail_id[0] = '\0';
+	server->ccd_home = -2;
+	server->ccd_cord_len = 0.0;
+	server->ccd_list_key = 0;
 	desk_devices_refresh(which == DESK_CC_WIFI ? DESK_DEV_WIFI
 		: which == DESK_CC_BT ? DESK_DEV_BT : DESK_DEV_SINK);
 	if (which == DESK_CC_WIFI) {
@@ -9068,7 +9376,7 @@ static void ccd_take(struct desk_server *server)
 }
 
 /* Once a frame: the tuner on its way out or in, the row sliding to where
- * it has been slid. */
+ * it has been slid, and the cord swinging. */
 static void ccd_tick(struct desk_server *server)
 {
 	if (server->ccd_which < 0) {
@@ -9102,7 +9410,15 @@ static void ccd_tick(struct desk_server *server)
 		if (fabs(to - server->ccd_pos) <= 0.002) {
 			server->ccd_pos = to;
 		}
+		/* the plug goes along with its jack */
+		ccd_wake(server);
 		more = true;
+	}
+	if (server->ccd_cord_on || server->ccd_grab) {
+		static struct desk_tuner t;
+		if (ccd_build(server, &t) && ccd_cord_tick(server, &t, real_sec())) {
+			more = true;
+		}
 	}
 	ccd_paint(server);
 	if (more) {
@@ -9122,12 +9438,31 @@ static int ccd_under(struct desk_server *server, const struct desk_tuner *t, dou
 	return desk_tuner_hit(t, &pl, server->cursor->x, server->cursor->y, at);
 }
 
+/* The pointer in the board's units. */
+static bool ccd_hand(struct desk_server *server, double *x, double *y)
+{
+	struct desk_tuner_place pl;
+	double clip;
+	int m;
+	if (!ccd_where(server, &pl, &clip, &m)) {
+		return false;
+	}
+	*x = (server->cursor->x - pl.x) / pl.k;
+	*y = (server->cursor->y - pl.y) / pl.k;
+	return true;
+}
+
 /* A hand put down with the card out: on it, its own; anywhere else is
  * the set's, which is all still there under it. */
 static bool ccd_press(struct desk_server *server, uint32_t button)
 {
 	if (!ccd_out(server) || server->ccd_pulling) {
 		return false;
+	}
+	if (server->ccd_grab) {
+		/* another button, with the plug in hand: it goes back */
+		ccd_let_go(server);
+		return true;
 	}
 	static struct desk_tuner t;
 	if (!ccd_build(server, &t)) {
@@ -9143,6 +9478,23 @@ static bool ccd_press(struct desk_server *server, uint32_t button)
 		return true;
 	}
 	switch (hit) {
+	case DESK_TUNER_PLUG: {
+		/* pulled out: it follows the hand until it is let go */
+		double hx, hy;
+		if (!ccd_hand(server, &hx, &hy)) {
+			break;
+		}
+		snd_at(server, DESK_SND_KEY_RELEASE, server->cursor->x, 0.8);
+		server->ccd_grab = true;
+		server->ccd_grab_dx = t.plug_x - hx;
+		server->ccd_grab_dy = t.plug_y - hy;
+		server->ccd_hand_x = t.plug_x;
+		server->ccd_hand_y = t.plug_y;
+		server->ccd_hot = -1;
+		server->ccd_creep_at = real_sec();
+		ccd_wake(server);
+		break;
+	}
 	case DESK_TUNER_JACK:
 		/* a jack: the keys on it */
 		ccd_turn_to(server, (int)at);
@@ -9185,7 +9537,25 @@ static bool ccd_press(struct desk_server *server, uint32_t button)
 	return true;
 }
 
-/* The hand over the tuner: what is under it lit.
+/* Let go of the plug: into the jack under it, which takes that one; into
+ * the hole, which lets go of the one in use; anywhere else, back where it
+ * came from. */
+static bool ccd_release(struct desk_server *server)
+{
+	if (!server->ccd_grab) {
+		return false;
+	}
+	int hot = server->ccd_hot, at = server->ccd_hot_at;
+	ccd_let_go(server);
+	if (hot == DESK_TUNER_JACK) {
+		ccd_seat(server, at);
+	} else if (hot == DESK_TUNER_REST) {
+		ccd_unplug(server);
+	}
+	return true;
+}
+
+/* The hand with the plug in it, or over the tuner: what is under it lit.
  * True when it is the tuner's. */
 static bool ccd_motion(struct desk_server *server)
 {
@@ -9197,6 +9567,31 @@ static bool ccd_motion(struct desk_server *server)
 		return false;
 	}
 	double at = 0.0;
+	if (server->ccd_grab) {
+		/* what the plug is over -- a jack, the hole, a stop to jump to, an
+		 * end of the row to slide it by -- looked at where the plug is,
+		 * not the hand; the frames do the rest */
+		double hx, hy;
+		struct desk_tuner_place pl;
+		double clip;
+		int m;
+		if (!ccd_hand(server, &hx, &hy) || !ccd_where(server, &pl, &clip, &m)) {
+			return true;
+		}
+		server->ccd_hand_x = hx + server->ccd_grab_dx;
+		server->ccd_hand_y = hy + server->ccd_grab_dy;
+		t.plug_x = t.plug_y = -1e9;
+		int hit = desk_tuner_hit(&t, &pl, pl.x + server->ccd_hand_x * pl.k,
+			pl.y + server->ccd_hand_y * pl.k, &at);
+		if (hit == DESK_TUNER_STOP
+			&& (server->ccd_hot != DESK_TUNER_STOP || server->ccd_hot_at != (int)at)) {
+			ccd_row(server, (int)at * DESK_TUNER_ROW - server->ccd_off);
+		}
+		server->ccd_hot = hit >= 0 ? hit : -1;
+		server->ccd_hot_at = (int)at;
+		ccd_wake(server);
+		return true;
+	}
 	int hit = server->ccd_pulling ? DESK_TUNER_OUT : ccd_under(server, &t, &at);
 	int hot = hit >= 0 ? hit : -1;
 	int hot_at = hot == DESK_TUNER_JACK || hot == DESK_TUNER_STOP ? (int)at : -1;
@@ -9268,6 +9663,15 @@ static void devices_changed(void *data)
 	struct desk_dev_list L;
 	int map[DESK_TUNER_MAX];
 	int n = ccd_list(server, &L, map);
+	uint64_t key = 1469598103934665603ull;
+	for (int i = 0; i < n; i++) {
+		key = key_add(key, L.d[map[i]].id, strlen(L.d[map[i]].id));
+	}
+	if (key != server->ccd_list_key) {
+		/* the jacks are not the ones the plug was taken over */
+		ccd_let_go(server);
+		server->ccd_list_key = key;
+	}
 	if (!L.busy) {
 		/* what was asked is answered: a plug put in a jack that is not
 		 * in use now did not go through */
@@ -9280,7 +9684,7 @@ static void devices_changed(void *data)
 			}
 		}
 		server->ccd_want = 0;
-		if (server->ccd_scanned) {
+		if (server->ccd_scanned && !server->ccd_grab) {
 			/* a scan back: the jacks in order again */
 			server->ccd_scanned = false;
 			server->ccd_resort = true;
@@ -17913,6 +18317,7 @@ static void lock_begin(struct desk_server *server, int how, cairo_surface_t *ins
 	/* nobody behind the door has the keys or the pointer any more */
 	reset_cursor_mode(server);
 	server->cc_grab = -1;
+	ccd_let_go(server);
 	wlr_seat_keyboard_notify_clear_focus(server->seat);
 	wlr_seat_pointer_notify_clear_focus(server->seat);
 	wlr_cursor_set_xcursor(server->cursor, server->cursor_mgr, "default");
@@ -20406,6 +20811,7 @@ static void cad_reset(struct desk_server *server)
 	show_stop(server, true);
 	reset_cursor_mode(server);
 	server->cc_grab = -1;
+	ccd_let_go(server);
 	cal_drop(server);
 	memo_drop(server);
 	agd_drop(server);
@@ -21760,6 +22166,9 @@ static void server_cursor_button(struct wl_listener *listener, void *data)
 			server->ccd_choose_down = -1;
 			paint_console(server);
 			return;
+		}
+		if (event->button == BTN_LEFT && ccd_release(server)) {
+			return;   /* and of the tuner's */
 		}
 		if (server->cursor_mode == DESK_CUR_RESIZE && server->grabbed
 			&& server->grabbed->sizing) {
@@ -24254,6 +24663,7 @@ static int screenshot_cb(void *data)
  * same hand every time -- not for using it. A line at a time:
  *   move X Y         the pointer to X, Y on the desk's screen
  *   glide X Y MS     there over MS milliseconds, a frame at a time
+ *   by DX DY MS      so far from where it is, the same way
  *   press | release  the left button; click is both
  *   key NAME         an xkb key name (Escape, Return, Left...), with Super
  *                    as super+NAME
@@ -24261,6 +24671,9 @@ static int screenshot_cb(void *data)
  *   shot PATH        grim the desk's screen into PATH
  *   shotall PATH     grim every screen, side by side, into PATH
  *   choose WHICH     the CHOOSE for wifi, bt or vol, wherever it is
+ *   plug [MS]        with the tuner out, glide to its plug (over MS, or
+ *   jack N [MS]      at once); to jack N along its row (from 0), if it is
+ *   hole [MS]        on the board; to the hole on its shelf
  *   quit             the desk ends
  * Lines starting # and empty ones are passed over. */
 struct desk_hand {
@@ -24275,6 +24688,25 @@ static void hand_move(struct desk_server *server, double x, double y)
 {
 	wlr_cursor_warp_closest(server->cursor, NULL, x, y);
 	process_cursor_motion(server, (uint32_t)(monotonic_sec() * 1000.0));
+}
+
+/* Where on the screen the tuner's plug, jack i or its hole is now. */
+static bool hand_tuner_at(struct desk_server *server, int what, int i, double *x, double *y)
+{
+	static struct desk_tuner t;
+	struct desk_tuner_place pl;
+	double clip;
+	int m;
+	if (!ccd_out(server) || !ccd_build(server, &t) || !ccd_where(server, &pl, &clip, &m)) {
+		return false;
+	}
+	double bx = t.plug_x, by = t.plug_y;
+	if (what != DESK_TUNER_PLUG && !desk_tuner_spot(&t, what, i, &bx, &by)) {
+		return false;
+	}
+	*x = pl.x + bx * pl.k;
+	*y = pl.y + by * pl.k;
+	return true;
 }
 
 static void hand_button(struct desk_server *server, bool down)
@@ -24316,6 +24748,13 @@ static int hand_cb(void *data)
 			hd->gy1 = b;
 			hd->g_ms = fmax(c, 1.0);
 			hd->g_start = real_sec();
+		} else if (!strcmp(cmd, "by") && sscanf(line, "%*s %lf %lf %lf", &a, &b, &c) == 3) {
+			hd->gx0 = server->cursor->x;
+			hd->gy0 = server->cursor->y;
+			hd->gx1 = hd->gx0 + a;
+			hd->gy1 = hd->gy0 + b;
+			hd->g_ms = fmax(c, 1.0);
+			hd->g_start = real_sec();
 		} else if (!strcmp(cmd, "press") || !strcmp(cmd, "click")) {
 			hand_button(server, true);
 			if (!strcmp(cmd, "click")) {
@@ -24338,6 +24777,26 @@ static int hand_cb(void *data)
 		} else if (!strcmp(cmd, "choose") && sscanf(line, "%*s %399s", arg) == 1) {
 			ccd_open(server, !strcmp(arg, "bt") ? DESK_CC_BT : !strcmp(arg, "vol") ? DESK_CC_VOL
 				: DESK_CC_WIFI);
+		} else if (!strcmp(cmd, "plug") || !strcmp(cmd, "jack") || !strcmp(cmd, "hole")) {
+			int i = 0;
+			bool jack = !strcmp(cmd, "jack");
+			if (jack && sscanf(line, "%*s %d %lf", &i, &c) < 1) {
+				i = -1;
+			} else if (!jack) {
+				sscanf(line, "%*s %lf", &c);
+			}
+			double x, y;
+			if (i < 0 || !hand_tuner_at(server, jack ? DESK_TUNER_JACK : !strcmp(cmd, "hole")
+					? DESK_TUNER_REST : DESK_TUNER_PLUG, i, &x, &y)) {
+				wlr_log(WLR_ERROR, "hand: no %s to go to", cmd);
+				continue;
+			}
+			hd->gx0 = server->cursor->x;
+			hd->gy0 = server->cursor->y;
+			hd->gx1 = x;
+			hd->gy1 = y;
+			hd->g_ms = fmax(c, 1.0);
+			hd->g_start = real_sec();
 		} else if (!strcmp(cmd, "shotall") && sscanf(line, "%*s %399s", arg) == 1) {
 			char *const argv[] = { (char *)"grim", arg, NULL };
 			spawn_argv(argv);

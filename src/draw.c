@@ -21393,6 +21393,9 @@ int desk_tuner_hit(const struct desk_tuner *t, const struct desk_tuner_place *pl
 	if (x < 0.0 || y < 0.0 || x > TUNER_W || y > TUNER_H) {
 		return DESK_TUNER_OUT;
 	}
+	if (hypot(x - t->plug_x, y - t->plug_y) <= TUNER_JR + 8.0) {
+		return DESK_TUNER_PLUG;
+	}
 	for (int s = 0; s < tuner_stops(t); s++) {
 		if (fabs(x - tuner_stop_x(t, s)) <= TUNER_STOPW * 0.5 && fabs(y - TUNER_STOPY) <= 15.0) {
 			if (at) {
@@ -21430,6 +21433,78 @@ int desk_tuner_hit(const struct desk_tuner *t, const struct desk_tuner_place *pl
 		*at = i;
 	}
 	return DESK_TUNER_JACK;
+}
+
+void desk_draw_cord(cairo_t *cr, const struct desk_tuner_place *pl, const double *x,
+	const double *y, int n, double ring_x, double ring_y, bool held)
+{
+	if (n < 2) {
+		return;
+	}
+	cairo_save(cr);
+	cairo_translate(cr, pl->x, pl->y);
+	cairo_scale(cr, pl->k, pl->k);
+	if (ring_x >= 0.0) {
+		cairo_arc(cr, ring_x, ring_y, TUNER_JR + 11.0, 0, 2 * M_PI);
+		cairo_set_line_width(cr, 3.0);
+		cairo_set_source_rgba(cr, 1.0, 0.95, 0.80, 0.75);
+		cairo_stroke(cr);
+	}
+	/* the cord: one path, eased through its points, and stroked twice --
+	 * dark, then the braid over it */
+	cairo_move_to(cr, x[0], y[0]);
+	double cx = x[0], cy = y[0];
+	for (int i = 1; i < n - 1; i++) {
+		double ex = (x[i] + x[i + 1]) * 0.5, ey = (y[i] + y[i + 1]) * 0.5;
+		cairo_curve_to(cr, cx + (x[i] - cx) * 2.0 / 3.0, cy + (y[i] - cy) * 2.0 / 3.0,
+			ex + (x[i] - ex) * 2.0 / 3.0, ey + (y[i] - ey) * 2.0 / 3.0, ex, ey);
+		cx = ex;
+		cy = ey;
+	}
+	cairo_line_to(cr, x[n - 1], y[n - 1]);
+	cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+	cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
+	cairo_set_line_width(cr, 9.0);
+	cairo_set_source_rgb(cr, 0.07, 0.05, 0.03);
+	cairo_stroke_preserve(cr);
+	static const double braid[] = { 5.0, 3.0 };
+	cairo_set_dash(cr, braid, 2, 0.0);
+	cairo_set_line_width(cr, 5.5);
+	cairo_set_source_rgb(cr, 0.50, 0.34, 0.17);
+	cairo_stroke(cr);
+	cairo_set_dash(cr, NULL, 0, 0.0);
+	/* the plug: a brass sleeve where the cord goes in, and its cap; off
+	 * the board, its shadow under it */
+	double dx = x[1] - x[0], dy = y[1] - y[0], d = hypot(dx, dy);
+	dx = d > 0.01 ? dx / d : 0.0;
+	dy = d > 0.01 ? dy / d : 1.0;
+	double r = held ? 14.5 : 13.0;
+	if (held) {
+		cairo_arc(cr, x[0] + 5.0, y[0] + 8.0, r + 1.0, 0, 2 * M_PI);
+		cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.35);
+		cairo_fill(cr);
+	}
+	cairo_move_to(cr, x[0], y[0]);
+	cairo_line_to(cr, x[0] + dx * 20.0, y[0] + dy * 20.0);
+	cairo_set_line_cap(cr, CAIRO_LINE_CAP_BUTT);
+	cairo_set_line_width(cr, 13.0);
+	cairo_set_source_rgb(cr, 0.30, 0.22, 0.08);
+	cairo_stroke_preserve(cr);
+	cairo_set_line_width(cr, 10.0);
+	cairo_set_source_rgb(cr, 0.74, 0.58, 0.28);
+	cairo_stroke(cr);
+	cairo_pattern_t *g = cairo_pattern_create_radial(x[0] - 4, y[0] - 5, 1, x[0], y[0], r);
+	cairo_pattern_add_color_stop_rgb(g, 0.0, 1.0, 0.94, 0.72);
+	cairo_pattern_add_color_stop_rgb(g, 0.5, 0.80, 0.63, 0.30);
+	cairo_pattern_add_color_stop_rgb(g, 1.0, 0.40, 0.29, 0.10);
+	cairo_arc(cr, x[0], y[0], r, 0, 2 * M_PI);
+	cairo_set_source(cr, g);
+	cairo_fill_preserve(cr);
+	cairo_pattern_destroy(g);
+	cairo_set_line_width(cr, 1.4);
+	cairo_set_source_rgba(cr, 0.20, 0.14, 0.05, 0.9);
+	cairo_stroke(cr);
+	cairo_restore(cr);
 }
 
 /* Where the tuner's card rests: over the set, centred above the row of
