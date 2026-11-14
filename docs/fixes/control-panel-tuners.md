@@ -19,12 +19,24 @@ the other mouse button on a control opens `nm-connection-editor`,
 - **The card.** A walnut card slides out from behind the top of the row of
   controls and over the view, with the tuner on it. Esc, or the same
   CHOOSE, slides it back; a click off the machine turns back to the desk.
-- **The tuner.** A radio tuning dial: names round a cream scale under a
-  fixed red pointer, a knob that rolls the scale (wheel, drag, arrow keys)
-  and is pressed (or Return) to take the one under the pointer. A readout
-  on the left names that one and how it stands; the one on the right always
-  shows what is in use now. RESCAN (Wi-Fi), SEARCH (Bluetooth) or an
-  Output/Input band switch (sound) on the left, Settings on the right.
+- **The tuner.** A switchboard: a jack for each one in the list, its name
+  on an ivory strip under it and a lamp over it (green in use, amber saved
+  or paired, blinking while it is being put through, red when it did not
+  go), with the signal and a padlock for a network. The one in use, then
+  the saved or paired ones, come first; the order is taken when the card
+  comes out, when a scan is back and when the band is changed, and then
+  kept, so a jack never runs along the row because it was just connected.
+  A braided cord comes up through the shelf to a brass plug in the jack of
+  the one in use. Pull the plug out and put it in another jack to take
+  that one; put it in the hole on the shelf to let go (Wi-Fi and
+  Bluetooth); let it go anywhere else and it swings back. Ten jacks are on
+  the board at once: the arrows, the wheel and the arrow keys move a jack
+  at a time, the stops under the row (1-10, 11-20...) and Page Up/Down a
+  board at a time, and a plug held at an end of the row slides it along.
+  Return takes the jack the keys are on, so the plug is never the only
+  way. The readout on the left names that jack; the one on the right
+  always shows what is in use now. RESCAN (Wi-Fi), SEARCH (Bluetooth) or
+  an Output/Input band switch (sound) on the left, Settings on the right.
 - **The work is borrowed.** `src/devices.c` runs `nmcli`, `bluetoothctl` and
   `pactl` on a thread of its own, never through a shell, in the C locale. A
   Wi-Fi password is asked by nm-applet's dialog (NetworkManager's agent in a
@@ -41,19 +53,59 @@ does.
   are (`DESK_CCP_CHOOSE`), placed on the panel by the same projection.
 - The card is drawn by `desk_draw_tuner` into one picture and put up in the
   console's layer above everything live on the set (`ccd_paint`), drawn
-  again only when what is on it changes. It rests above the CHOOSE row
+  again only when what is on it changes -- the list, the jack the keys are
+  on, the row sliding, a lamp. It rests above the CHOOSE row
   (`desk_console_card_place`) and is cut off at the top of that row while
   it slides, so it comes out from under the controls.
-- Input goes to the card first (`ccd_press`, `ccd_motion`, `ccd_axis`,
-  `ccd_keys`); anything off it is the set's, all still there under it.
+- The cord is a picture of its own over the card's, only as big as the
+  cord and its plug (`ccd_cord_put`, `desk_draw_cord`: one path, stroked
+  twice). While it moves, only that picture is drawn again and sent, never
+  the board. It is a rope of 14 points (`ccd_cord_step`): Verlet, gravity,
+  damping, three passes of the lengths a step, at a fixed 1/120 s step and
+  no more than four steps a frame, drawn at no more than 60 frames a
+  second, or 30 while drawing it costs more than half a frame. What it
+  does not need is taken up under the shelf, so it hangs a little slack at
+  any reach. It is stepped only while something moves it; still for a
+  quarter of a second, it is left be, and nothing ticks.
+- The cord and the busy lamps keep real time (`real_sec`). In 2D -- which
+  the desk picks by itself when the screen is drawn on the processor --
+  the desk's own clock runs a hundred times fast so that everything that
+  eases gets there at once, and a cord swung by the hand cannot. The lamps
+  blink four times a second on a timer of their own, which stops when
+  nothing is being put through; the whole card used to be drawn again on
+  every frame while anything was busy.
+- Both pictures, and the timer, are let go of when the card is put away.
+- Input goes to the card first (`ccd_press`, `ccd_motion`, `ccd_release`,
+  `ccd_axis`, `ccd_keys`); anything off it is the set's, all still there
+  under it. The plug in the hand goes back where it came from when the
+  card goes, the desk locks or is set right, another button is pressed, or
+  the list is read again with other jacks on it (`ccd_let_go`). It acts
+  only when it is let go, once.
 
 ## Testing
 
-- Headless on two screens, drawn on the processor (pixman) because the
-  test machine's render node was not open to the session: the scripted hand
-  (`DESK_HAND`, see `docs/MODDING.md`) opens each of the three tuners,
-  clicks the dial, flips the Output/Input band switch, drags the knob,
-  presses Esc, and clicks off the machine; the screen was photographed at
-  each step. No errors or assertions in the log.
+- Headless, drawn on the processor (pixman, so in 2D), at 1600x1000,
+  1280x720 and 2560x1440 with `DESK_SCALE=1.5`, with stand-ins for
+  `nmcli`, `bluetoothctl` and `pactl` first on `PATH` (30 networks that
+  grow by three when a scan is back, three paired devices, four outputs;
+  one network, one device and one output that refuse). The scripted hand
+  (`DESK_HAND`, with `plug`, `jack`, `hole` and `by`, see
+  `docs/MODDING.md`) opens each tuner and pulls the plug over several
+  jacks, to the end of the row (which slides), into a jack, onto nothing,
+  into one that refuses, into the hole; uses the arrows, Page Up/Down and
+  Return; flips the left-hand button; presses again with the plug in
+  hand; shuts the card, and locks the desk, with the plug in hand; and the
+  list changes under a held plug. The screen was photographed at each
+  step. Each seat, Return or hole called the backend once.
+- What it costs, on the processor at 1600x1000 (Ryzen 7 9800X3D, one core
+  of it): with the card out and nothing moving, the desk makes the same 4
+  frames a second as with no card out (the set's own meters); dragging
+  the plug, 58 frames a second at about 1 ms a frame, 7% of a core;
+  settling, 2%. Held to a quarter of one core and 1 GB (`systemd-run
+  -p CPUQuota=25% -p MemoryMax=1G`, `taskset`) at 1280x720: the same 60 a
+  second, 6% of that core. Not tried on a Raspberry Pi.
+- Under AddressSanitizer, a whole open, drag, seat, close: no errors; the
+  only reports are cairo's font cache, as everywhere else in the desk.
+  Both pictures and the timer are gone after the card is put away.
 - Not tried: joining a new password-protected network, and pairing a new
   Bluetooth device, which rely on nm-applet's and blueman's agents.

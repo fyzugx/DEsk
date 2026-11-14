@@ -129,11 +129,12 @@ there -- its material, the light on it, its shadow and the wear of use.
   a key to unlock the power buttons, and the system tray as paper slips
   under it (more than fit, and the wheel slides the row along). A brass
   **CHOOSE** button beside the wireless lever, the Bluetooth lever and the
-  knob slides a card out from under the controls, with a radio tuning
-  dial on it: the networks in range, the Bluetooth devices, or the speakers
-  and microphones. Turn its knob (wheel, drag or arrow keys) and press it
-  (or Return) to join, connect or switch; its other readout always shows
-  what is in use now. NetworkManager, BlueZ and PipeWire do the work.
+  knob slides a card out from under the controls, with a switchboard on
+  it: a jack for each network in range, Bluetooth device, or speaker and
+  microphone. Pull the brass plug out of one jack and put it in another to
+  join, connect or switch (or choose with the arrow keys and press
+  Return); its readout always shows what is in use now. NetworkManager,
+  BlueZ and PipeWire do the work.
 - **A desk calendar, a desk memo pad and a clock** stand on the shelf. The
   calendar has a notebook of plans and to-dos, and notes are peeled off and
   stuck onto the day. The memo pad is taken down the same way and written
