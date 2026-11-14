@@ -1091,11 +1091,11 @@ struct desk_server {
 	struct wlr_scene_tree *layer_console;
 	struct wlr_scene_buffer *cc_dim;
 	/* A tuner on a card slid out over the set: what is behind the wireless
-	 * lever, the Bluetooth lever or the knob, on a dial to pick from
+	 * lever, the Bluetooth lever or the knob, on a switchboard to pick from
 	 * (devices.c does the work). which is DESK_CC_WIFI, _BT or _VOL, or -1
-	 * when there is none. sel is the entry under the pointer and pos where
-	 * the scale has rolled to on its way there; band, for sound, playing
-	 * (0) or recording (1). */
+	 * when there is none. sel is the jack the keys are on, off the first
+	 * jack on the board and pos where the row has slid to on its way there;
+	 * band, for sound, playing (0) or recording (1). */
 	int ccd_which;
 	double ccd_pull, ccd_pull_from, ccd_pull_to, ccd_pull_start;
 	bool ccd_pulling;
@@ -1104,10 +1104,16 @@ struct desk_server {
 	double ccd_pos, ccd_pos_at;
 	bool ccd_chose;                     /* sel has been turned by hand */
 	char ccd_sel_id[160];               /* ...to this one, by devices.c's id */
-	/* a hand on the knob: where it took hold, and what was chosen then */
-	bool ccd_grab, ccd_turned;
-	double ccd_grab_x;
-	int ccd_grab_sel;
+	int ccd_off, ccd_hot_at;
+	/* the order of the jacks, by id (ccd_list) */
+	char ccd_order[DESK_TUNER_MAX][160];
+	int ccd_norder;
+	bool ccd_resort, ccd_scanned;
+	/* the one put through, its answer awaited (want: 1 a jack, 2 let go
+	 * of); the one put through by hand; one that did not go through */
+	int ccd_want;
+	char ccd_want_id[160], ccd_plug_id[160], ccd_fail_id[160];
+	struct wl_event_source *ccd_blink;  /* the busy lamps' next blink */
 	/* the card's picture, and what it was drawn from */
 	struct wlr_scene_buffer *ccd_card;
 	int ccd_card_w, ccd_card_h;
@@ -8473,13 +8479,14 @@ static void node_show_within(struct wlr_scene_buffer *b, int pw, int ph, double 
  * knob (or the word under it, or the network's meter) slides a card out
  * from under the row of controls and over the view, with that control's
  * tuner on it: the networks in range, the devices, the speakers and
- * microphones, printed round a dial. It is drawn over the set the way the
- * needles and lamps are, and changes nothing in the room. The knob is
- * turned -- the wheel, a drag across it, the arrow keys -- to roll the one
- * wanted under the pointer, and pressed (or Return) to take it. Another
- * CHOOSE puts its tuner on the card instead; the same one again slides it
- * back. The other mouse button on a control is still the whole program
- * (console_open_settings), and so is the tuner's right-hand button. */
+ * microphones, each a jack on a switchboard. It is drawn over the set the
+ * way the needles and lamps are, and changes nothing in the room. The plug
+ * is in the jack of the one in use; pulled out and put in another, it takes
+ * that one. The keys do the same without it -- the arrows, the wheel or a
+ * click choose a jack, Return takes it. Another CHOOSE puts its tuner on
+ * the card instead; the same one again slides it back. The other mouse
+ * button on a control is still the whole program (console_open_settings),
+ * and so is the tuner's right-hand button. */
 
 #define CCD_OPEN_S 0.45
 
@@ -8496,7 +8503,7 @@ static bool ccd_out(const struct desk_server *server)
 	return server->ccd_which >= 0 && server->ccd_pull_to > 0.5;
 }
 
-/* The list on the dial: for sound, the band's. */
+/* The list on the board: for sound, the band's. */
 static enum desk_dev_kind ccd_kind(const struct desk_server *server)
 {
 	switch (server->ccd_which) {
@@ -8509,29 +8516,99 @@ static enum desk_dev_kind ccd_kind(const struct desk_server *server)
 	}
 }
 
-/* Which entry is chosen: the one the hand turned to, found again by its
+/* The list, in the order of the jacks along the board (map: a jack to its
+ * place in the list): the one in use, then the saved or paired ones, then
+ * the rest. The order is taken when the card comes out, when a scan is
+ * back and when the band is changed, and kept while the card is out, so
+ * that a jack does not run along the row because what is in it has just
+ * been connected; what turns up in between goes on the end. */
+static int ccd_list(struct desk_server *server, struct desk_dev_list *L, int *map)
+{
+	desk_devices_get(ccd_kind(server), L);
+	int n = L->n < DESK_TUNER_MAX ? L->n : DESK_TUNER_MAX, k = 0;
+	bool used[DESK_TUNER_MAX] = { false };
+	if (server->ccd_resort && L->read) {
+		server->ccd_norder = 0;
+		server->ccd_resort = false;
+	}
+	for (int o = 0; o < server->ccd_norder; o++) {
+		for (int i = 0; i < n; i++) {
+			if (!used[i] && !strcmp(L->d[i].id, server->ccd_order[o])) {
+				used[i] = true;
+				map[k++] = i;
+				break;
+			}
+		}
+	}
+	for (int r = 3; r >= 0; r--) {
+		for (int i = 0; i < n; i++) {
+			if (!used[i] && L->d[i].active * 2 + L->d[i].known == r) {
+				used[i] = true;
+				map[k++] = i;
+			}
+		}
+	}
+	for (int i = 0; i < k; i++) {
+		snprintf(server->ccd_order[i], sizeof server->ccd_order[i], "%s", L->d[map[i]].id);
+	}
+	server->ccd_norder = k;
+	return k;
+}
+
+/* The jack of the one with id, or -1. */
+static int ccd_find(const struct desk_dev_list *L, const int *map, int n, const char *id)
+{
+	for (int i = 0; id[0] && i < n; i++) {
+		if (!strcmp(L->d[map[i]].id, id)) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+/* Which jack is chosen: the one the hand turned to, found again by its
  * id after the list has been read again (it may have moved); before the
  * hand has turned it, the one in use. */
-static int ccd_sel_in(struct desk_server *server, const struct desk_dev_list *L)
+static int ccd_sel_in(struct desk_server *server, const struct desk_dev_list *L, const int *map,
+	int n)
 {
-	int n = L->n < DESK_TUNER_MAX ? L->n : DESK_TUNER_MAX;
 	if (n == 0) {
 		return 0;
 	}
 	if (server->ccd_chose) {
-		for (int i = 0; i < n; i++) {
-			if (!strcmp(L->d[i].id, server->ccd_sel_id)) {
-				return i;
-			}
+		int i = ccd_find(L, map, n, server->ccd_sel_id);
+		if (i >= 0) {
+			return i;
 		}
 		return server->ccd_sel < n ? server->ccd_sel : n - 1;
 	}
 	for (int i = 0; i < n; i++) {
-		if (L->d[i].active) {
+		if (L->d[map[i]].active) {
 			return i;
 		}
 	}
 	return 0;
+}
+
+/* The jack the plug belongs in: the one it was put in, while that is being
+ * put through; else the one it was put in by hand, if that is in use; else
+ * the first in use. -1 is the hole on the shelf. */
+static int ccd_plug_in(struct desk_server *server, const struct desk_dev_list *L,
+	const int *map, int n)
+{
+	if (server->ccd_want) {
+		return server->ccd_want == 1 ? ccd_find(L, map, n, server->ccd_want_id) : -1;
+	}
+	int i = ccd_find(L, map, n, server->ccd_plug_id);
+	if (i >= 0 && L->d[map[i]].active) {
+		return i;
+	}
+	for (i = 0; i < n; i++) {
+		if (L->d[map[i]].active) {
+			return i;
+		}
+	}
+	return -1;
 }
 
 static bool ccd_build(struct desk_server *server, struct desk_tuner *t)
@@ -8542,7 +8619,8 @@ static bool ccd_build(struct desk_server *server, struct desk_tuner *t)
 	}
 	enum desk_dev_kind kind = ccd_kind(server);
 	struct desk_dev_list L;
-	desk_devices_get(kind, &L);
+	int map[DESK_TUNER_MAX];
+	int n = ccd_list(server, &L, map);
 	t->busy = L.busy;
 	if (server->ccd_which == DESK_CC_VOL) {
 		struct desk_dev_list other;
@@ -8573,22 +8651,33 @@ static bool ccd_build(struct desk_server *server, struct desk_tuner *t)
 	}
 	t->right = TR("Settings");
 	t->hot = server->ccd_hot;
-	t->clock = monotonic_sec();
+	t->hot_at = server->ccd_hot_at;
+	t->clock = floor(real_sec() * 4.0);
 	bool shown = L.read && L.have && !L.off;
-	t->n = shown ? (L.n < DESK_TUNER_MAX ? L.n : DESK_TUNER_MAX) : 0;
+	t->n = shown ? n : 0;
 	for (int i = 0; i < t->n; i++) {
-		snprintf(t->name[i], sizeof t->name[i], "%s", L.d[i].label);
-		t->lit[i] = L.d[i].active;
+		const struct desk_dev *d = &L.d[map[i]];
+		snprintf(t->name[i], sizeof t->name[i], "%s", d->label);
+		t->lit[i] = d->active;
+		t->known[i] = d->known;
+		t->secure[i] = d->secure;
+		t->signal[i] = d->signal;
 	}
-	int sel = ccd_sel_in(server, &L);
+	int sel = ccd_sel_in(server, &L, map, t->n);
 	server->ccd_sel = sel;
+	t->sel = t->n ? sel : -1;
+	t->want = server->ccd_want == 1 ? ccd_find(&L, map, t->n, server->ccd_want_id) : -1;
+	t->failed = ccd_find(&L, map, t->n, server->ccd_fail_id);
 	if (server->ccd_pos < -0.5) {
-		/* just come out, or a new band: straight to it, not rolled */
-		server->ccd_pos = sel;
+		/* just come out, or a new band: straight to it, not slid */
+		int max = t->n > DESK_TUNER_ROW ? t->n - DESK_TUNER_ROW : 0;
+		server->ccd_off = sel < DESK_TUNER_ROW ? 0 : sel - DESK_TUNER_ROW / 2;
+		server->ccd_off = server->ccd_off > max ? max : server->ccd_off;
+		server->ccd_pos = server->ccd_off;
 	}
 	t->pos = server->ccd_pos;
 
-	/* the readout: the one under the pointer, and how it stands */
+	/* the readout: the one the keys are on, and how it stands */
 	if (!L.read) {
 		snprintf(t->read1, sizeof t->read1, "...");
 	} else if (!L.have) {
@@ -8598,7 +8687,7 @@ static bool ccd_build(struct desk_server *server, struct desk_tuner *t)
 	} else if (t->n == 0) {
 		snprintf(t->read1, sizeof t->read1, "%s", TR("Nothing in it"));
 	} else {
-		const struct desk_dev *d = &L.d[sel];
+		const struct desk_dev *d = &L.d[map[sel]];
 		snprintf(t->read1, sizeof t->read1, "%s", d->label);
 		switch (kind) {
 		case DESK_DEV_WIFI:
@@ -8619,7 +8708,7 @@ static bool ccd_build(struct desk_server *server, struct desk_tuner *t)
 		snprintf(t->read2, sizeof t->read2, "%s", TR("That did not work"));
 	}
 
-	/* the other readout: what is in use now, wherever the dial is turned */
+	/* the other readout: what is in use now, wherever the row has slid */
 	if (L.read && L.have && !L.off) {
 		int at = -1, n = 0;
 		for (int i = 0; i < L.n; i++) {
@@ -8678,8 +8767,16 @@ static void ccd_gone(struct desk_server *server)
 	server->ccd_which = -1;
 	server->ccd_pull = server->ccd_pull_to = 0.0;
 	server->ccd_pulling = false;
-	server->ccd_grab = false;
-	ccd_hide(server);
+	/* nothing of it kept while it is put away: the picture, and the
+	 * blinking */
+	if (server->ccd_card) {
+		wlr_scene_node_destroy(&server->ccd_card->node);
+		server->ccd_card = NULL;
+	}
+	if (server->ccd_blink) {
+		wl_event_source_remove(server->ccd_blink);
+		server->ccd_blink = NULL;
+	}
 }
 
 static void node_show_within(struct wlr_scene_buffer *b, int pw, int ph, double x, double y,
@@ -8694,6 +8791,16 @@ static bool ccd_where(struct desk_server *server, struct desk_tuner_place *pl, d
 	}
 	pl->y += (1.0 - clampf_d(server->ccd_pull, 0.0, 1.0)) * pl->travel;
 	return true;
+}
+
+static void ccd_paint(struct desk_server *server);
+
+static int ccd_blink_cb(void *data)
+{
+	struct desk_server *server = data;
+	ccd_paint(server);
+	server_schedule_frames(server);
+	return 0;
 }
 
 /* The card where it is now, drawn again only when what is on it has
@@ -8725,7 +8832,11 @@ static void ccd_paint(struct desk_server *server)
 	key = key_add(key, &th, sizeof th);
 	key = key_add(key, &t.n, sizeof t.n);
 	key = key_add(key, &t.pos, sizeof t.pos);
+	key = key_add(key, &t.sel, sizeof t.sel);
+	key = key_add(key, &t.want, sizeof t.want);
+	key = key_add(key, &t.failed, sizeof t.failed);
 	key = key_add(key, &t.hot, sizeof t.hot);
+	key = key_add(key, &t.hot_at, sizeof t.hot_at);
 	key = key_add(key, &t.band, sizeof t.band);
 	key = key_add(key, &t.busy, sizeof t.busy);
 	key = key_add(key, t.title, strlen(t.title));
@@ -8736,10 +8847,23 @@ static void ccd_paint(struct desk_server *server)
 	for (int i = 0; i < t.n; i++) {
 		key = key_add(key, t.name[i], strlen(t.name[i]));
 		key = key_add(key, &t.lit[i], sizeof t.lit[i]);
+		key = key_add(key, &t.known[i], sizeof t.known[i]);
+		key = key_add(key, &t.secure[i], sizeof t.secure[i]);
+		key = key_add(key, &t.signal[i], sizeof t.signal[i]);
 	}
 	if (t.busy) {
-		/* the busy lamp flickers: a new picture a frame */
+		/* the busy lamps blink: a new picture a blink, four a second, and
+		 * a timer for the next one, which stops when nothing is busy */
 		key = key_add(key, &t.clock, sizeof t.clock);
+		if (!server->ccd_blink) {
+			server->ccd_blink = wl_event_loop_add_timer(
+				wl_display_get_event_loop(server->wl_display), ccd_blink_cb, server);
+		}
+		if (server->ccd_blink) {
+			double now = real_sec();
+			wl_event_source_timer_update(server->ccd_blink,
+				(int)ceil(((t.clock + 1.0) / 4.0 - now) * 1000.0) + 1);
+		}
 	}
 	if (!server->ccd_card || server->ccd_card_key != key) {
 		struct desk_buf *b = buf_create(tw, th);
@@ -8772,7 +8896,6 @@ static void ccd_pull(struct desk_server *server, double to)
 static void ccd_put_back(struct desk_server *server)
 {
 	if (ccd_out(server)) {
-		server->ccd_grab = false;
 		ccd_pull(server, 0.0);
 	}
 }
@@ -8794,7 +8917,9 @@ static void ccd_open(struct desk_server *server, int which)
 	server->ccd_chose = false;
 	server->ccd_sel_id[0] = '\0';
 	server->ccd_pos = -1.0;
-	server->ccd_grab = false;
+	server->ccd_resort = server->ccd_scanned = true;
+	server->ccd_want = 0;
+	server->ccd_plug_id[0] = server->ccd_fail_id[0] = '\0';
 	desk_devices_refresh(which == DESK_CC_WIFI ? DESK_DEV_WIFI
 		: which == DESK_CC_BT ? DESK_DEV_BT : DESK_DEV_SINK);
 	if (which == DESK_CC_WIFI) {
@@ -8808,57 +8933,142 @@ static void ccd_open(struct desk_server *server, int which)
 	server_schedule_frames(server);
 }
 
-/* The knob turned to entry sel (held to the ends of the scale), with a
- * click for each one the pointer passes. */
+/* The row slid to off, held to its ends. */
+static void ccd_slide(struct desk_server *server, int off, int n)
+{
+	int max = n > DESK_TUNER_ROW ? n - DESK_TUNER_ROW : 0;
+	off = off < 0 ? 0 : off > max ? max : off;
+	if (off != server->ccd_off) {
+		server->ccd_off = off;
+		server_schedule_frames(server);
+	}
+}
+
+/* The keys on jack sel (held to the ends of the row), with a click for
+ * each one passed, and the row slid to keep it on the board. */
 static void ccd_turn_to(struct desk_server *server, int sel)
 {
 	struct desk_dev_list L;
-	desk_devices_get(ccd_kind(server), &L);
-	int n = L.n < DESK_TUNER_MAX ? L.n : DESK_TUNER_MAX;
+	int map[DESK_TUNER_MAX];
+	int n = ccd_list(server, &L, map);
 	if (n == 0) {
 		return;
 	}
 	sel = sel < 0 ? 0 : sel >= n ? n - 1 : sel;
+	if (sel < server->ccd_off) {
+		ccd_slide(server, sel, n);
+	} else if (sel >= server->ccd_off + DESK_TUNER_ROW) {
+		ccd_slide(server, sel - DESK_TUNER_ROW + 1, n);
+	}
 	if (sel != server->ccd_sel || !server->ccd_chose) {
 		if (sel != server->ccd_sel) {
 			snd_at(server, DESK_SND_KNOB_TICK, server->cursor->x, 0.8);
 		}
 		server->ccd_sel = sel;
 		server->ccd_chose = true;
-		snprintf(server->ccd_sel_id, sizeof server->ccd_sel_id, "%s", L.d[sel].id);
+		snprintf(server->ccd_sel_id, sizeof server->ccd_sel_id, "%s", L.d[map[sel]].id);
 		server_schedule_frames(server);
 	}
 }
 
-/* Pressed: take the one under the pointer -- join it, connect it, play
- * or record through it; one already connected is let go of. */
-static void ccd_take(struct desk_server *server)
+/* The row slid along by so many jacks, the keys' jack kept on the board. */
+static void ccd_row(struct desk_server *server, int by)
+{
+	struct desk_dev_list L;
+	int map[DESK_TUNER_MAX];
+	int n = ccd_list(server, &L, map);
+	int was = server->ccd_off;
+	ccd_slide(server, server->ccd_off + by, n);
+	if (server->ccd_off == was) {
+		return;
+	}
+	snd_at(server, DESK_SND_KNOB_TICK, server->cursor->x, 0.8);
+	int sel = server->ccd_sel;
+	sel = sel < server->ccd_off ? server->ccd_off
+		: sel >= server->ccd_off + DESK_TUNER_ROW ? server->ccd_off + DESK_TUNER_ROW - 1 : sel;
+	if (sel != server->ccd_sel && sel < n) {
+		server->ccd_sel = sel;
+		server->ccd_chose = true;
+		snprintf(server->ccd_sel_id, sizeof server->ccd_sel_id, "%s", L.d[map[sel]].id);
+	}
+}
+
+/* The plug put in jack i: that one taken -- joined, connected, played or
+ * recorded through. One already in use is only where the plug now is. */
+static void ccd_seat(struct desk_server *server, int i)
 {
 	enum desk_dev_kind kind = ccd_kind(server);
 	struct desk_dev_list L;
-	desk_devices_get(kind, &L);
-	int sel = ccd_sel_in(server, &L);
-	if (!L.read || !L.have || L.off || sel >= L.n) {
+	int map[DESK_TUNER_MAX];
+	int n = ccd_list(server, &L, map);
+	if (!L.read || !L.have || L.off || i < 0 || i >= n) {
 		return;
 	}
-	const struct desk_dev *d = &L.d[sel];
+	const struct desk_dev *d = &L.d[map[i]];
 	snd_at(server, DESK_SND_KEY_PRESS, server->cursor->x, 0.8);
-	wlr_log(WLR_INFO, "console: %s, %s", d->label, kind == DESK_DEV_SINK
-		|| kind == DESK_DEV_SOURCE ? "to be the one used"
-		: d->active ? "to be let go of" : "to be joined");
-	if (kind == DESK_DEV_SINK || kind == DESK_DEV_SOURCE) {
-		if (!d->active) {
-			desk_devices_act(kind, DESK_DEV_DEFAULT, d->id);
-		}
-	} else {
-		desk_devices_act(kind, d->active ? DESK_DEV_DISCONNECT : DESK_DEV_CONNECT, d->id);
+	server->ccd_sel = i;
+	server->ccd_chose = true;
+	snprintf(server->ccd_sel_id, sizeof server->ccd_sel_id, "%s", d->id);
+	snprintf(server->ccd_plug_id, sizeof server->ccd_plug_id, "%s", d->id);
+	server->ccd_fail_id[0] = '\0';
+	if (server->ccd_want == 1 && !strcmp(server->ccd_want_id, d->id)) {
+		/* already being put through: asked once */
+	} else if (!d->active) {
+		wlr_log(WLR_INFO, "console: %s, %s", d->label, kind == DESK_DEV_SINK
+			|| kind == DESK_DEV_SOURCE ? "to be the one used" : "to be joined");
+		desk_devices_act(kind, kind == DESK_DEV_SINK || kind == DESK_DEV_SOURCE
+			? DESK_DEV_DEFAULT : DESK_DEV_CONNECT, d->id);
+		server->ccd_want = 1;
+		snprintf(server->ccd_want_id, sizeof server->ccd_want_id, "%s", d->id);
 	}
 	ccd_paint(server);
 	server_schedule_frames(server);
 }
 
-/* Once a frame: the tuner on its way out or in, the scale rolling to
- * where the knob has been turned, and the busy lamp. */
+/* The plug put in the hole: the network or the device it was in let go
+ * of. Sound has always one in use, so there it only goes back. */
+static void ccd_unplug(struct desk_server *server)
+{
+	enum desk_dev_kind kind = ccd_kind(server);
+	struct desk_dev_list L;
+	int map[DESK_TUNER_MAX];
+	int n = ccd_list(server, &L, map);
+	int i = ccd_plug_in(server, &L, map, n);
+	if (kind == DESK_DEV_SINK || kind == DESK_DEV_SOURCE || i < 0 || !L.d[map[i]].active) {
+		return;
+	}
+	const struct desk_dev *d = &L.d[map[i]];
+	snd_at(server, DESK_SND_KEY_PRESS, server->cursor->x, 0.8);
+	wlr_log(WLR_INFO, "console: %s, to be let go of", d->label);
+	desk_devices_act(kind, DESK_DEV_DISCONNECT, d->id);
+	server->ccd_want = 2;
+	server->ccd_fail_id[0] = '\0';
+	ccd_paint(server);
+	server_schedule_frames(server);
+}
+
+/* Return: take the jack the keys are on, the plug going into it; one
+ * already connected is let go of, as the plug put in the hole does. */
+static void ccd_take(struct desk_server *server)
+{
+	enum desk_dev_kind kind = ccd_kind(server);
+	struct desk_dev_list L;
+	int map[DESK_TUNER_MAX];
+	int n = ccd_list(server, &L, map);
+	int sel = ccd_sel_in(server, &L, map, n);
+	if (!L.read || !L.have || L.off || sel >= n) {
+		return;
+	}
+	if (L.d[map[sel]].active && (kind == DESK_DEV_WIFI || kind == DESK_DEV_BT)) {
+		snprintf(server->ccd_plug_id, sizeof server->ccd_plug_id, "%s", L.d[map[sel]].id);
+		ccd_unplug(server);
+	} else {
+		ccd_seat(server, sel);
+	}
+}
+
+/* Once a frame: the tuner on its way out or in, the row sliding to where
+ * it has been slid. */
 static void ccd_tick(struct desk_server *server)
 {
 	if (server->ccd_which < 0) {
@@ -8885,7 +9095,7 @@ static void ccd_tick(struct desk_server *server)
 	}
 	double dt = clampf_d(now - server->ccd_pos_at, 0.0, 0.1);
 	server->ccd_pos_at = now;
-	double to = server->ccd_sel;
+	double to = server->ccd_off;
 	if (server->ccd_pos >= -0.5 && fabs(to - server->ccd_pos) > 0.002) {
 		double k = gfx_flat() ? 1.0 : 1.0 - exp(-dt / 0.075);
 		server->ccd_pos += (to - server->ccd_pos) * k;
@@ -8894,9 +9104,6 @@ static void ccd_tick(struct desk_server *server)
 		}
 		more = true;
 	}
-	struct desk_dev_list L;
-	desk_devices_get(ccd_kind(server), &L);
-	more = more || L.busy;
 	ccd_paint(server);
 	if (more) {
 		server_schedule_frames(server);
@@ -8936,20 +9143,21 @@ static bool ccd_press(struct desk_server *server, uint32_t button)
 		return true;
 	}
 	switch (hit) {
-	case DESK_TUNER_KNOB:
-		/* turned if the hand moves across it, pressed if it does not */
-		server->ccd_grab = true;
-		server->ccd_turned = false;
-		server->ccd_grab_x = server->cursor->x;
-		server->ccd_grab_sel = server->ccd_sel;
+	case DESK_TUNER_JACK:
+		/* a jack: the keys on it */
+		ccd_turn_to(server, (int)at);
 		break;
-	case DESK_TUNER_DIAL:
-		/* a name on the scale: the knob turned to it */
-		ccd_turn_to(server, (int)lround(at));
+	case DESK_TUNER_PREV:
+	case DESK_TUNER_NEXT:
+		ccd_row(server, hit == DESK_TUNER_PREV ? -1 : 1);
+		break;
+	case DESK_TUNER_STOP:
+		ccd_row(server, (int)at * DESK_TUNER_ROW - server->ccd_off);
 		break;
 	case DESK_TUNER_LEFT:
 		snd_at(server, DESK_SND_KEY_PRESS, server->cursor->x, 0.8);
 		desk_devices_act(ccd_kind(server), DESK_DEV_SCAN, NULL);
+		server->ccd_scanned = true;
 		ccd_paint(server);
 		server_schedule_frames(server);
 		break;
@@ -8959,6 +9167,9 @@ static bool ccd_press(struct desk_server *server, uint32_t button)
 		server->ccd_chose = false;
 		server->ccd_sel_id[0] = '\0';
 		server->ccd_pos = -1.0;
+		server->ccd_resort = true;
+		server->ccd_want = 0;
+		server->ccd_plug_id[0] = server->ccd_fail_id[0] = '\0';
 		ccd_paint(server);
 		server_schedule_frames(server);
 		break;
@@ -8974,21 +9185,8 @@ static bool ccd_press(struct desk_server *server, uint32_t button)
 	return true;
 }
 
-/* Let go of the knob: if it was not turned, it was pressed. */
-static bool ccd_release(struct desk_server *server)
-{
-	if (!server->ccd_grab) {
-		return false;
-	}
-	server->ccd_grab = false;
-	if (!server->ccd_turned) {
-		ccd_take(server);
-	}
-	return true;
-}
-
-/* The hand on the knob turning it, or over the tuner: what is under it
- * lit. True when it is the tuner's. */
+/* The hand over the tuner: what is under it lit.
+ * True when it is the tuner's. */
 static bool ccd_motion(struct desk_server *server)
 {
 	if (!ccd_out(server)) {
@@ -8998,27 +9196,20 @@ static bool ccd_motion(struct desk_server *server)
 	if (!ccd_build(server, &t)) {
 		return false;
 	}
-	if (server->ccd_grab) {
-		/* a name's worth of the scale for every so far across */
-		int steps = (int)lround((server->cursor->x - server->ccd_grab_x)
-			/ (0.018 * server->desk_h));
-		if (steps != 0) {
-			server->ccd_turned = true;
-		}
-		ccd_turn_to(server, server->ccd_grab_sel + steps);
-		return true;
-	}
-	int hit = server->ccd_pulling ? DESK_TUNER_OUT : ccd_under(server, &t, NULL);
+	double at = 0.0;
+	int hit = server->ccd_pulling ? DESK_TUNER_OUT : ccd_under(server, &t, &at);
 	int hot = hit >= 0 ? hit : -1;
-	if (hot != server->ccd_hot) {
+	int hot_at = hot == DESK_TUNER_JACK || hot == DESK_TUNER_STOP ? (int)at : -1;
+	if (hot != server->ccd_hot || hot_at != server->ccd_hot_at) {
 		server->ccd_hot = hot;
+		server->ccd_hot_at = hot_at;
 		ccd_paint(server);
 		server_schedule_frames(server);
 	}
 	return hit != DESK_TUNER_OUT;
 }
 
-/* The wheel anywhere over the tuner turns its knob. */
+/* The wheel anywhere over the tuner moves the keys along the row. */
 static bool ccd_axis(struct desk_server *server, const struct wlr_pointer_axis_event *event)
 {
 	if (!ccd_out(server) || event->orientation != WL_POINTER_AXIS_VERTICAL_SCROLL) {
@@ -9034,8 +9225,8 @@ static bool ccd_axis(struct desk_server *server, const struct wlr_pointer_axis_e
 	return true;
 }
 
-/* The keys, with the tuner out: arrows turn it, Return presses it, Esc
- * puts it back. */
+/* The keys, with the tuner out: arrows along the row, Page Up and Down a
+ * board along, Return takes it, Esc puts it back. */
 static bool ccd_keys(struct desk_server *server, xkb_keysym_t sym)
 {
 	if (!ccd_out(server)) {
@@ -9049,6 +9240,10 @@ static bool ccd_keys(struct desk_server *server, xkb_keysym_t sym)
 	case XKB_KEY_Right:
 	case XKB_KEY_Down:
 		ccd_turn_to(server, server->ccd_sel + 1);
+		return true;
+	case XKB_KEY_Page_Up:
+	case XKB_KEY_Page_Down:
+		ccd_row(server, sym == XKB_KEY_Page_Up ? -DESK_TUNER_ROW : DESK_TUNER_ROW);
 		return true;
 	case XKB_KEY_Return:
 	case XKB_KEY_KP_Enter:
@@ -9067,10 +9262,32 @@ static bool ccd_keys(struct desk_server *server, xkb_keysym_t sym)
 static void devices_changed(void *data)
 {
 	struct desk_server *server = data;
-	if (server->ccd_which >= 0) {
-		ccd_paint(server);
-		server_schedule_frames(server);
+	if (server->ccd_which < 0) {
+		return;
 	}
+	struct desk_dev_list L;
+	int map[DESK_TUNER_MAX];
+	int n = ccd_list(server, &L, map);
+	if (!L.busy) {
+		/* what was asked is answered: a plug put in a jack that is not
+		 * in use now did not go through */
+		if (server->ccd_want == 1) {
+			int i = ccd_find(&L, map, n, server->ccd_want_id);
+			if (i < 0 || !L.d[map[i]].active) {
+				wlr_log(WLR_INFO, "console: %s did not go through", server->ccd_want_id);
+				snprintf(server->ccd_fail_id, sizeof server->ccd_fail_id, "%s",
+					server->ccd_want_id);
+			}
+		}
+		server->ccd_want = 0;
+		if (server->ccd_scanned) {
+			/* a scan back: the jacks in order again */
+			server->ccd_scanned = false;
+			server->ccd_resort = true;
+		}
+	}
+	ccd_paint(server);
+	server_schedule_frames(server);
 }
 
 static void console_drag(struct desk_server *server)
@@ -21544,9 +21761,6 @@ static void server_cursor_button(struct wl_listener *listener, void *data)
 			paint_console(server);
 			return;
 		}
-		if (event->button == BTN_LEFT && ccd_release(server)) {
-			return;   /* and of the tuner's */
-		}
 		if (server->cursor_mode == DESK_CUR_RESIZE && server->grabbed
 			&& server->grabbed->sizing) {
 			/* let go of the edge: the turn of the paper settles */
@@ -24078,7 +24292,7 @@ static int hand_cb(void *data)
 	struct desk_server *server = hd->server;
 	int next = 16;
 	if (hd->g_ms > 0.0) {
-		double u = clampf_d((monotonic_sec() - hd->g_start) * 1000.0 / hd->g_ms, 0.0, 1.0);
+		double u = clampf_d((real_sec() - hd->g_start) * 1000.0 / hd->g_ms, 0.0, 1.0);
 		hand_move(server, hd->gx0 + (hd->gx1 - hd->gx0) * u, hd->gy0 + (hd->gy1 - hd->gy0) * u);
 		if (u < 1.0) {
 			wl_event_source_timer_update(hd->timer, 16);
@@ -24101,7 +24315,7 @@ static int hand_cb(void *data)
 			hd->gx1 = a;
 			hd->gy1 = b;
 			hd->g_ms = fmax(c, 1.0);
-			hd->g_start = monotonic_sec();
+			hd->g_start = real_sec();
 		} else if (!strcmp(cmd, "press") || !strcmp(cmd, "click")) {
 			hand_button(server, true);
 			if (!strcmp(cmd, "click")) {
