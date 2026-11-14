@@ -1132,6 +1132,14 @@ struct desk_server {
 	struct wl_event_source *ccd_blink;  /* the busy lamps' next blink */
 	/* the card's picture, and what it was drawn from; the cord's over it */
 	struct wlr_scene_buffer *ccd_card, *ccd_cord;
+	/* the top of the tube's bezel, in front of the card's foot */
+	struct wlr_scene_buffer *ccd_cap;
+	uint64_t ccd_cap_key;
+	/* the set drawn this much lower while the card stands above it, and
+	 * the wall that leaves bare at the top of the screen */
+	double cc_pan;
+	int cc_pan_px;
+	struct wlr_scene_buffer *cc_wall;
 	int ccd_card_w, ccd_card_h;
 	uint64_t ccd_card_key, ccd_cord_key;
 
@@ -7755,6 +7763,8 @@ static void cc_live_opacity(struct desk_server *server, double a)
  * the sheet, which desk_relayout drops for another level or size, and the
  * sheet made again went on top of its layer and hid them until the next
  * login (#12). */
+static void cc_wall_make(struct desk_server *server, struct desk_buf *sheet, int w, int h);
+
 static void view_bases_under(struct desk_server *server)
 {
 	if (server->cc_base && server->cc_live) {
@@ -7808,6 +7818,7 @@ static void paint_console_body(struct desk_server *server)
 		|| server->cc_base_room != room) {
 		struct desk_buf *bb = buf_create(w, h);
 		desk_draw_console_base(bb->cr, w, h);
+		cc_wall_make(server, bb, w, h);
 		scene_put(&server->cc_base, server->layer_console, bb, 0, 0, NULL);
 		server->cc_base_w = w;
 		server->cc_base_h = h;
@@ -8493,9 +8504,10 @@ static void node_show_within(struct wlr_scene_buffer *b, int pw, int ph, double 
 /* ---- what is behind a control, on a tuner ------------------------
  *
  * The CHOOSE button beside the wireless lever, the Bluetooth lever or the
- * knob (or the word under it, or the network's meter) slides a card out
- * from under the row of controls and over the view, with that control's
- * tuner on it: the networks in range, the devices, the speakers and
+ * knob (or the word under it, or the network's meter) brings a card up
+ * out of the slot along the top of the set, to stand above it -- the set
+ * sinks down the screen as it rises, to make the room -- with that
+ * control's tuner on it: the networks in range, the devices, the speakers and
  * microphones, each a jack on a switchboard. It is drawn over the set the
  * way the needles and lamps are, and changes nothing in the room. The plug
  * is in the jack of the one in use; pulled out and put in another, it takes
@@ -8505,7 +8517,8 @@ static void node_show_within(struct wlr_scene_buffer *b, int pw, int ph, double 
  * button on a control is still the whole program (console_open_settings),
  * and so is the tuner's right-hand button. */
 
-#define CCD_OPEN_S 0.45
+#define CCD_OPEN_S 0.80
+#define CCD_SEAT 0.86                    /* of the way, where it reaches its stop */
 #define CCD_PLUG_S 0.18                  /* the plug back to its jack */
 #define CCD_CORD_DT (1.0 / 120.0)        /* the cord's step */
 
@@ -8804,6 +8817,9 @@ static void ccd_hide(struct desk_server *server)
 	if (server->ccd_cord) {
 		wlr_scene_node_set_enabled(&server->ccd_cord->node, false);
 	}
+	if (server->ccd_cap) {
+		wlr_scene_node_set_enabled(&server->ccd_cap->node, false);
+	}
 }
 
 static void ccd_gone(struct desk_server *server)
@@ -8822,6 +8838,10 @@ static void ccd_gone(struct desk_server *server)
 	if (server->ccd_cord) {
 		wlr_scene_node_destroy(&server->ccd_cord->node);
 		server->ccd_cord = NULL;
+	}
+	if (server->ccd_cap) {
+		wlr_scene_node_destroy(&server->ccd_cap->node);
+		server->ccd_cap = NULL;
 	}
 	if (server->ccd_blink) {
 		wl_event_source_remove(server->ccd_blink);
@@ -8848,15 +8868,133 @@ static void ccd_let_go(struct desk_server *server)
 static void node_show_within(struct wlr_scene_buffer *b, int pw, int ph, double x, double y,
 	double k, double x0, double y0, double x1, double y1);
 
-/* Where the card is now, mid slide or at rest. */
+/* Where the card rests, on the screen: standing in its slot, with the
+ * set drawn as far down as it is just now (cc_pan). The hand has it only
+ * once it is there. */
 static bool ccd_where(struct desk_server *server, struct desk_tuner_place *pl, double *clip_y,
 	int *margin)
 {
 	if (!desk_console_card_place(server->desk_w, server->desk_h, pl, clip_y, margin)) {
 		return false;
 	}
-	pl->y += (1.0 - clampf_d(server->ccd_pull, 0.0, 1.0)) * pl->travel;
+	pl->y += server->cc_pan_px;
+	*clip_y += server->cc_pan_px;
 	return true;
+}
+
+/* How the card stands at pull p (0 in the slot, 1 standing): how far it
+ * is up out of the slot (rise, against pl->travel) and how far the set
+ * has gone down for it (pan, against pl->pan). The set goes first and the
+ * card comes up after it, a little past its stop and back onto it; going
+ * in, the card goes down first and the set comes back up after it. */
+static void ccd_pose(const struct desk_server *server, double *rise, double *pan)
+{
+	double p = clampf_d(server->ccd_pull, 0.0, 1.0);
+	*pan = ccd_ease(0.0, 0.70, p);
+	if (server->ccd_pull_to < 0.5) {
+		*rise = ccd_ease(0.30, 1.0, p);
+	} else if (p < CCD_SEAT) {
+		*rise = 1.035 * ccd_ease(0.12, CCD_SEAT, p);
+	} else {
+		*rise = 1.0 + 0.035 * (1.0 - ccd_ease(CCD_SEAT, 1.0, p));
+	}
+}
+
+/* The set drawn dy lower, and what that leaves bare at the top of the
+ * screen covered with the wall it would have shown. */
+static void cc_pan_set(struct desk_server *server, double dy)
+{
+	int px = (int)lround(dy);
+	server->cc_pan = dy;
+	if (px == server->cc_pan_px) {
+		return;
+	}
+	server->cc_pan_px = px;
+	wlr_scene_node_set_position(&server->layer_console->node, 0, px);
+	desk_console_set_pan(px);
+	if (server->cc_wall) {
+		if (px > 0) {
+			wlr_scene_node_set_position(&server->cc_wall->node, 0, -px);
+			wlr_scene_buffer_set_dest_size(server->cc_wall, server->desk_w, px);
+			wlr_scene_node_lower_to_bottom(&server->cc_wall->node);
+		}
+		wlr_scene_node_set_enabled(&server->cc_wall->node, px > 0);
+	}
+	server_schedule_frames(server);
+}
+
+/* The wall above the set, which the traced sheet stops short of: its top
+ * row, run together across so the antenna and the like are not drawn up
+ * it in streaks, and darker going up, out of the lamp's reach. Made with
+ * the sheet, and only shown while the set is drawn down. */
+static void cc_wall_make(struct desk_server *server, struct desk_buf *sheet, int w, int h)
+{
+	int wh = h / 3 > 2 ? h / 3 : 2;
+	cairo_surface_flush(sheet->surface);
+	const unsigned char *src = cairo_image_surface_get_data(sheet->surface);
+	int stride = cairo_image_surface_get_stride(sheet->surface);
+	double *row = calloc((size_t)w * 3, sizeof *row);
+	double *sm = calloc((size_t)w * 3, sizeof *sm);
+	struct desk_buf *b = src && row && sm ? buf_create(w, wh) : NULL;
+	unsigned char *dst = NULL;
+	if (b) {
+		cairo_surface_flush(b->surface);
+		dst = cairo_image_surface_get_data(b->surface);
+	}
+	if (!dst) {
+		if (b) {
+			wlr_buffer_drop(&b->base);
+		}
+		free(row);
+		free(sm);
+		return;
+	}
+	int ds = cairo_image_surface_get_stride(b->surface);
+	/* the mean of the top few rows, then a wide box across */
+	for (int x = 0; x < w; x++) {
+		for (int y = 0; y < 4 && y < h; y++) {
+			const unsigned char *q = src + y * stride + x * 4;
+			for (int c = 0; c < 3; c++) {
+				row[x * 3 + c] += q[c] * 0.25;
+			}
+		}
+	}
+	int r = w / 24 > 1 ? w / 24 : 1;
+	for (int x = 0; x < w; x++) {
+		int n = 0;
+		double acc[3] = { 0, 0, 0 };
+		for (int i = x - r; i <= x + r; i++) {
+			int j = i < 0 ? 0 : i >= w ? w - 1 : i;
+			for (int c = 0; c < 3; c++) {
+				acc[c] += row[j * 3 + c];
+			}
+			n++;
+		}
+		for (int c = 0; c < 3; c++) {
+			sm[x * 3 + c] = acc[c] / n;
+		}
+	}
+	for (int y = 0; y < wh; y++) {
+		/* y counts down to the sheet: 0 is furthest up */
+		double f = 0.62 + 0.38 * pow((double)y / (wh - 1 > 0 ? wh - 1 : 1), 0.8);
+		for (int x = 0; x < w; x++) {
+			unsigned char *q = dst + y * ds + x * 4;
+			double blend = y >= wh - 3 ? (y - (wh - 3)) / 3.0 : 0.0;
+			for (int c = 0; c < 3; c++) {
+				double v = sm[x * 3 + c] * f * (1.0 - blend) + row[x * 3 + c] * blend;
+				q[c] = (unsigned char)clampf_d(v, 0.0, 255.0);
+			}
+			q[3] = 255;
+		}
+	}
+	free(row);
+	free(sm);
+	cairo_surface_mark_dirty(b->surface);
+	scene_put(&server->cc_wall, server->layer_console, b, 0, -wh, NULL);
+	wlr_scene_buffer_set_source_box(server->cc_wall, NULL);
+	wlr_scene_node_set_enabled(&server->cc_wall->node, false);
+	server->cc_pan_px = -1;
+	cc_pan_set(server, server->cc_pan);
 }
 
 /* Where the plug goes, not held: from where it was let go to the jack it
@@ -9025,7 +9163,7 @@ static bool ccd_cord_tick(struct desk_server *server, const struct desk_tuner *t
  * plug, so that a frame of it moving is only that much to draw and to
  * send, and drawn again only when what it is drawn from has moved. */
 static void ccd_cord_put(struct desk_server *server, const struct desk_tuner *t,
-	const struct desk_tuner_place *pl, int m, double clip)
+	const struct desk_tuner_place *pl, int m, double ox, double oy, double clip)
 {
 	const double *x = server->ccd_cord_sx, *y = server->ccd_cord_sy;
 	double rx = -1.0, ry = -1.0;
@@ -9079,7 +9217,9 @@ static void ccd_cord_put(struct desk_server *server, const struct desk_tuner *t,
 		}
 	}
 	wlr_scene_node_raise_to_top(&server->ccd_cord->node);
-	node_show_within(server->ccd_cord, bw, bh, pl->x - m + bx, pl->y - m + by, 1.0, 0.0, 0.0,
+	/* over the card's picture (ox, oy), wherever it has risen to, and
+	 * cut at the slot's lip with it */
+	node_show_within(server->ccd_cord, bw, bh, ox + bx, oy + by, 1.0, 0.0, -pl->pan,
 		server->desk_w, clip);
 }
 
@@ -9093,9 +9233,10 @@ static int ccd_blink_cb(void *data)
 	return 0;
 }
 
-/* The card where it is now, drawn again only when what is on it has
- * changed, and cut off at the top of the controls it is coming out from
- * under; the cord over it. */
+/* The card where it is now (ccd_pose), drawn again only when what is on
+ * it has changed, and cut off at the lip of the slot it comes up out of;
+ * the cord over it. It is in the set's own layer, as the set is laid out,
+ * and goes down the screen with it. */
 static void ccd_paint(struct desk_server *server)
 {
 	int w = server->desk_w;
@@ -9113,7 +9254,8 @@ static void ccd_paint(struct desk_server *server)
 	struct desk_tuner_place pl;
 	double clip;
 	int m;
-	if (!ccd_where(server, &pl, &clip, &m)) {
+	/* as the set is laid out: the layer they are in goes down with it */
+	if (!desk_console_card_place(server->desk_w, server->desk_h, &pl, &clip, &m)) {
 		ccd_hide(server);
 		return;
 	}
@@ -9181,14 +9323,42 @@ static void ccd_paint(struct desk_server *server)
 	} else {
 		wlr_scene_node_raise_to_top(&server->ccd_card->node);
 	}
-	node_show_within(server->ccd_card, tw, th, pl.x - m, pl.y - m, 1.0, 0.0, 0.0, w, clip);
-	ccd_cord_put(server, &t, &pl, m, clip);
+	double rise, pan;
+	ccd_pose(server, &rise, &pan);
+	cc_pan_set(server, pl.pan * pan);
+	/* up out of the slot by rise of its height, cut off at the lip */
+	double ox = pl.x - m, oy = pl.y - m + (1.0 - rise) * pl.travel;
+	node_show_within(server->ccd_card, tw, th, ox, oy, 1.0, 0.0, -pl.pan, w, clip);
+	/* the tube's bezel comes up past the slot, in front of the card: its
+	 * top, cut from the set, over the card's foot */
+	int cb[4];
+	if (desk_console_bezel_cap_box(w, server->desk_h, cb)) {
+		uint64_t ck = (uint64_t)desk_console_room(w, server->desk_h) << 32
+			^ (uint64_t)w << 16 ^ (uint64_t)server->desk_h;
+		if (!server->ccd_cap || server->ccd_cap_key != ck) {
+			struct desk_buf *b = buf_create(cb[2], cb[3]);
+			desk_draw_console_bezel_cap(b->cr, w, server->desk_h, cb);
+			scene_put(&server->ccd_cap, server->layer_console, b, cb[0], cb[1], NULL);
+			wlr_scene_buffer_set_source_box(server->ccd_cap, NULL);
+			server->ccd_cap->point_accepts_input = shadow_accepts;
+			server->ccd_cap_key = ck;
+		}
+		wlr_scene_node_set_position(&server->ccd_cap->node, cb[0], cb[1]);
+		wlr_scene_node_place_above(&server->ccd_cap->node, &server->ccd_card->node);
+		wlr_scene_node_set_enabled(&server->ccd_cap->node, true);
+	}
+	ccd_cord_put(server, &t, &pl, m, ox, oy, clip);
 }
 
 static void ccd_pull(struct desk_server *server, double to)
 {
-	/* the card sliding out, or back in under the controls */
+	/* the card drawn up out of its slot, or put back in it; coming out,
+	 * it clicks onto its stop */
 	desk_sound_play(DESK_SND_CARD_SLIDE, -0.30, to > 0.5 ? 0.8 : 0.6, to > 0.5 ? 0.25 : 1.0);
+	if (to > 0.5 && server->ccd_pull < CCD_SEAT && !gfx_flat()) {
+		desk_sound_play_in(DESK_SND_GUARD_STOP, -0.30, 0.45, 1.25,
+			CCD_OPEN_S * (CCD_SEAT - server->ccd_pull) / (1.0 - server->ccd_pull));
+	}
 	server->ccd_pull_from = server->ccd_pull;
 	server->ccd_pull_to = to;
 	server->ccd_pull_start = monotonic_sec();
@@ -9379,18 +9549,30 @@ static void ccd_take(struct desk_server *server)
  * it has been slid, and the cord swinging. */
 static void ccd_tick(struct desk_server *server)
 {
+	double now = monotonic_sec();
 	if (server->ccd_which < 0) {
+		/* the card gone at once (the set turned away from, the desk
+		 * locked): the set comes back up after it, not in a jump */
+		static double was;
+		double dt = clampf_d(now - was, 0.0, 0.1);
+		was = now;
+		if (server->cc_pan > 0.0) {
+			double k = gfx_flat() ? 1.0 : 1.0 - exp(-dt / 0.08);
+			double to = server->cc_pan * (1.0 - k);
+			cc_pan_set(server, to < 0.5 ? 0.0 : to);
+			server_schedule_frames(server);
+		}
 		return;
 	}
-	double now = monotonic_sec();
 	bool more = false;
 	if (server->ccd_pulling) {
 		double u = clampf_d((now - server->ccd_pull_start) / CCD_OPEN_S, 0.0, 1.0);
 		if (gfx_flat()) {
 			u = 1.0;
 		}
+		/* even in time: ccd_pose gives the rise and the set's move their ease */
 		server->ccd_pull = server->ccd_pull_from
-			+ (server->ccd_pull_to - server->ccd_pull_from) * ccd_ease(0.0, 1.0, u);
+			+ (server->ccd_pull_to - server->ccd_pull_from) * u;
 		if (u >= 1.0) {
 			server->ccd_pulling = false;
 			if (server->ccd_pull_to < 0.5) {
@@ -9432,7 +9614,7 @@ static int ccd_under(struct desk_server *server, const struct desk_tuner *t, dou
 	struct desk_tuner_place pl;
 	double clip;
 	int m;
-	if (!ccd_where(server, &pl, &clip, &m) || server->cursor->y >= clip) {
+	if (server->ccd_pulling || !ccd_where(server, &pl, &clip, &m)) {
 		return DESK_TUNER_OUT;
 	}
 	return desk_tuner_hit(t, &pl, server->cursor->x, server->cursor->y, at);
@@ -15999,6 +16181,7 @@ static void views_prewarm(struct desk_server *server)
 			|| server->cc_base_room != room) {
 			struct desk_buf *bb = buf_create(w, h);
 			desk_draw_console_base(bb->cr, w, h);
+			cc_wall_make(server, bb, w, h);
 			scene_put(&server->cc_base, server->layer_console, bb, 0, 0, NULL);
 			wlr_scene_node_set_enabled(&server->cc_base->node, false);
 			server->cc_base_w = w;

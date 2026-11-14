@@ -16,9 +16,12 @@ the other mouse button on a control opens `nm-connection-editor`,
   Bluetooth lever and the volume knob. Pushed, it stays down while its tuner
   is out; another one swaps the tuner; the same one again puts it away. The
   word under each control, and the network meter, do the same.
-- **The card.** A walnut card slides out from behind the top of the row of
-  controls and over the view, with the tuner on it. Esc, or the same
-  CHOOSE, slides it back; a click off the machine turns back to the desk.
+- **The card.** A walnut card, as thick as a finger, rises out of a brass
+  slot along the top of the set and stands above it, a little past its
+  stop and back onto it with a click; the set sinks down the screen as it
+  rises to make the room, so nothing on the set is covered. Esc, or the
+  same CHOOSE, sinks it back into the slot and the set comes back up; a
+  click off the machine turns back to the desk.
 - **The tuner.** A switchboard: a jack for each one in the list, its name
   on an ivory strip under it and a lamp over it (green in use, amber saved
   or paired, blinking while it is being put through, red when it did not
@@ -54,9 +57,23 @@ does.
 - The card is drawn by `desk_draw_tuner` into one picture and put up in the
   console's layer above everything live on the set (`ccd_paint`), drawn
   again only when what is on it changes -- the list, the jack the keys are
-  on, the row sliding, a lamp. It rests above the CHOOSE row
-  (`desk_console_card_place`) and is cut off at the top of that row while
-  it slides, so it comes out from under the controls.
+  on, the row sliding, a lamp. It stands in the slot along the top of the
+  instrument tower (`desk_console_card_place`: the tower's top edge,
+  projected through the set's camera), and the slot is drawn on the set's
+  sheet. There is seldom room above the set, so the console's whole layer
+  is moved down while the card is out (`cc_pan_set`, as far as
+  `pl->pan`, never so far that the bottom row of controls and its lamps
+  leave the screen; the card is made smaller only if that is not
+  enough). The set's hit tests look that much higher up it
+  (`desk_console_set_pan`); the strip this bares at the top of the screen
+  is covered with the wall, made once from the sheet's top rows
+  (`cc_wall_make`). The tube's brass bezel stands proud of the tower and
+  comes up past its top edge, so the slot is left out behind it, and its
+  top is cut from the set and laid over the card's foot
+  (`desk_console_bezel_cap_box`): the card comes up behind it. On the way (`ccd_pose`) the card is only moved and cut
+  off at the slot's lip, never drawn again; the hand has it only once it
+  has reached its stop. When the card goes at once (the set turned away
+  from, the desk locked), the set eases back up rather than jumping.
 - The cord is a picture of its own over the card's, only as big as the
   cord and its plug (`ccd_cord_put`, `desk_draw_cord`: one path, stroked
   twice). While it moves, only that picture is drawn again and sent, never

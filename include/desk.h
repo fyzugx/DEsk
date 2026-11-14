@@ -219,14 +219,16 @@ enum {
 struct desk_tuner_place {
 	double x, y, w, h;       /* where it is drawn */
 	double k;                /* its size against the 600 x 400 it is laid out at */
-	double travel;           /* how far it has still to come at pull 0 */
+	double travel;           /* how far it rises out of its slot */
+	double pan;              /* how far the set is drawn down to make room for it */
 };
 void desk_draw_tuner(cairo_t *cr, const struct desk_tuner *t, const struct desk_tuner_place *pl,
 	double pull);
 /* Where the card rests on the screen w by h (for desk_draw_tuner at pull 1,
- * and desk_tuner_hit), how far below that it starts (pl->travel), the line it
- * is cut at while it comes out from behind the controls, and the margin
- * round it for its shadow. */
+ * and desk_tuner_hit): standing in the slot along the top of the set,
+ * above it, as placed on the set before the set is drawn pl->pan lower to
+ * make room for it; clip_y is the slot's line, which it goes down into;
+ * pl->travel how far it rises; and the margin round it for its shadow. */
 bool desk_console_card_place(int w, int h, struct desk_tuner_place *pl, double *clip_y,
 	int *margin);
 /* What is under a point on it, out: DESK_TUNER_*. On a jack or a stop,
@@ -242,6 +244,16 @@ bool desk_tuner_spot(const struct desk_tuner *t, int what, int i, double *x, dou
  * held lifts the plug off the board. */
 void desk_draw_cord(cairo_t *cr, const struct desk_tuner_place *pl, const double *x,
 	const double *y, int n, double ring_x, double ring_y, bool held);
+/* The top of the tube's bezel, which comes up past the slot and stands in
+ * front of the card rising out of it: where it is on the set (x, y, w,
+ * h; false if it does not reach the slot), and that part of the set drawn
+ * into a picture of that size, clipped to the bezel. */
+bool desk_console_bezel_cap_box(int w, int h, int box[4]);
+void desk_draw_console_bezel_cap(cairo_t *cr, int w, int h, const int box[4]);
+/* The set drawn dy lower on the screen than it is laid out (to make room
+ * above it for the tuner's card): the hit tests below look that much
+ * higher up it. */
+void desk_console_set_pan(double dy);
 /* the glass over the guarded set, which is drawn rather than baked */
 bool desk_console_guard_hit(int w, int h, double px, double py, double open);
 /* Is the pointer on the set as it stands on the desk, seen from the desk's

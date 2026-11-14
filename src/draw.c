@@ -18639,8 +18639,19 @@ static int console_xform(int screen_w, int screen_h, struct room_render **out_rr
 	return 1;
 }
 
+/* How far the set is drawn down the screen just now, to make room above
+ * it for the tuner's card: what the pointer is over is looked for that
+ * much higher up the set. */
+static double g_cc_pan;
+
+void desk_console_set_pan(double dy)
+{
+	g_cc_pan = dy;
+}
+
 int desk_console_hit(int screen_w, int screen_h, double px, double py)
 {
+	py -= g_cc_pan;
 	struct room_render *rr;
 	double ox, oy, scale;
 	if (!console_xform(screen_w, screen_h, &rr, &ox, &oy, &scale) || !rr->console_ids) {
@@ -18659,6 +18670,7 @@ int desk_console_hit(int screen_w, int screen_h, double px, double py)
  * by taking the point back onto the control's face, where the word is. */
 int desk_console_legend_hit(int screen_w, int screen_h, double px, double py)
 {
+	py -= g_cc_pan;
 	struct room_render *rr;
 	double ox, oy, scale;
 	if (!console_xform(screen_w, screen_h, &rr, &ox, &oy, &scale)) {
@@ -18730,6 +18742,7 @@ static bool cc_in_quad(const double qx[4], const double qy[4], double x, double 
 bool desk_console_guard_hit(int screen_w, int screen_h, double px, double py,
 	double open)
 {
+	py -= g_cc_pan;
 	struct room_render *rr;
 	double ox, oy, scale;
 	if (!console_xform(screen_w, screen_h, &rr, &ox, &oy, &scale)) {
@@ -18878,6 +18891,7 @@ bool desk_console_shelf_hit(int screen_w, int screen_h, double px, double py)
 
 bool desk_console_view_hit(int screen_w, int screen_h, double px, double py)
 {
+	py -= g_cc_pan;
 	struct room_render *rr;
 	double ox, oy, scale;
 	if (!console_xform(screen_w, screen_h, &rr, &ox, &oy, &scale)) {
@@ -18895,6 +18909,7 @@ bool desk_console_view_hit(int screen_w, int screen_h, double px, double py)
 bool desk_console_value_at(int screen_w, int screen_h, int idx,
 	double px, double py, double *out)
 {
+	py -= g_cc_pan;
 	if (idx != CC_VOL && idx != CC_BRIGHT && idx != CC_SCREEN) {
 		return false;
 	}
@@ -20730,6 +20745,7 @@ static void cc_choose_paint(cairo_t *cr, struct room_render *rr, double ox, doub
 
 int desk_console_choose_hit(int screen_w, int screen_h, double px, double py)
 {
+	py -= g_cc_pan;
 	struct room_render *rr;
 	double ox, oy, scale;
 	if (!console_xform(screen_w, screen_h, &rr, &ox, &oy, &scale)) {
@@ -20776,6 +20792,8 @@ static void console_piece_paint(cairo_t *cr, int screen_h, struct room_render *r
 	}
 }
 
+static void cc_slot_paint(cairo_t *cr, int w, int h);
+
 static void console_paint(cairo_t *cr, int screen_w, int screen_h,
 	const struct desk_console_state *st, int hover, bool live)
 {
@@ -20800,6 +20818,7 @@ static void console_paint(cairo_t *cr, int screen_w, int screen_h,
 	/* Grain belongs to the sheet, not to the needles: over the live half
 	 * it was a tiled paint across the machine on every frame. */
 	overlay_grain(cr, gx0, gy0, gx1 - gx0, gy1 - gy0, 0.55);
+	cc_slot_paint(cr, screen_w, screen_h);
 	if (!live) {
 		g_light = lamp_was;
 		return;
@@ -21025,6 +21044,7 @@ bool desk_console_piece_box(int w, int h, int p, double box[4])
 #define TUNER_RESTX 900.0
 #define TUNER_CORDX 600.0
 #define TUNER_CORDY 304.0
+#define TUNER_SUNK 12.0       /* how far its foot goes down into the slot */
 
 /* A name on a jack's strip, centred on the origin: a little smaller if it
  * must, and then cut short, since a name shrunk to fit a strip is a name
@@ -21228,33 +21248,82 @@ void desk_draw_tuner(cairo_t *cr, const struct desk_tuner *t, const struct desk_
 	cairo_push_group(cr);
 
 	{
-		/* what it throws on the set */
-		for (int i = 5; i >= 1; i--) {
-			double g = i * 3.0;
-			cairo_set_source_rgba(cr, 0.02, 0.01, 0.0, 0.07);
-			desk_rounded_path(cr, -g + 3.0, -g + 6.0, TUNER_W + 2 * g, TUNER_H + 2 * g,
+		/* what it throws on the wall behind it: the lamp is in front and
+		 * to the left, and the wall some way back, so it is soft */
+		for (int i = 6; i >= 1; i--) {
+			double g = i * 4.0;
+			cairo_set_source_rgba(cr, 0.02, 0.01, 0.0, 0.045);
+			desk_rounded_path(cr, -g + 16.0, -g - 12.0, TUNER_W + 2 * g, TUNER_H + 2 * g,
 				14.0 + g);
 			cairo_fill(cr);
 		}
-		/* the case: walnut, with a brass trim round its face */
+		/* its top edge, seen from a little above: a board as thick as a
+		 * finger, lit by the lamp, narrowing away from the eye */
+		cairo_move_to(cr, 10.0, 2.0);
+		cairo_line_to(cr, 18.0, -14.0);
+		cairo_line_to(cr, TUNER_W - 18.0, -14.0);
+		cairo_line_to(cr, TUNER_W - 10.0, 2.0);
+		cairo_close_path(cr);
+		cairo_pattern_t *top = cairo_pattern_create_linear(0, -14.0, TUNER_W, 0);
+		cairo_pattern_add_color_stop_rgb(top, 0.0, 0.52, 0.33, 0.17);
+		cairo_pattern_add_color_stop_rgb(top, 1.0, 0.40, 0.24, 0.12);
+		cairo_set_source(cr, top);
+		cairo_fill(cr);
+		cairo_pattern_destroy(top);
+		cairo_move_to(cr, 18.0, -13.0);
+		cairo_line_to(cr, TUNER_W - 18.0, -13.0);
+		cairo_set_line_width(cr, 1.5);
+		cairo_set_source_rgba(cr, 1.0, 0.86, 0.62, 0.35);
+		cairo_stroke(cr);
+		/* the case: walnut, lighter where the lamp reaches its top */
 		cairo_pattern_t *wood = cairo_pattern_create_linear(0, 0, 0, TUNER_H);
-		cairo_pattern_add_color_stop_rgb(wood, 0.0, 0.30, 0.17, 0.08);
-		cairo_pattern_add_color_stop_rgb(wood, 1.0, 0.18, 0.10, 0.05);
+		cairo_pattern_add_color_stop_rgb(wood, 0.0, 0.36, 0.21, 0.10);
+		cairo_pattern_add_color_stop_rgb(wood, 0.5, 0.26, 0.15, 0.07);
+		cairo_pattern_add_color_stop_rgb(wood, 1.0, 0.16, 0.09, 0.04);
 		desk_rounded_path(cr, 0, 0, TUNER_W, TUNER_H, 14.0);
 		cairo_set_source(cr, wood);
 		cairo_fill(cr);
 		cairo_pattern_destroy(wood);
-		cairo_pattern_t *face = cairo_pattern_create_linear(0, 10, 0, TUNER_H - 10);
-		cairo_pattern_add_color_stop_rgb(face, 0.0, 0.135, 0.120, 0.105);
-		cairo_pattern_add_color_stop_rgb(face, 1.0, 0.085, 0.075, 0.065);
-		desk_rounded_path(cr, 10, 10, TUNER_W - 20, TUNER_H - 20, 9.0);
-		cairo_set_source(cr, face);
-		cairo_fill_preserve(cr);
-		cairo_pattern_destroy(face);
+		/* its front edge catching the light */
+		desk_rounded_path(cr, 1.0, 1.0, TUNER_W - 2.0, TUNER_H - 2.0, 13.0);
 		cairo_set_line_width(cr, 2.0);
-		cairo_set_source_rgba(cr, 0.78, 0.62, 0.30, 0.85);
+		cairo_set_source_rgba(cr, 1.0, 0.80, 0.55, 0.16);
 		cairo_stroke(cr);
-		overlay_grain(cr, 10, 10, TUNER_W - 20, TUNER_H - 20, 0.6);
+		/* the face, let into the case */
+		cairo_pattern_t *face = cairo_pattern_create_linear(0, 12, 0, TUNER_H - 12);
+		cairo_pattern_add_color_stop_rgb(face, 0.0, 0.145, 0.128, 0.110);
+		cairo_pattern_add_color_stop_rgb(face, 1.0, 0.080, 0.070, 0.060);
+		desk_rounded_path(cr, 12, 12, TUNER_W - 24, TUNER_H - 24, 9.0);
+		cairo_set_source(cr, face);
+		cairo_fill(cr);
+		cairo_pattern_destroy(face);
+		overlay_grain(cr, 12, 12, TUNER_W - 24, TUNER_H - 24, 0.6);
+		/* and the case's lip throwing a shadow down onto it */
+		cairo_save(cr);
+		desk_rounded_path(cr, 12, 12, TUNER_W - 24, TUNER_H - 24, 9.0);
+		cairo_clip(cr);
+		cairo_pattern_t *in = cairo_pattern_create_linear(0, 12, 0, 34);
+		cairo_pattern_add_color_stop_rgba(in, 0.0, 0.0, 0.0, 0.0, 0.55);
+		cairo_pattern_add_color_stop_rgba(in, 1.0, 0.0, 0.0, 0.0, 0.0);
+		cairo_set_source(cr, in);
+		cairo_paint(cr);
+		cairo_pattern_destroy(in);
+		cairo_pattern_t *inl = cairo_pattern_create_linear(12, 0, 28, 0);
+		cairo_pattern_add_color_stop_rgba(inl, 0.0, 0.0, 0.0, 0.0, 0.35);
+		cairo_pattern_add_color_stop_rgba(inl, 1.0, 0.0, 0.0, 0.0, 0.0);
+		cairo_set_source(cr, inl);
+		cairo_paint(cr);
+		cairo_pattern_destroy(inl);
+		cairo_restore(cr);
+		/* the brass trim, bevelled: dark outside, lit inside */
+		desk_rounded_path(cr, 11, 11, TUNER_W - 22, TUNER_H - 22, 10.0);
+		cairo_set_line_width(cr, 3.5);
+		cairo_set_source_rgba(cr, 0.28, 0.19, 0.07, 0.95);
+		cairo_stroke(cr);
+		desk_rounded_path(cr, 12.5, 12.5, TUNER_W - 25, TUNER_H - 25, 8.5);
+		cairo_set_line_width(cr, 1.6);
+		cairo_set_source_rgba(cr, 0.95, 0.80, 0.46, 0.85);
+		cairo_stroke(cr);
 	}
 
 	show_text_fit_as(cr, DESK_FONT_ENGRAVE, t->title, 40.0, 52.0, 22.0, true,
@@ -21380,6 +21449,25 @@ void desk_draw_tuner(cairo_t *cr, const struct desk_tuner *t, const struct desk_
 	if (t->right) {
 		tuner_button(cr, TUNER_RX, TUNER_BY - 8.0, t->right, t->hot == DESK_TUNER_RIGHT);
 	}
+
+	/* over all of it, the light: the lamp's sheen from the upper left,
+	 * and the slot's shadow climbing the foot of the card */
+	cairo_save(cr);
+	desk_rounded_path(cr, 0, 0, TUNER_W, TUNER_H, 14.0);
+	cairo_clip(cr);
+	cairo_pattern_t *sheen = cairo_pattern_create_linear(0, 0, TUNER_W * 0.6, TUNER_H);
+	cairo_pattern_add_color_stop_rgba(sheen, 0.0, 1.0, 0.92, 0.78, 0.07);
+	cairo_pattern_add_color_stop_rgba(sheen, 1.0, 1.0, 0.92, 0.78, 0.0);
+	cairo_set_source(cr, sheen);
+	cairo_paint(cr);
+	cairo_pattern_destroy(sheen);
+	cairo_pattern_t *foot = cairo_pattern_create_linear(0, TUNER_H - 70.0, 0, TUNER_H);
+	cairo_pattern_add_color_stop_rgba(foot, 0.0, 0.0, 0.0, 0.0, 0.0);
+	cairo_pattern_add_color_stop_rgba(foot, 1.0, 0.0, 0.0, 0.0, 0.55);
+	cairo_set_source(cr, foot);
+	cairo_paint(cr);
+	cairo_pattern_destroy(foot);
+	cairo_restore(cr);
 
 	cairo_pop_group_to_source(cr);
 	cairo_paint_with_alpha(cr, pull);
@@ -21507,32 +21595,200 @@ void desk_draw_cord(cairo_t *cr, const struct desk_tuner_place *pl, const double
 	cairo_restore(cr);
 }
 
-/* Where the tuner's card rests: over the set, centred above the row of
- * CHOOSE buttons it comes out from under. clip_y is the top of that row,
- * the line the card is cut at while it slides out from behind the
- * controls; margin is the room round the card for the shadow it throws. */
+/* The tube's brass bezel on the screen, as an ellipse (cx, cy, rx, ry):
+ * it stands proud of the tower and comes up past its top edge, so it is in
+ * front of the slot along that edge, and of the card coming up out of it.
+ * The sizes are the traced torus's (1.18 round, 0.17 thick). */
+static bool cc_bezel_px(int w, int h, double *cx, double *cy, double *rx, double *ry)
+{
+	struct room_render *rr;
+	double ox, oy, scale;
+	if (!console_xform(w, h, &rr, &ox, &oy, &scale)) {
+		return false;
+	}
+	double aspect = (double)rr->w / (double)(rr->h > 0 ? rr->h : 1);
+	struct cc_face panel, tower;
+	cc_faces(&panel, &tower);
+	const double R = 1.18 + 0.17, N = RM_CC_SKIN + 0.02 + 0.17;
+	double u0, v0, u1, v1, u2, v2;
+	if (!room_project(&rr->console_cam, cc_world(&tower, CC[CC_CRT].u, N, CC[CC_CRT].s, 1.0,
+			aspect), &u0, &v0)
+		|| !room_project(&rr->console_cam, cc_world(&tower, CC[CC_CRT].u + R, N,
+			CC[CC_CRT].s, 1.0, aspect), &u1, &v1)
+		|| !room_project(&rr->console_cam, cc_world(&tower, CC[CC_CRT].u, N,
+			CC[CC_CRT].s + R, 1.0, aspect), &u2, &v2)) {
+		return false;
+	}
+	double sw = rr->w * scale, sh = rr->h * scale;
+	*cx = ox + u0 * sw;
+	*cy = oy + v0 * sh;
+	*rx = fabs(u1 - u0) * sw + 1.5;
+	*ry = fabs(v2 - v0) * sh + 1.5;
+	return true;
+}
+
+static void cc_bezel_path(cairo_t *cr, double cx, double cy, double rx, double ry)
+{
+	cairo_save(cr);
+	cairo_translate(cr, cx, cy);
+	cairo_scale(cr, rx, ry);
+	cairo_new_sub_path(cr);
+	cairo_arc(cr, 0, 0, 1.0, 0, 2 * M_PI);
+	cairo_restore(cr);
+}
+
+/* The slot the tuner's card stands up out of: along the top of the
+ * instrument tower, just behind its front edge. Its line on the screen. */
+static bool cc_slot_y(int w, int h, double *y)
+{
+	struct room_render *rr;
+	double ox, oy, scale;
+	if (!console_xform(w, h, &rr, &ox, &oy, &scale)) {
+		return false;
+	}
+	double aspect = (double)rr->w / (double)(rr->h > 0 ? rr->h : 1);
+	struct cc_face panel, tower;
+	cc_faces(&panel, &tower);
+	vec3 c = cc_world(&tower, 0.0, 0.0, tower.half - 0.04, 1.0, aspect);
+	double u, v;
+	if (!room_project(&rr->console_cam, c, &u, &v)) {
+		return false;
+	}
+	*y = oy + v * rr->h * scale;
+	return true;
+}
+
+/* Where the tuner's card rests: standing in the slot along the top of the
+ * instrument tower, above the set rather than over any of it. There is
+ * seldom room for it there, so the set is drawn lower while it is out --
+ * pl->pan, never so far that the bottom row of controls goes off the
+ * screen -- and the card is made smaller only if even that is not enough.
+ * Everything here is where it is on the set before it is moved down:
+ * pl->y is the card's top, clip_y the slot's line, which the card goes
+ * down into; margin is the room round the card for its shadow. */
 bool desk_console_card_place(int w, int h, struct desk_tuner_place *pl, double *clip_y,
 	int *margin)
 {
-	double ytop = 1e9;
-	for (int p = DESK_CCP_CHOOSE; p <= DESK_CCP_CHOOSE_LAST; p++) {
+	double low = 0.0;
+	for (int p = 0; p < DESK_CC_COUNT; p++) {
 		double box[4];
-		if (!desk_console_piece_box(w, h, p, box)) {
-			return false;
+		if (desk_console_piece_box(w, h, p, box)) {
+			low = fmax(low, box[1] + box[3]);
 		}
-		ytop = fmin(ytop, box[1]);
 	}
+	double slot;
+	if (low <= 0.0 || !cc_slot_y(w, h, &slot)) {
+		return false;
+	}
+	slot = floor(slot);
+	/* as far as the set may go down: the bottom row of controls, and the
+	 * lamps under it, still on the screen */
+	double most = fmax(0.0, h - 0.045 * h - low);
 	double k = fmin(w * 0.62 / TUNER_W, h * 0.30 / TUNER_H);
+	double above = 0.02 * h;                         /* clear of the top of the screen */
+	k = fmin(k, (slot + most - above) / (TUNER_H + 26.0));
+	if (k <= 0.05) {
+		return false;
+	}
+	int m = (int)ceil(30.0 * k) + 2;
 	pl->k = k;
 	pl->w = TUNER_W * k;
 	pl->h = TUNER_H * k;
 	pl->x = floor((w - pl->w) * 0.5);
-	double gap = 0.02 * h;
-	pl->y = floor(fmax(0.02 * h, ytop - gap - pl->h));
-	pl->travel = ytop - pl->y;
-	*clip_y = ytop;
-	*margin = (int)ceil(18.0 * k) + 2;
+	/* its foot a little way down in the slot */
+	pl->y = slot - pl->h + floor(TUNER_SUNK * k);
+	pl->pan = ceil(fmax(0.0, above + 16.0 * k - pl->y));
+	pl->travel = pl->h;
+	*clip_y = slot;
+	*margin = m;
 	return true;
+}
+
+/* The slot itself, drawn on the sheet with the set, whether the card is
+ * out of it or not: a dark mouth in the top of the tower, a little longer
+ * than the card, with a brass lip along its front that the card goes
+ * down behind (the card is cut at the lip's top, clip_y). */
+static void cc_slot_paint(cairo_t *cr, int w, int h)
+{
+	struct desk_tuner_place pl;
+	double clip;
+	int m;
+	if (!desk_console_card_place(w, h, &pl, &clip, &m)) {
+		return;
+	}
+	double k = pl.k, x = pl.x - 16.0 * k, sw = pl.w + 32.0 * k;
+	/* the tube's bezel stands in front of it: none of it drawn there */
+	cairo_save(cr);
+	double bx, by, brx, bry;
+	if (cc_bezel_px(w, h, &bx, &by, &brx, &bry)) {
+		cairo_rectangle(cr, 0, 0, w, h);
+		cc_bezel_path(cr, bx, by, brx, bry);
+		cairo_set_fill_rule(cr, CAIRO_FILL_RULE_EVEN_ODD);
+		cairo_clip(cr);
+		cairo_set_fill_rule(cr, CAIRO_FILL_RULE_WINDING);
+	}
+	/* the mouth, seen from a little above: its far side, in shadow */
+	double mh = 9.0 * k;
+	desk_rounded_path(cr, x + 4.0 * k, clip - mh, sw - 8.0 * k, mh + 2.0 * k, 3.0 * k);
+	cairo_pattern_t *d = cairo_pattern_create_linear(0, clip - mh, 0, clip);
+	cairo_pattern_add_color_stop_rgb(d, 0.0, 0.16, 0.12, 0.08);
+	cairo_pattern_add_color_stop_rgb(d, 0.45, 0.03, 0.02, 0.015);
+	cairo_pattern_add_color_stop_rgb(d, 1.0, 0.0, 0.0, 0.0);
+	cairo_set_source(cr, d);
+	cairo_fill(cr);
+	cairo_pattern_destroy(d);
+	/* the lip: a rounded brass rail, lit from above, its shadow under it */
+	double lh = 10.0 * k, y = clip;
+	desk_rounded_path(cr, x, y + 2.0 * k, sw, lh, lh * 0.5);
+	cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.45);
+	cairo_fill(cr);
+	desk_rounded_path(cr, x, y, sw, lh, lh * 0.5);
+	cairo_pattern_t *g = cairo_pattern_create_linear(0, y, 0, y + lh);
+	cairo_pattern_add_color_stop_rgb(g, 0.0, 0.98, 0.86, 0.56);
+	cairo_pattern_add_color_stop_rgb(g, 0.30, 0.80, 0.63, 0.30);
+	cairo_pattern_add_color_stop_rgb(g, 1.0, 0.30, 0.21, 0.08);
+	cairo_set_source(cr, g);
+	cairo_fill(cr);
+	cairo_pattern_destroy(g);
+	for (int i = 0; i < 2; i++) {
+		double sx = i ? x + sw - lh : x + lh;
+		cairo_arc(cr, sx, y + lh * 0.5, 2.4 * k, 0, 2 * M_PI);
+		cairo_set_source_rgb(cr, 0.34, 0.25, 0.10);
+		cairo_fill(cr);
+	}
+	cairo_restore(cr);
+}
+
+bool desk_console_bezel_cap_box(int w, int h, int box[4])
+{
+	struct desk_tuner_place pl;
+	double clip, cx, cy, rx, ry;
+	int m;
+	if (!desk_console_card_place(w, h, &pl, &clip, &m)
+		|| !cc_bezel_px(w, h, &cx, &cy, &rx, &ry) || cy - ry >= clip) {
+		return false;
+	}
+	box[0] = (int)floor(cx - rx);
+	box[1] = (int)floor(cy - ry);
+	box[2] = (int)ceil(cx + rx) - box[0];
+	box[3] = (int)ceil(clip) + 1 - box[1];
+	return box[2] > 0 && box[3] > 0;
+}
+
+void desk_draw_console_bezel_cap(cairo_t *cr, int w, int h, const int box[4])
+{
+	double cx, cy, rx, ry;
+	if (!cc_bezel_px(w, h, &cx, &cy, &rx, &ry)) {
+		return;
+	}
+	cairo_save(cr);
+	cairo_translate(cr, -box[0], -box[1]);
+	cairo_rectangle(cr, box[0], box[1], box[2], box[3]);
+	cairo_clip(cr);
+	cc_bezel_path(cr, cx, cy, rx, ry);
+	cairo_clip(cr);
+	desk_draw_console_base(cr, w, h);
+	cairo_restore(cr);
 }
 
 void desk_draw_console_piece(cairo_t *cr, int w, int h, int p,

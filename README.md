@@ -129,8 +129,9 @@ there -- its material, the light on it, its shadow and the wear of use.
   a key to unlock the power buttons, and the system tray as paper slips
   under it (more than fit, and the wheel slides the row along). A brass
   **CHOOSE** button beside the wireless lever, the Bluetooth lever and the
-  knob slides a card out from under the controls, with a switchboard on
-  it: a jack for each network in range, Bluetooth device, or speaker and
+  knob brings a card up out of a slot along the top of the set, to stand
+  above it (the set sinks down the screen to make room), with a
+  switchboard on it: a jack for each network in range, Bluetooth device, or speaker and
   microphone. Pull the brass plug out of one jack and put it in another to
   join, connect or switch (or choose with the arrow keys and press
   Return); its readout always shows what is in use now. NetworkManager,
