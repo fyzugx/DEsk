@@ -977,6 +977,16 @@ html:lang(de) :is(p, .lead) { hyphens: auto; -webkit-hyphens: auto; }
   .reveal { opacity: 1; translate: none; }
   #dust { display: none; }
 }
+
+/* DEsk 0.2, coming soon: a ribbon under the header to its page */
+.soon-ribbon { position: relative; z-index: 5; display: flex; gap: 14px; align-items: center; justify-content: center; flex-wrap: wrap;
+  margin: 0; padding: 10px 20px; text-decoration: none; color: #f3e7cf; font-size: 14px; line-height: 1.4; text-align: center;
+  background: linear-gradient(#3a2614, #2a1a0c); border-bottom: 1px solid rgba(211,162,74,.45); box-shadow: 0 6px 16px rgba(0,0,0,.35); }
+.soon-ribbon:hover .soon-more { text-decoration: underline; }
+.soon-badge { padding: 3px 10px; border-radius: 999px; font-weight: 700; font-size: 11px; letter-spacing: .14em; text-transform: uppercase;
+  color: #3a2408; background: linear-gradient(#fbe6a6, #d3a24a 60%, #a8782f); box-shadow: inset 0 1px 0 rgba(255,255,255,.55); }
+.soon-more { color: #f2c46d; white-space: nowrap; }
+.soon-more::after { content: " \203A"; }
 </style>
 </head>
 <body>
@@ -1021,6 +1031,12 @@ html:lang(de) :is(p, .lead) { hyphens: auto; -webkit-hyphens: auto; }
     </nav>
   </div>
 </header>
+
+<a class="soon-ribbon" href="v0.2/" data-lit data-elev="3">
+  <span class="soon-badge" data-i18n="soon.badge">New</span>
+  <span class="soon-text" data-i18n="soon.text">DEsk 0.2 is coming soon: a calculator, a notebook, a desk of your own, and room for your hands.</span>
+  <span class="soon-more" data-i18n="soon.more">See what's new</span>
+</a>
 
 <main>
   <!-- ========== 1. Hero: the lamp, the picture, then Download ========== -->
@@ -2188,6 +2204,15 @@ const I18N = {
     "ft.legal": "Copyright © 2026 The DEsk authors. Veröffentlicht unter der MIT-Lizenz.",
   },
 };
+
+// DEsk 0.2, coming soon (the ribbon under the header)
+Object.assign(I18N.en, {"soon.badge": "New", "soon.text": "DEsk 0.2 is coming soon: a calculator, a notebook, a desk of your own, and room for your hands.", "soon.more": "See what's new"});
+Object.assign(I18N.ja, {"soon.badge": "New", "soon.text": "DEsk 0.2 まもなく登場。電卓、ノート、自分好みの机、そして指とペン。", "soon.more": "新しいことを見る"});
+Object.assign(I18N.zh, {"soon.badge": "New", "soon.text": "DEsk 0.2 即将推出：计算器、笔记本、属于你的书桌，还有手指与笔。", "soon.more": "看看新功能"});
+Object.assign(I18N.ko, {"soon.badge": "New", "soon.text": "DEsk 0.2가 곧 나옵니다: 계산기, 공책, 나만의 책상, 그리고 손가락과 펜.", "soon.more": "새로운 것 보기"});
+Object.assign(I18N.es, {"soon.badge": "Nuevo", "soon.text": "DEsk 0.2 llega muy pronto: una calculadora, un cuaderno, un escritorio a tu gusto y sitio para tus manos.", "soon.more": "Mira las novedades"});
+Object.assign(I18N.fr, {"soon.badge": "Nouveau", "soon.text": "DEsk 0.2 arrive bientôt : une calculatrice, un carnet, un bureau à vous, et de la place pour vos mains.", "soon.more": "Voir les nouveautés"});
+Object.assign(I18N.de, {"soon.badge": "Neu", "soon.text": "DEsk 0.2 kommt bald: ein Taschenrechner, ein Notizbuch, ein eigener Schreibtisch und Platz für deine Hände.", "soon.more": "Neuheiten ansehen"});
 
 const LANGS = ["en", "ja", "zh", "ko", "es", "fr", "de"];
 const HTML_LANG = { zh: "zh-Hans" };
