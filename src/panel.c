@@ -386,10 +386,12 @@ bool desk_meters_set_radio(bool wifi, bool on)
 
 /* ---- the mixer --------------------------------------------------- */
 
+#define SET_SETTLE_S 0.6      /* how long a change made here takes to reach the mixer */
 static int g_have_wpctl = -1;
 static double g_vol_at, g_vol_cached = -1.0;
 static double g_vol_set_at;   /* when it was last set from here */
 static bool g_muted_cached;
+static bool g_mic_muted_cached;
 static pthread_mutex_t g_vol_lock = PTHREAD_MUTEX_INITIALIZER;
 static atomic_bool g_vol_asking;
 
@@ -414,10 +416,24 @@ static void *volume_ask(void *arg)
 			}
 			pthread_mutex_lock(&g_vol_lock);
 			/* an answer to a question asked before the last change made
-			 * here is about the mixer as it was, not as it is */
-			if (g_vol_set_at < asked) {
+			 * here -- or so soon after it that the setter's thread may not
+			 * have made it yet -- is about the mixer as it was, not as it is */
+			if (g_vol_set_at + SET_SETTLE_S < asked) {
 				g_vol_cached = v < 0.0 ? 0.0 : (v > 1.5 ? 1.5 : v);
 				g_muted_cached = strstr(buf, "MUTED") != NULL;
+			}
+			pthread_mutex_unlock(&g_vol_lock);
+		}
+		pclose(f);
+	}
+	/* and whether the microphone is muted, which the tuner's hole shows */
+	f = popen("wpctl get-volume @DEFAULT_AUDIO_SOURCE@ 2>/dev/null", "r");
+	if (f) {
+		char buf[128] = { 0 };
+		if (fgets(buf, sizeof buf, f)) {
+			pthread_mutex_lock(&g_vol_lock);
+			if (g_vol_set_at + SET_SETTLE_S < asked) {
+				g_mic_muted_cached = strstr(buf, "MUTED") != NULL;
 			}
 			pthread_mutex_unlock(&g_vol_lock);
 		}
@@ -446,6 +462,7 @@ static void volume(struct desk_meters *m)
 	}
 	m->volume = g_vol_cached < 0.0 ? 0.0 : g_vol_cached;
 	m->muted = g_muted_cached;
+	m->mic_muted = g_mic_muted_cached;
 	pthread_mutex_unlock(&g_vol_lock);
 	if (stale && !atomic_exchange(&g_vol_asking, true)) {
 		pthread_t th;
@@ -467,19 +484,20 @@ static pthread_cond_t g_set_cond = PTHREAD_COND_INITIALIZER;
 static bool g_set_running;
 static double g_set_vol = -1.0;    /* to set; < 0 nothing waiting */
 static int g_set_mute = -1;        /* 0 unmute, 1 mute, 2 toggle; < 0 nothing */
+static int g_set_mic_mute = -1;    /* the same, for the microphone */
 
 static void *volume_setter(void *arg)
 {
 	(void)arg;
 	for (;;) {
 		pthread_mutex_lock(&g_set_lock);
-		while (g_set_vol < 0.0 && g_set_mute < 0) {
+		while (g_set_vol < 0.0 && g_set_mute < 0 && g_set_mic_mute < 0) {
 			pthread_cond_wait(&g_set_cond, &g_set_lock);
 		}
 		double v = g_set_vol;
-		int mute = g_set_mute;
+		int mute = g_set_mute, mic = g_set_mic_mute;
 		g_set_vol = -1.0;
-		g_set_mute = -1;
+		g_set_mute = g_set_mic_mute = -1;
 		pthread_mutex_unlock(&g_set_lock);
 		char cmd[128];
 		if (v >= 0.0) {
@@ -492,6 +510,13 @@ static void *volume_setter(void *arg)
 		if (mute >= 0) {
 			snprintf(cmd, sizeof cmd, "wpctl set-mute @DEFAULT_AUDIO_SINK@ %s >/dev/null 2>&1",
 				mute == 2 ? "toggle" : mute ? "1" : "0");
+			if (system(cmd) == -1) {
+			}
+		}
+		if (mic >= 0) {
+			snprintf(cmd, sizeof cmd,
+				"wpctl set-mute @DEFAULT_AUDIO_SOURCE@ %s >/dev/null 2>&1",
+				mic == 2 ? "toggle" : mic ? "1" : "0");
 			if (system(cmd) == -1) {
 			}
 		}
@@ -556,6 +581,27 @@ bool desk_meters_set_muted(int how)
 	if (ok) {
 		pthread_mutex_lock(&g_vol_lock);
 		g_muted_cached = how == 2 ? !g_muted_cached : how != 0;
+		g_vol_at = g_vol_set_at = now_sec();
+		pthread_mutex_unlock(&g_vol_lock);
+	}
+	return ok;
+}
+
+bool desk_meters_set_mic_muted(int how)
+{
+	if (g_have_wpctl < 0) {
+		g_have_wpctl = access("/usr/bin/wpctl", X_OK) == 0;
+	}
+	if (!g_have_wpctl) {
+		return false;
+	}
+	pthread_mutex_lock(&g_set_lock);
+	g_set_mic_mute = how;
+	bool ok = setter_kick();
+	pthread_mutex_unlock(&g_set_lock);
+	if (ok) {
+		pthread_mutex_lock(&g_vol_lock);
+		g_mic_muted_cached = how == 2 ? !g_mic_muted_cached : how != 0;
 		g_vol_at = g_vol_set_at = now_sec();
 		pthread_mutex_unlock(&g_vol_lock);
 	}

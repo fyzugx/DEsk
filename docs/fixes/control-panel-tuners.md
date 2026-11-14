@@ -32,7 +32,11 @@ the other mouse button on a control opens `nm-connection-editor`,
   A braided cord comes up through the shelf to a brass plug in the jack of
   the one in use. Pull the plug out and put it in another jack to take
   that one; put it in the hole on the shelf to let go (Wi-Fi and
-  Bluetooth); let it go anywhere else and it swings back. Ten jacks are on
+  Bluetooth) or, on the sound card, to mute the output or the microphone
+  -- sound always has a device in use, so its "nothing" is silence -- and
+  the plug stays in the hole, the readout saying Muted, until it is put
+  in a jack again, which unmutes (Return does the same both ways); let it
+  go anywhere else and it swings back. Ten jacks are on
   the board at once: the arrows, the wheel and the arrow keys move a jack
   at a time, the stops under the row (1-10, 11-20...) and Page Up/Down a
   board at a time, and a plug held at an end of the row slides it along.
@@ -68,9 +72,13 @@ does.
   (`desk_console_set_pan`); the strip this bares at the top of the screen
   is covered with the wall, made once from the sheet's top rows
   (`cc_wall_make`). The tube's brass bezel stands proud of the tower and
-  comes up past its top edge, so the slot is left out behind it, and its
-  top is cut from the set and laid over the card's foot
-  (`desk_console_bezel_cap_box`): the card comes up behind it. On the way (`ccd_pose`) the card is only moved and cut
+  comes up past its top edge, so the slot is cut in a low walnut rail on
+  top of the tower that stands clear of the bezel (the bezel left in front
+  of the rail's foot): the card never comes up out of the bezel. The
+  output's and the microphone's mute come from `wpctl`
+  (`desk_meters_set_muted`, `desk_meters_set_mic_muted`); an answer from
+  the mixer that may predate a change made here is not taken. On the way
+  (`ccd_pose`) the card is only moved and cut
   off at the slot's lip, never drawn again; the hand has it only once it
   has reached its stop. When the card goes at once (the set turned away
   from, the desk locked), the set eases back up rather than jumping.

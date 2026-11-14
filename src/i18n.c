@@ -159,6 +159,7 @@ static const char *const WORDS[][DESK_LANG_COUNT] = {
 	{ "Not paired", "未ペアリング", "未配对", "페어링 안 됨", "Sin emparejar", "Non appairé",
 		"Nicht gekoppelt" },
 	{ "In use", "使用中", "使用中", "사용 중", "En uso", "Utilisé", "In Gebrauch" },
+	{ "Muted", "ミュート中", "已静音", "음소거됨", "Silenciado", "Coupé", "Stummgeschaltet" },
 	{ "Wireless is off",
 		"無線は切れています",
 		"无线已关闭",

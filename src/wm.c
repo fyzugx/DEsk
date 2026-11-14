@@ -1132,9 +1132,6 @@ struct desk_server {
 	struct wl_event_source *ccd_blink;  /* the busy lamps' next blink */
 	/* the card's picture, and what it was drawn from; the cord's over it */
 	struct wlr_scene_buffer *ccd_card, *ccd_cord;
-	/* the top of the tube's bezel, in front of the card's foot */
-	struct wlr_scene_buffer *ccd_cap;
-	uint64_t ccd_cap_key;
 	/* the set drawn this much lower while the card stands above it, and
 	 * the wall that leaves bare at the top of the screen */
 	double cc_pan;
@@ -8622,14 +8619,31 @@ static int ccd_sel_in(struct desk_server *server, const struct desk_dev_list *L,
 	return 0;
 }
 
+/* Sound has always a device in use, so its "nothing" -- the plug in the
+ * hole -- is the band muted: the output, or the microphone. */
+static bool ccd_hushed(const struct desk_server *server)
+{
+	enum desk_dev_kind kind = ccd_kind(server);
+	if (kind != DESK_DEV_SINK && kind != DESK_DEV_SOURCE) {
+		return false;
+	}
+	struct desk_meters m = { 0 };
+	desk_meters_read_volume(&m);
+	return m.have_volume && (kind == DESK_DEV_SINK ? m.muted : m.mic_muted);
+}
+
 /* The jack the plug belongs in: the one it was put in, while that is being
  * put through; else the one it was put in by hand, if that is in use; else
- * the first in use. -1 is the hole on the shelf. */
+ * the first in use. -1 is the hole on the shelf: nothing connected, or for
+ * sound, the band muted. */
 static int ccd_plug_in(struct desk_server *server, const struct desk_dev_list *L,
 	const int *map, int n)
 {
 	if (server->ccd_want) {
 		return server->ccd_want == 1 ? ccd_find(L, map, n, server->ccd_want_id) : -1;
+	}
+	if (ccd_hushed(server)) {
+		return -1;
 	}
 	int i = ccd_find(L, map, n, server->ccd_plug_id);
 	if (i >= 0 && L->d[map[i]].active) {
@@ -8754,7 +8768,12 @@ static bool ccd_build(struct desk_server *server, struct desk_tuner *t)
 				: d->known ? TR("Paired") : TR("Not paired"));
 			break;
 		default:
-			snprintf(t->read2, sizeof t->read2, "%s", d->active ? TR("In use") : "");
+			if (d->active && ccd_hushed(server)) {
+				snprintf(t->read2, sizeof t->read2, "%s  \xc2\xb7  %s", TR("In use"),
+					TR("Muted"));
+			} else {
+				snprintf(t->read2, sizeof t->read2, "%s", d->active ? TR("In use") : "");
+			}
 			break;
 		}
 	}
@@ -8817,9 +8836,6 @@ static void ccd_hide(struct desk_server *server)
 	if (server->ccd_cord) {
 		wlr_scene_node_set_enabled(&server->ccd_cord->node, false);
 	}
-	if (server->ccd_cap) {
-		wlr_scene_node_set_enabled(&server->ccd_cap->node, false);
-	}
 }
 
 static void ccd_gone(struct desk_server *server)
@@ -8838,10 +8854,6 @@ static void ccd_gone(struct desk_server *server)
 	if (server->ccd_cord) {
 		wlr_scene_node_destroy(&server->ccd_cord->node);
 		server->ccd_cord = NULL;
-	}
-	if (server->ccd_cap) {
-		wlr_scene_node_destroy(&server->ccd_cap->node);
-		server->ccd_cap = NULL;
 	}
 	if (server->ccd_blink) {
 		wl_event_source_remove(server->ccd_blink);
@@ -9329,24 +9341,6 @@ static void ccd_paint(struct desk_server *server)
 	/* up out of the slot by rise of its height, cut off at the lip */
 	double ox = pl.x - m, oy = pl.y - m + (1.0 - rise) * pl.travel;
 	node_show_within(server->ccd_card, tw, th, ox, oy, 1.0, 0.0, -pl.pan, w, clip);
-	/* the tube's bezel comes up past the slot, in front of the card: its
-	 * top, cut from the set, over the card's foot */
-	int cb[4];
-	if (desk_console_bezel_cap_box(w, server->desk_h, cb)) {
-		uint64_t ck = (uint64_t)desk_console_room(w, server->desk_h) << 32
-			^ (uint64_t)w << 16 ^ (uint64_t)server->desk_h;
-		if (!server->ccd_cap || server->ccd_cap_key != ck) {
-			struct desk_buf *b = buf_create(cb[2], cb[3]);
-			desk_draw_console_bezel_cap(b->cr, w, server->desk_h, cb);
-			scene_put(&server->ccd_cap, server->layer_console, b, cb[0], cb[1], NULL);
-			wlr_scene_buffer_set_source_box(server->ccd_cap, NULL);
-			server->ccd_cap->point_accepts_input = shadow_accepts;
-			server->ccd_cap_key = ck;
-		}
-		wlr_scene_node_set_position(&server->ccd_cap->node, cb[0], cb[1]);
-		wlr_scene_node_place_above(&server->ccd_cap->node, &server->ccd_card->node);
-		wlr_scene_node_set_enabled(&server->ccd_cap->node, true);
-	}
 	ccd_cord_put(server, &t, &pl, m, ox, oy, clip);
 }
 
@@ -9489,6 +9483,13 @@ static void ccd_seat(struct desk_server *server, int i)
 	snprintf(server->ccd_sel_id, sizeof server->ccd_sel_id, "%s", d->id);
 	snprintf(server->ccd_plug_id, sizeof server->ccd_plug_id, "%s", d->id);
 	server->ccd_fail_id[0] = '\0';
+	if (ccd_hushed(server)) {
+		/* out of the hole: the band heard again, whichever jack it went in */
+		bool mic = kind == DESK_DEV_SOURCE;
+		if (mic ? desk_meters_set_mic_muted(0) : desk_meters_set_muted(0)) {
+			wlr_log(WLR_INFO, "console: the %s unmuted", mic ? "microphone" : "output");
+		}
+	}
 	if (server->ccd_want == 1 && !strcmp(server->ccd_want_id, d->id)) {
 		/* already being put through: asked once */
 	} else if (!d->active) {
@@ -9504,15 +9505,27 @@ static void ccd_seat(struct desk_server *server, int i)
 }
 
 /* The plug put in the hole: the network or the device it was in let go
- * of. Sound has always one in use, so there it only goes back. */
+ * of. Sound has always one in use, so there the band is muted instead,
+ * and the plug stays in the hole until it is put in a jack again. */
 static void ccd_unplug(struct desk_server *server)
 {
 	enum desk_dev_kind kind = ccd_kind(server);
+	if (kind == DESK_DEV_SINK || kind == DESK_DEV_SOURCE) {
+		bool mic = kind == DESK_DEV_SOURCE;
+		if (!ccd_hushed(server)
+			&& (mic ? desk_meters_set_mic_muted(1) : desk_meters_set_muted(1))) {
+			snd_at(server, DESK_SND_KEY_PRESS, server->cursor->x, 0.8);
+			wlr_log(WLR_INFO, "console: the %s muted", mic ? "microphone" : "output");
+		}
+		ccd_paint(server);
+		server_schedule_frames(server);
+		return;
+	}
 	struct desk_dev_list L;
 	int map[DESK_TUNER_MAX];
 	int n = ccd_list(server, &L, map);
 	int i = ccd_plug_in(server, &L, map, n);
-	if (kind == DESK_DEV_SINK || kind == DESK_DEV_SOURCE || i < 0 || !L.d[map[i]].active) {
+	if (i < 0 || !L.d[map[i]].active) {
 		return;
 	}
 	const struct desk_dev *d = &L.d[map[i]];
@@ -9526,7 +9539,8 @@ static void ccd_unplug(struct desk_server *server)
 }
 
 /* Return: take the jack the keys are on, the plug going into it; one
- * already connected is let go of, as the plug put in the hole does. */
+ * already connected is let go of (sound: muted), as the plug put in the
+ * hole does; on a muted band, any jack is heard again. */
 static void ccd_take(struct desk_server *server)
 {
 	enum desk_dev_kind kind = ccd_kind(server);
@@ -9537,7 +9551,9 @@ static void ccd_take(struct desk_server *server)
 	if (!L.read || !L.have || L.off || sel >= n) {
 		return;
 	}
-	if (L.d[map[sel]].active && (kind == DESK_DEV_WIFI || kind == DESK_DEV_BT)) {
+	if (L.d[map[sel]].active && (kind == DESK_DEV_WIFI || kind == DESK_DEV_BT
+			|| !ccd_hushed(server))) {
+		/* the one in use: let go of, or for sound, muted */
 		snprintf(server->ccd_plug_id, sizeof server->ccd_plug_id, "%s", L.d[map[sel]].id);
 		ccd_unplug(server);
 	} else {

@@ -31,6 +31,7 @@ struct desk_meters {
 	bool have_volume;
 	double volume;     /* 0..1 */
 	bool muted;
+	bool mic_muted;    /* the microphone in use, the same way */
 
 	bool have_radio;   /* any rfkill switch at all */
 	bool wifi_blocked;
@@ -47,6 +48,8 @@ void desk_meters_read(struct desk_meters *out);
  * how: 0 unmute, 1 mute, 2 the other way from what it is. */
 bool desk_meters_set_volume(double v);
 bool desk_meters_set_muted(int how);
+/* The same for the microphone in use. */
+bool desk_meters_set_mic_muted(int how);
 /* Only the mixer: a second behind it at worst, never a wait. */
 void desk_meters_read_volume(struct desk_meters *out);
 

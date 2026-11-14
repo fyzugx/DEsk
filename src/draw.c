@@ -21676,9 +21676,15 @@ bool desk_console_card_place(int w, int h, struct desk_tuner_place *pl, double *
 			low = fmax(low, box[1] + box[3]);
 		}
 	}
-	double slot;
+	double slot, bx, by, brx, bry;
 	if (low <= 0.0 || !cc_slot_y(w, h, &slot)) {
 		return false;
+	}
+	/* the tube's bezel comes up past the tower's top edge: the slot is
+	 * in a rail on top of the tower that stands clear of it, so the card
+	 * never comes up out of the bezel */
+	if (cc_bezel_px(w, h, &bx, &by, &brx, &bry)) {
+		slot = fmin(slot, by - bry - 3.0);
 	}
 	slot = floor(slot);
 	/* as far as the set may go down: the bottom row of controls, and the
@@ -21727,6 +21733,30 @@ static void cc_slot_paint(cairo_t *cr, int w, int h)
 		cairo_clip(cr);
 		cairo_set_fill_rule(cr, CAIRO_FILL_RULE_WINDING);
 	}
+	/* the rail the slot is cut in, standing on the tower's top, from the
+	 * slot's line down to the tower's edge (behind the bezel, which is
+	 * left out of it above) */
+	double edge;
+	if (cc_slot_y(w, h, &edge) && edge > clip + 1.0) {
+		double rx = x - 6.0 * k, rw = sw + 12.0 * k, rh = edge + 1.0 - clip;
+		cairo_rectangle(cr, rx, clip, rw, rh);
+		cairo_pattern_t *wf = cairo_pattern_create_linear(0, clip, 0, clip + rh);
+		cairo_pattern_add_color_stop_rgb(wf, 0.0, 0.30, 0.18, 0.09);
+		cairo_pattern_add_color_stop_rgb(wf, 1.0, 0.14, 0.08, 0.04);
+		cairo_set_source(cr, wf);
+		cairo_fill(cr);
+		cairo_pattern_destroy(wf);
+		overlay_grain(cr, rx, clip, rw, rh, 0.6);
+		/* its ends, turned away from the light, and where it sits down */
+		for (int i = 0; i < 2; i++) {
+			cairo_rectangle(cr, i ? rx + rw - 4.0 * k : rx, clip, 4.0 * k, rh);
+			cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.30);
+			cairo_fill(cr);
+		}
+		cairo_rectangle(cr, rx, edge - 2.0 * k, rw, 3.0 * k);
+		cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.45);
+		cairo_fill(cr);
+	}
 	/* the mouth, seen from a little above: its far side, in shadow */
 	double mh = 9.0 * k;
 	desk_rounded_path(cr, x + 4.0 * k, clip - mh, sw - 8.0 * k, mh + 2.0 * k, 3.0 * k);
@@ -21756,38 +21786,6 @@ static void cc_slot_paint(cairo_t *cr, int w, int h)
 		cairo_set_source_rgb(cr, 0.34, 0.25, 0.10);
 		cairo_fill(cr);
 	}
-	cairo_restore(cr);
-}
-
-bool desk_console_bezel_cap_box(int w, int h, int box[4])
-{
-	struct desk_tuner_place pl;
-	double clip, cx, cy, rx, ry;
-	int m;
-	if (!desk_console_card_place(w, h, &pl, &clip, &m)
-		|| !cc_bezel_px(w, h, &cx, &cy, &rx, &ry) || cy - ry >= clip) {
-		return false;
-	}
-	box[0] = (int)floor(cx - rx);
-	box[1] = (int)floor(cy - ry);
-	box[2] = (int)ceil(cx + rx) - box[0];
-	box[3] = (int)ceil(clip) + 1 - box[1];
-	return box[2] > 0 && box[3] > 0;
-}
-
-void desk_draw_console_bezel_cap(cairo_t *cr, int w, int h, const int box[4])
-{
-	double cx, cy, rx, ry;
-	if (!cc_bezel_px(w, h, &cx, &cy, &rx, &ry)) {
-		return;
-	}
-	cairo_save(cr);
-	cairo_translate(cr, -box[0], -box[1]);
-	cairo_rectangle(cr, box[0], box[1], box[2], box[3]);
-	cairo_clip(cr);
-	cc_bezel_path(cr, cx, cy, rx, ry);
-	cairo_clip(cr);
-	desk_draw_console_base(cr, w, h);
 	cairo_restore(cr);
 }
 

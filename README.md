@@ -134,7 +134,8 @@ there -- its material, the light on it, its shadow and the wear of use.
   switchboard on it: a jack for each network in range, Bluetooth device, or speaker and
   microphone. Pull the brass plug out of one jack and put it in another to
   join, connect or switch (or choose with the arrow keys and press
-  Return); its readout always shows what is in use now. NetworkManager,
+  Return), and in the hole to let go, or on the sound card to mute; its
+  readout always shows what is in use now. NetworkManager,
   BlueZ and PipeWire do the work.
 - **A desk calendar, a desk memo pad and a clock** stand on the shelf. The
   calendar has a notebook of plans and to-dos, and notes are peeled off and

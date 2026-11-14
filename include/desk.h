@@ -244,12 +244,6 @@ bool desk_tuner_spot(const struct desk_tuner *t, int what, int i, double *x, dou
  * held lifts the plug off the board. */
 void desk_draw_cord(cairo_t *cr, const struct desk_tuner_place *pl, const double *x,
 	const double *y, int n, double ring_x, double ring_y, bool held);
-/* The top of the tube's bezel, which comes up past the slot and stands in
- * front of the card rising out of it: where it is on the set (x, y, w,
- * h; false if it does not reach the slot), and that part of the set drawn
- * into a picture of that size, clipped to the bezel. */
-bool desk_console_bezel_cap_box(int w, int h, int box[4]);
-void desk_draw_console_bezel_cap(cairo_t *cr, int w, int h, const int box[4]);
 /* The set drawn dy lower on the screen than it is laid out (to make room
  * above it for the tuner's card): the hit tests below look that much
  * higher up it. */
