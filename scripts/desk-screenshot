@@ -1,13 +1,18 @@
 #!/bin/sh
-# desk-screenshot [--geometry "X,Y WxH"] -- a picture of the screen, or of
-# that part of it (the window in front: Alt+Print), taken with grim into
-# Pictures/Screenshots; the picture put on the clipboard (wl-copy), and a
-# letter in the post box saying where it went (notify-send). Print and
+# desk-screenshot [--geometry "X,Y WxH" | --file PNG] -- a picture of the
+# screen, or of that part of it (the window in front: Alt+Print), taken with
+# grim into Pictures/Screenshots -- or one taken already (Print's camera
+# cuts its own from the screens as they were when it was pressed), moved
+# there; the picture put on the clipboard (wl-copy), and a letter in the
+# post box saying where it went (notify-send). Print, Ctrl+Print and
 # Alt+Print in DEsk run this.
 set -u
 geom=""
+from=""
 if [ "${1:-}" = --geometry ] && [ -n "${2:-}" ]; then
 	geom=$2
+elif [ "${1:-}" = --file ] && [ -n "${2:-}" ]; then
+	from=$2
 fi
 case "${LC_ALL:-${LC_MESSAGES:-${LANG:-}}}" in
 ja*) title="スクリーンショット"; saved="保存しました"; nogrim="grim が入っていないので撮れません（sudo apt install grim）" ;;
@@ -16,7 +21,7 @@ esac
 tell() {
 	command -v notify-send >/dev/null 2>&1 && notify-send -a "$title" "$@"
 }
-if ! command -v grim >/dev/null 2>&1; then
+if [ -z "$from" ] && ! command -v grim >/dev/null 2>&1; then
 	tell "$title" "$nogrim"
 	exit 1
 fi
@@ -27,7 +32,9 @@ fi
 dir="$dir/Screenshots"
 mkdir -p "$dir" || exit 1
 file="$dir/$(date '+%Y-%m-%d %H.%M.%S').png"
-if [ -n "$geom" ]; then
+if [ -n "$from" ]; then
+	mv -f -- "$from" "$file" || exit 1
+elif [ -n "$geom" ]; then
 	grim -g "$geom" "$file" || exit 1
 else
 	grim "$file" || exit 1

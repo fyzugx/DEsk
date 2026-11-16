@@ -1,0 +1,45 @@
+// desksfx.lib -- (2026-11-14): what the desk's new sounds are made of, in Faust.
+// The same desk under everything (its top rings at its own modes), one room round everything (a small
+// wooden study), paper as crackle and air, and the turn of an envelope from a single push.
+import("stdfaust.lib");
+
+// ---- moments: a button pressed is made one sample of 1 (button(..) : ba.impulsify -- Faust takes no
+// string as an argument, so that is written out where it is used); a step is 0 before it and 1 after
+step = (+ ~ _) : min(1);
+
+// rising in a seconds and dying away over d (to 1/e), from one push; its peak is 1
+ar(a, d) = _ <: fi.pole(pd), fi.pole(pa) : - : *(k)
+with {
+	pd = exp(-1.0 / (d * ma.SR));
+	pa = exp(-1.0 / (a * ma.SR));
+	tp = log(d / a) * a * d / (d - a);
+	k = 1.0 / (exp(0.0 - tp / d) - exp(0.0 - tp / a));
+};
+
+// a value glided to, over tau seconds
+glide(tau) = si.smooth(ba.tau2pole(tau));
+
+// ---- noise: n(i) are eight streams that do not follow one another
+n(i) = no.noises(8, i);
+
+// ---- placing: constant power, p from -1 (left) to 1 (right)
+pan(p) = _ <: *(cos((p + 1.0) * ma.PI / 4.0)), *(sin((p + 1.0) * ma.PI / 4.0));
+
+// ---- the desk's top: a slab of wood, struck through whatever lies on it. fs scales its pitch (the kind
+// of wood), ts how long it rings (dense woods ring longer)
+deskF = (97, 143, 188, 231, 297, 362, 441, 538, 655, 790, 960, 1180, 1430, 1760, 2150);
+deskT = (0.42, 0.36, 0.30, 0.27, 0.22, 0.19, 0.16, 0.13, 0.11, 0.09, 0.075, 0.06, 0.05, 0.04, 0.03);
+deskG = (1.0, 0.8, 0.7, 0.55, 0.6, 0.45, 0.4, 0.35, 0.3, 0.25, 0.2, 0.16, 0.12, 0.1, 0.07);
+desk(fs, ts) = _ <: par(i, 15, pm.modeFilter(ba.take(i + 1, deskF) * fs, ba.take(i + 1, deskT) * ts,
+	ba.take(i + 1, deskG))) :> *(0.0013);   // (pm.modeFilter rings high at its own frequency: brought to about a paper's fall)
+
+// ---- paper: fibres letting go -- sparse ticks, a few louder than the rest (squared, keeping the sign:
+// cubed, the loudest stood 14 dB over everything else), at rate a second, in the band lo..hi
+crackle(i, rate, lo, hi) = no.sparse_noise(max(rate, 0.01)) : (_ <: _ * abs(_)) : *(4.0)
+	: fi.highpass(2, lo) : fi.lowpass(2, hi) : *(rate > 0.5);
+// air pushed along: noise through a band at fc
+air(i, fc, q) = n(i) : fi.resonbp(fc, q, 1.0);
+
+// ---- the room: a small study, wood and books, the sound a little way off the walls
+room = re.zita_rev1_stereo(14, 180, 5200, 0.75, 0.5, 48000);
+wet(w) = _, _ <: (_, _), (room : *(w), *(w)) :> _, _;

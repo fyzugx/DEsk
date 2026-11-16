@@ -20,7 +20,7 @@ struct desk_media {
 	double length;           /* seconds; < 0 unknown */
 	double position;         /* seconds, as of the time asked for; < 0 unknown */
 	double since;            /* when this track came up, on the monotonic clock */
-	bool can_prev, can_next, can_play, can_pause, can_raise;
+	bool can_prev, can_next, can_play, can_pause, can_raise, can_seek;
 };
 
 /* changed is called on the compositor's thread when anything shown of it
@@ -39,6 +39,14 @@ enum {
 	DESK_MEDIA_RAISE,      /* bring the player's window up */
 };
 void desk_media_command(int what);
+
+/* The same for one program's player, for a window that is showing what it plays:
+ * app is the program's id or X class. If no player goes by that name, the one above. */
+void desk_media_read_for(const char *app, struct desk_media *out, double now);
+void desk_media_command_for(const char *app, int what);
+/* Sent on or back by so many seconds, or to a place in the track. */
+void desk_media_seek_for(const char *app, double by);
+void desk_media_goto_for(const char *app, double at);
 
 /* Once a second or so. */
 void desk_media_tick(void);

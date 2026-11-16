@@ -60,6 +60,9 @@ const char *desk_gpu_node(const struct desk_gpu *g);
 bool desk_gpu_software(const struct desk_gpu *g);
 /* The same test of a renderer's name (GL_RENDERER) from anywhere. */
 bool desk_gl_name_software(const char *name);
+/* graphics of its own -- NVIDIA, Radeon RX and Pro, Intel Arc A and B -- by the
+ * renderer's name: not the processor's own, nor a virtual machine's */
+bool desk_gl_name_own(const char *name);
 /* GL_RENDERER of a context someone else made -- the compositor's own, an
  * EGLDisplay and EGLContext passed as pointers -- and whatever was current
  * on the calling thread put back. False if it could not be made current. */

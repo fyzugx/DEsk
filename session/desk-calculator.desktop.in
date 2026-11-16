@@ -1,0 +1,23 @@
+[Desktop Entry]
+Type=Application
+Name=Calculator
+Name[ja]=電卓
+Name[zh]=计算器
+Name[ko]=계산기
+Name[es]=Calculadora
+Name[fr]=Calculatrice
+Name[de]=Taschenrechner
+Comment=The calculator from the drawer, put down on the desk
+Comment[ja]=引き出しの電卓を机に出します
+Comment[zh]=把抽屉里的计算器放到桌上
+Comment[ko]=서랍의 계산기를 책상에 꺼냅니다
+Comment[es]=La calculadora del cajón, puesta sobre el escritorio
+Comment[fr]=La calculatrice du tiroir, posée sur le bureau
+Comment[de]=Der Taschenrechner aus der Schublade, auf den Schreibtisch gelegt
+Exec=@EXEC@ calculator
+Icon=@ICON@
+Terminal=false
+StartupNotify=false
+Categories=Utility;Calculator;
+Keywords=calculator;calculate;arithmetic;math;
+OnlyShowIn=DEsk;

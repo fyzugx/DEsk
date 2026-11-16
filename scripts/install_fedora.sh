@@ -205,8 +205,10 @@ build|keyboards (xkbcommon)|libxkbcommon-devel
 build|touchpads and mice (libinput)|libinput-devel
 build|drawing (cairo)|cairo-devel
 build|letters: emoji and every script (Pango)|pango-devel
+build|the text editor (GTK 3)|gtk3-devel
 build|drawing: pixels (pixman)|pixman-devel
 build|typefaces (fontconfig)|fontconfig-devel
+build|typefaces: read for handwriting (FreeType)|freetype-devel
 build|the display (libdrm)|libdrm-devel
 build|the room on the GPU (EGL, GLES)|libglvnd-devel
 build|the room on the GPU (EGL: Mesa'"'"'s part)|mesa-libEGL-devel
@@ -237,6 +239,7 @@ run|typefaces: Chinese, Japanese, Korean (Noto Serif CJK)|google-noto-serif-cjk-
 run|typefaces: emoji (Noto Color Emoji)|google-noto-color-emoji-fonts
 run|typefaces: the desk'"'"'s own (URW base 35)|urw-base35-fonts
 run|screenshots (Print)|grim
+run|films (Print with a tape in the camera)|ffmpeg-free
 run|screenshots: a part of the screen|slurp
 run|screenshots: onto the clipboard|wl-clipboard
 run|screenshots: the letter saying where it went|libnotify

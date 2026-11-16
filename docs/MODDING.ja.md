@@ -109,7 +109,7 @@ org.kde.kate.desktop = Development
 
 ## 6. 音
 
-音はすべて合成です（`src/sfx.c`）。足すには：
+音は合成です（`src/sfx.c`）。または Faust で作って焼きます（`art/sound/bake.py`：`<名前>-<番号>.wav`。あれば sfx.c の代わりに読みます）。足すには：
 
 1. `include/sound.h` の `enum desk_sound` の `DESK_SND_COUNT` の前に名前を。
 2. `sfx.c` に、ファイル冒頭の部品（固有振動、破裂、摩擦、ぱりぱり、すれ、きしみ）で組んだ関数 `s_<名前>(struct buf *b, struct rng *r, int v)` と、`SFX` の行（名前、秒数、版の数）。
@@ -136,6 +136,8 @@ org.kde.kate.desktop = Development
 3. `struct desk_server` にスプライトを持ち、見せる内容が変わったときに描き（その内容のハッシュを鍵に）、正しい層に置きます（ARCHITECTURE の §4.1）。
 4. クリックできるなら、`draw.c` に当たり判定、`server_cursor_button` の正しい順番の所に分岐を（ARCHITECTURE の §4.4）。
 5. コンポジタなしで確かめられるよう、`desk-preview` でも描きます。
+
+手に取って使う物や、紙ではない窓は別です。それは**物**で、自分のファイルを一つ持ちます。[THINGS.ja.md](THINGS.ja.md) を見てください。
 
 ## 9. アイコンとテーマ
 

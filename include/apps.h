@@ -27,9 +27,20 @@ enum desk_shelf {
 
 /* Past the last binder on the shelf stands one more thing to take down: the
  * book of every program, to look one up in. On the shelf it is the thing
- * after the binders. */
+ * after the binders. And at the other end of the row, before the first of
+ * them, a slim binder of the user's favourites: the programs whose sheets
+ * have a flag stuck on them (owner 2026-11-10). It is the thing after the
+ * book, so the book keeps its number. */
 #define DESK_SHELF_BOOK DESK_SHELF_COUNT
-#define DESK_SHELF_THINGS (DESK_SHELF_COUNT + 1)
+#define DESK_SHELF_FAV (DESK_SHELF_COUNT + 1)
+#define DESK_SHELF_THINGS (DESK_SHELF_COUNT + 2)
+
+/* A thing on the shelf that opens into a fan of sheets: the eight, and the
+ * favourites. */
+static inline bool desk_shelf_is_binder(int thing)
+{
+	return (thing >= 0 && thing < DESK_SHELF_COUNT) || thing == DESK_SHELF_FAV;
+}
 
 enum {
 	DESK_APP_ICON_PX = 128,
@@ -52,6 +63,7 @@ struct desk_app {
 	unsigned seed;        /* stable per app: which way its printing goes wrong */
 	bool terminal;        /* Terminal=true: needs a terminal wrapped round it */
 	bool user_filed;      /* the shelf came from shelves.conf, not the rules */
+	bool fav;             /* a flag stuck on its sheet: in the favourites */
 	/* Which of the drawer's five things it is, by what it does: a terminal
 	 * is the little terminal, a browser the globe, a file manager the
 	 * folder, a text editor the notepad, settings the gear (see desk.h's
@@ -71,8 +83,15 @@ struct desk_shelf_info {
 struct desk_app_list {
 	const struct desk_app *apps;
 	int n;
-	struct desk_shelf_info shelf[DESK_SHELF_COUNT];
+	/* by the thing on the shelf: the eight binders, nothing for the book,
+	 * and the favourites, whose sheets are not a run in apps but fav[] */
+	struct desk_shelf_info shelf[DESK_SHELF_THINGS];
+	const int *fav;       /* indices into apps, by name */
+	int nfav;
 	unsigned generation;
+	/* the scan this is: the same through the favourites published again,
+	 * for what does not show them (a sheet as printed) */
+	unsigned scan_generation;
 	time_t scanned_at;
 	int n_files;    /* .desktop files looked at */
 	/* not on a shelf: NoDisplay, another desktop's, Hidden, reserved,
@@ -108,6 +127,21 @@ void desk_apps_release(const struct desk_app_list *list);
  * never in the book, and never matched by desk_apps_match's name and
  * program passes. */
 const struct desk_app *desk_apps_find(const struct desk_app_list *list, const char *id);
+
+/* The program on sheet idx of a binder (desk_shelf_is_binder), or NULL. */
+const struct desk_app *desk_shelf_app(const struct desk_app_list *list, int shelf, int idx);
+/* and its index in list->apps, or -1 */
+int desk_shelf_app_index(const struct desk_app_list *list, int shelf, int idx);
+
+/* The favourites, kept in $XDG_CONFIG_HOME/desk/favorites, a desktop file
+ * id a line. A flag stuck on (on) or peeled off a program's sheet: the
+ * file written, and the list published again at once as a new generation
+ * (no scan). Peeled off while keep is true -- the favourites binder open
+ * in the hand -- its sheet stays in that binder, flagless, until
+ * desk_apps_fav_tidy, when the binder goes back on the shelf. False when
+ * the file could not be written (the flag is still moved). */
+bool desk_apps_fav_set(const char *id, bool on, bool keep);
+void desk_apps_fav_tidy(void);
 
 /* DEsk's standard programs, one for each of the drawer's things (and
  * the terminal for Super+Enter): the same numbers as a program's model.

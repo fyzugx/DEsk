@@ -1,0 +1,178 @@
+#!/bin/sh
+# desk-record --size WxH --start T0 [--transform N] [--lang LL] [--mute] -- the film
+# Print's camera makes with a tape in it. The frames come in on stdin as
+# the desk reads them off the screen -- W by H, four bytes a pixel, blue
+# first, the fourth nothing -- and ffmpeg makes a film of them, each
+# stamped with when it came, and of the sound the desk is making (what its
+# speakers play, from the sound server), the two measured from the same
+# moment, T0 (wall clock, seconds), so that they keep together. The screen
+# turned round (N, a wl_output_transform), the frames are turned back.
+# Made first into a hidden Matroska file in Videos/Screencasts -- a film
+# however it ends -- and when the frames stop coming, made into an .mp4
+# there; a letter in the post box saying where it went (notify-send), in
+# the desk's language (LL), else the locale's. DESK_RECORD_SOUND names the
+# sound to record instead (one of the sound server's sources), or is off;
+# DESK_RECORD_DIR, where the films go instead.
+set -u
+size=""
+start=""
+turn=0
+lang=""
+mute=0
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--mute) mute=1 ;;
+	--size | --start | --transform | --lang)
+		[ $# -ge 2 ] || break
+		case "$1" in
+		--size) size=$2 ;;
+		--start) start=$2 ;;
+		--lang) lang=$2 ;;
+		*) turn=$2 ;;
+		esac
+		shift ;;
+	esac
+	shift
+done
+case "${lang:-${LC_ALL:-${LC_MESSAGES:-${LANG:-}}}}" in
+ja*) title="画面の録画"; saved="保存しました"
+	noff="ffmpeg が入っていないので録画できません"; failed="録画を保存できませんでした" ;;
+zh*) title="屏幕录像"; saved="已保存"
+	noff="没有安装 ffmpeg，无法录像"; failed="无法保存录像" ;;
+ko*) title="화면 녹화"; saved="저장했습니다"
+	noff="ffmpeg가 설치되어 있지 않아 녹화할 수 없습니다"; failed="녹화를 저장하지 못했습니다" ;;
+es*) title="Grabación de pantalla"; saved="Guardada"
+	noff="ffmpeg no está instalado: no se pudo grabar nada"; failed="No se pudo guardar la grabación" ;;
+fr*) title="Enregistrement de l’écran"; saved="Enregistré"
+	noff="ffmpeg n’est pas installé : rien n’a pu être enregistré"
+	failed="L’enregistrement n’a pas pu être sauvegardé" ;;
+de*) title="Bildschirmaufnahme"; saved="Gespeichert"
+	noff="ffmpeg ist nicht installiert, daher konnte nichts aufgenommen werden"
+	failed="Die Aufnahme konnte nicht gespeichert werden" ;;
+*) title="Screen recording"; saved="Saved"
+	noff="ffmpeg is not installed, so nothing could be recorded"
+	failed="The recording could not be saved" ;;
+esac
+tell() {
+	command -v notify-send >/dev/null 2>&1 && notify-send -a "$title" "$@"
+}
+if ! command -v ffmpeg >/dev/null 2>&1; then
+	tell "$title" "$noff"
+	exit 1
+fi
+case "$size" in
+*[!0-9x]* | "" | x* | *x) exit 1 ;;
+esac
+case "$start" in
+*[!0-9.]* | "") exit 1 ;;
+esac
+dir=${DESK_RECORD_DIR:-}
+if [ -z "$dir" ]; then
+	dir=$(xdg-user-dir VIDEOS 2>/dev/null || true)
+	if [ -z "$dir" ] || [ "$dir" = "$HOME" ]; then
+		dir="$HOME/Videos"
+	fi
+	dir="$dir/Screencasts"
+fi
+if ! mkdir -p "$dir"; then
+	tell "$title" "$failed"
+	exit 1
+fi
+name=$(date '+%Y-%m-%d %H.%M.%S')
+
+# what this ffmpeg can make: H.264 in an .mp4 (x264, else OpenH264), else
+# VP8 in a .webm, else MPEG-4 in an .mkv
+encoders=$(ffmpeg -hide_banner -encoders 2>/dev/null)
+has() {
+	printf '%s\n' "$encoders" | grep -q " $1 "
+}
+ext=mp4
+part="$dir/.$name.mkv"
+if has libx264; then
+	video="-c:v libx264 -preset veryfast -crf 23 -bf 0"
+elif has libopenh264; then
+	video="-c:v libopenh264 -b:v 8M"
+elif has libvpx; then
+	video="-c:v libvpx -deadline realtime -cpu-used 8 -b:v 6M"
+	ext=webm
+	part="$dir/.$name.webm"
+else
+	video="-c:v mpeg4 -q:v 3"
+	ext=mkv
+fi
+if [ "$ext" = webm ]; then
+	if has libopus; then
+		sound="-c:a libopus -b:a 128k"
+	elif has libvorbis; then
+		sound="-c:a libvorbis -q:a 5"
+	else
+		mute=1
+	fi
+else
+	sound="-c:a aac -b:a 160k"
+fi
+# the sound: what the speakers play, if there is a sound server to ask
+source=${DESK_RECORD_SOUND:-@DEFAULT_MONITOR@}
+if [ "$source" = off ]; then
+	mute=1
+elif [ "$mute" = 0 ] && ! { command -v pactl >/dev/null 2>&1 && pactl info >/dev/null 2>&1; }; then
+	mute=1
+fi
+# the screen turned: the frames turned back
+case "$turn" in
+1) turned="transpose=clock" ;;
+2) turned="hflip,vflip" ;;
+3) turned="transpose=cclock" ;;
+4) turned="hflip" ;;
+5) turned="transpose=cclock_flip" ;;
+6) turned="vflip" ;;
+7) turned="transpose=clock_flip" ;;
+*) turned="" ;;
+esac
+
+set -- -hide_banner -loglevel error -y
+if [ "$mute" = 0 ]; then
+	set -- "$@" -thread_queue_size 1024 -itsoffset "-$start" -f pulse -wallclock 1 -i "$source"
+fi
+# (stamped as they come, to the millisecond, from T0)
+set -- "$@" -thread_queue_size 8 -itsoffset "-$start" -f rawvideo -framerate 1000 \
+	-pix_fmt bgr0 -s "$size" -use_wallclock_as_timestamps 1 -i pipe:0 -copyts
+if [ "$mute" = 0 ]; then
+	# shellcheck disable=SC2086
+	set -- "$@" -map 1:v -map 0:a -af atrim=start=0 $sound -shortest
+else
+	set -- "$@" -map 0:v
+fi
+if [ -n "$turned" ]; then
+	set -- "$@" -vf "$turned"
+fi
+# shellcheck disable=SC2086
+set -- "$@" $video -pix_fmt yuv420p -fps_mode passthrough -enc_time_base:v 1:1000 "$part"
+nice -n 10 ffmpeg "$@"
+
+if [ ! -s "$part" ]; then
+	rm -f "$part"
+	tell "$title" "$failed"
+	exit 1
+fi
+file="$dir/$name.$ext"
+if [ "$ext" = mp4 ]; then
+	if nice -n 10 ffmpeg -hide_banner -loglevel error -y -i "$part" -map 0 -c copy \
+		-movflags +faststart "$file"; then
+		rm -f "$part"
+	else
+		rm -f "$file"
+		file="$dir/$name.mkv"
+		mv -f -- "$part" "$file" || exit 1
+	fi
+else
+	mv -f -- "$part" "$file" || exit 1
+fi
+# its first frame, for the letter
+thumb="${XDG_RUNTIME_DIR:-/tmp}/desk-record-$$.png"
+if ffmpeg -hide_banner -loglevel error -y -i "$file" -frames:v 1 \
+	-vf "scale='min(480,iw)':-2" "$thumb" 2>/dev/null; then
+	tell -i "$thumb" "$title" "$saved: $file"
+else
+	tell "$title" "$saved: $file"
+fi

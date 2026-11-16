@@ -27,8 +27,15 @@ uniform ivec2 u_frame;    /* the whole sheet, in samples */
 uniform vec3 u_eye, u_ww, u_uu, u_vv;
 uniform vec2 u_fov;
 uniform int u_layer;
-uniform float u_open, u_cc_out, u_pb_open;
+uniform float u_open, u_cc_out, u_cc_lid, u_pb_open;
+uniform vec2 u_cc_rot;   /* the lid's swing in this sheet: its cosine and sine (draw.c) */
 uniform float u_zf, u_aspect, u_sh_hx, u_hx;
+/* what the desk is made of (draw.c, struct wood and desk_set_wood): its timber, and stain */
+uniform vec3 u_wood_light, u_wood_dark, u_wood_fleck, u_wood_sap, u_wood_faded;
+uniform vec4 u_wood_tone;    /* light's least and span, dark's */
+uniform vec4 u_wood_grain;   /* the rays' width and power, the pores, the rings' rate */
+uniform vec2 u_wood_late;    /* the latewood band's power; how much dust shows on it */
+uniform int u_stain;
 
 const float M_PI = 3.14159265358979323846;
 
@@ -639,6 +646,10 @@ hit3 room_gadgets(vec3 p)
 		if (up && u_layer != 3) {
 			continue;
 		}
+		/* the clock on the desk is a picture laid over the desk's sheet */
+		if (i == DESK_GADGET_CLOCK && u_layer == 1) {
+			continue;
+		}
 		float gx = GD_X[i], ghx = GD_HX[i], ghz = GD_HZ[i], gh = GD_H[i];
 		float ins = GD_INSET[i], pl = GD_PLINTH[i], foot = GD_FOOT[i];
 		float base = foot + pl;
@@ -754,6 +765,17 @@ vec3 cc_to_face(cc_face f, vec3 p)
 	return vec3(dot(q, f.fu), dot(q, f.fn), dot(q, f.fs));
 }
 
+/* draw.c's cc_button: a brass ring, its skirt and a domed cap of cast glass */
+hit3 cc_button(vec3 q, float ring, float cap, float dome, float base, int mat)
+{
+	hit3 h = hit3(sd_cyl_y(vec3(q.x, q.y - (base + 0.045), q.z), ring, 0.045), MID_CC_BRASS);
+	h = hmin3(h, hit3(sd_cyl_y(vec3(q.x, q.y - (base + 0.075), q.z), cap + 0.045, 0.075),
+		MID_CC_BRASS));
+	float d = max(sd_sphere(vec3(q.x, q.y - (base + 0.20 - dome), q.z), dome),
+		sd_cyl_y(vec3(q.x, q.y - (base + 0.05), q.z), cap, 0.16));
+	return hmin3(h, hit3(d, mat));
+}
+
 hit3 map_console(vec3 p)
 {
 	hit3 h = hit3(1e9, 0);
@@ -786,8 +808,8 @@ hit3 map_console(vec3 p)
 	}
 
 	h = hmin3(h, hit3(sd_round_box(p - vec3(cx, (RM_CC_PLINTH + RM_CC_TY1 * 0.72) * 0.5,
-		(RM_CC_PZ1 + RM_CC_ZB) * 0.5),
-		vec3(inner, (RM_CC_TY1 * 0.72 - RM_CC_PLINTH) * 0.5, (RM_CC_PZ1 - RM_CC_ZB) * 0.5),
+		(RM_CC_BODY_Z0 + RM_CC_ZB) * 0.5),
+		vec3(inner, (RM_CC_TY1 * 0.72 - RM_CC_PLINTH) * 0.5, (RM_CC_BODY_Z0 - RM_CC_ZB) * 0.5),
 		0.10), MID_CC_STEEL));
 
 	h = hmin3(h, hit3(sd_round_box(pf, vec3(inner, 0.17, panel.hl), 0.06), MID_CC_PANEL));
@@ -826,6 +848,37 @@ hit3 map_console(vec3 p)
 			vec3(CC_HU[idx] * 0.78, 0.07, CC_HS[idx] * 0.74), 0.03), MID_CC_GLASS));
 	}
 
+	/* the brass that parts the panel in four */
+	h = hmin3(h, hit3(sd_round_box(vec3(tf.x - CC_PART_U, tf.y - (RM_CC_SKIN + 0.015), tf.z),
+		vec3(0.035, 0.015, tower.hl - 0.10), 0.015), MID_CC_BRASS));
+	h = hmin3(h, hit3(sd_round_box(vec3(pf.x - CC_PART_U, pf.y - (RM_CC_SKIN + 0.015),
+		pf.z - (panel.hl - 0.06 - 0.45) * 0.5),
+		vec3(0.035, 0.015, (panel.hl - 0.06 + 0.45) * 0.5), 0.015), MID_CC_BRASS));
+	h = hmin3(h, hit3(sd_round_box(vec3(pf.x, pf.y - (RM_CC_SKIN + 0.03),
+		pf.z - (panel.hl - 0.04)), vec3(inner - 0.06, 0.03, 0.03), 0.03), MID_CC_BRASS));
+
+	/* the knob, up on the tower */
+	{
+		vec3 q = tf - vec3(CC_U[CC_VOL], 0.0, CC_S[CC_VOL]);
+		h = hmin3(h, hit3(sd_cyl_y(vec3(q.x, q.y - (RM_CC_SKIN + 0.035), q.z),
+			0.88, 0.035), MID_CC_BRASS));
+		float ang = atan2f(q.z, q.x);
+		float flute = 0.500 + 0.010 * spow(max(0.0, scos(ang * 18.0)), 2.0);
+		h = hmin3(h, hit3(0.85 * sd_cyl_y(vec3(q.x, q.y - (RM_CC_SKIN + 0.19), q.z),
+			flute, 0.12), MID_CC_BAKELITE));
+	}
+
+	/* the two faders, up on the tower beside it */
+	for (int fd = 0; fd < 2; fd++) {
+		int idx = fd != 0 ? CC_SCREEN : CC_BRIGHT;
+		vec3 q = tf - vec3(CC_U[idx], 0.0, CC_S[idx]);
+		float plate = sd_round_box(vec3(q.x, q.y - (RM_CC_SKIN + 0.04), q.z),
+			vec3(CC_HU[idx] * 0.95, 0.04, 0.30), 0.04);
+		plate = max(plate, -sd_box(vec3(q.x, q.y - (RM_CC_SKIN + 0.14), q.z),
+			vec3(CC_HU[idx] * 0.82, 0.14, 0.11)));
+		h = hmin3(h, hit3(plate, MID_CC_BRASS));
+	}
+
 	/* two switches */
 	for (int sw = 0; sw < 2; sw++) {
 		vec3 q = pf - vec3(CC_U[sw], 0.0, CC_S[sw]);
@@ -839,82 +892,88 @@ hit3 map_console(vec3 p)
 			sw != 0 ? MID_CC_LENS_BLUE : MID_CC_LENS_AMBER));
 	}
 
-	/* the knob */
+	/* the buttons as one: the nearest across the panel, and a bound for the rest */
 	{
-		vec3 q = pf - vec3(CC_U[CC_VOL], 0.0, CC_S[CC_VOL]);
-		h = hmin3(h, hit3(sd_cyl_y(vec3(q.x, q.y - (RM_CC_SKIN + 0.035), q.z),
-			0.88, 0.035), MID_CC_BRASS));
-		float ang = atan2f(q.z, q.x);
-		float flute = 0.500 + 0.010 * spow(max(0.0, scos(ang * 18.0)), 2.0);
-		h = hmin3(h, hit3(0.85 * sd_cyl_y(vec3(q.x, q.y - (RM_CC_SKIN + 0.29), q.z),
-			flute, 0.25), MID_CC_BAKELITE));
-	}
-
-	/* the two faders, the lamp's and the screen's */
-	for (int fd = 0; fd < 2; fd++) {
-		int idx = fd != 0 ? CC_SCREEN : CC_BRIGHT;
-		vec3 q = pf - vec3(CC_U[idx], 0.0, CC_S[idx]);
-		float plate = sd_round_box(vec3(q.x, q.y - (RM_CC_SKIN + 0.04), q.z),
-			vec3(CC_HU[idx] * 0.95, 0.04, 0.30), 0.04);
-		plate = max(plate, -sd_box(vec3(q.x, q.y - (RM_CC_SKIN + 0.14), q.z),
-			vec3(CC_HU[idx] * 0.82, 0.14, 0.11)));
-		h = hmin3(h, hit3(plate, MID_CC_BRASS));
+		int best = -1;
+		float d1 = 1e9, d2 = 1e9, r2 = CC_PW_RING;
+		for (int i = 0; i < CC_COUNT; i++) {
+			/* (the four under the lid stand for the four on it: CC_TWIN) */
+			if (CC_BTN[i] == 0 || CC_ON[i] == CC_ON_LID) {
+				continue;
+			}
+			float d = length(vec2(pf.x - CC_U[i], pf.z - CC_S[i]));
+			float ring = CC_ON[i] == CC_ON_FACE ? CC_PW_RING : CC_LB_RING;
+			if (d < d1) {
+				d2 = d1;
+				r2 = best >= 0 ? (CC_ON[best] == CC_ON_FACE ? CC_PW_RING : CC_LB_RING) : r2;
+				d1 = d;
+				best = i;
+			} else if (d < d2) {
+				d2 = d;
+				r2 = ring;
+			}
+		}
+		if (best >= 0) {
+			int b = CC_ON[best] == CC_ON_UNDER && abs(u_cc_lid - 1.0) < 0.5 ? CC_TWIN[best]
+				: best;
+			bool big = CC_ON[b] == CC_ON_FACE;
+			h = hmin3(h, cc_button(pf - vec3(CC_U[b], 0.0, CC_S[b]),
+				big ? CC_PW_RING : CC_LB_RING, big ? CC_PW_R : CC_LB_R,
+				big ? CC_PW_DOME : CC_LB_DOME,
+				CC_ON[b] == CC_ON_LID ? CC_LID_N1 : RM_CC_SKIN, CC_BTN[b]));
+			h = hmin3(h, hit3(d2 - r2, 0));
+		}
 	}
 
 	/* the guarded set */
 	{
-		float ps = (CC_PW_G_S0 + CC_PW_G_S1) * 0.5;
 		h = hmin3(h, hit3(sd_round_box(
-			vec3(pf.x - 0.50, pf.y - (RM_CC_SKIN + 0.035), pf.z - ps),
-			vec3(2.90, 0.035, (CC_PW_G_S0 - CC_PW_G_S1) * 0.5 + 0.09), 0.05),
-			MID_CC_PANEL));
-
-		float bs = CC_S[CC_PW_OFF];
-		for (int i = 0; i < 3; i++) {
-			vec3 q = pf - vec3(CC_U[CC_PW_OFF + i], 0.0, bs);
-			h = hmin3(h, hit3(sd_cyl_y(vec3(q.x, q.y - (RM_CC_SKIN + 0.045), q.z),
-				CC_PW_RING, 0.045), MID_CC_BRASS));
-			h = hmin3(h, hit3(sd_cyl_y(vec3(q.x, q.y - (RM_CC_SKIN + 0.075), q.z),
-				CC_PW_R + 0.045, 0.075), MID_CC_BRASS));
-			float cap = max(
-				sd_sphere(vec3(q.x, q.y - (RM_CC_SKIN - 0.30), q.z), 0.50),
-				sd_cyl_y(vec3(q.x, q.y - (RM_CC_SKIN + 0.05), q.z), CC_PW_R, 0.16));
-			h = hmin3(h, hit3(cap, i == 0 ? MID_CC_LENS_RED
-				: i == 1 ? MID_CC_LENS_AMBER : MID_CC_LENS_GREEN));
-		}
-
+			vec3(pf.x - (CC_LID_U0 + CC_LID_U1) * 0.5, pf.y - (RM_CC_SKIN + 0.035),
+				pf.z - (CC_LID_S0 + CC_LID_HINGE_S + 0.04) * 0.5),
+			vec3((CC_LID_U1 - CC_LID_U0) * 0.5 + 0.04, 0.035,
+				(CC_LID_HINGE_S - CC_LID_S0 + 0.08) * 0.5), 0.05), MID_CC_PANEL));
 		{
-			vec3 q = pf - vec3(CC_U[CC_LOCK], 0.0, CC_S[CC_LOCK]);
-			h = hmin3(h, hit3(sd_cyl_y(vec3(q.x, q.y - (RM_CC_SKIN + 0.045), q.z),
-				CC_PW_RING, 0.045), MID_CC_BRASS));
-			h = hmin3(h, hit3(sd_cyl_y(vec3(q.x, q.y - (RM_CC_SKIN + 0.075), q.z),
-				CC_PW_R + 0.045, 0.075), MID_CC_BRASS));
-			float cap = max(
-				sd_sphere(vec3(q.x, q.y - (RM_CC_SKIN - 0.30), q.z), 0.50),
-				sd_cyl_y(vec3(q.x, q.y - (RM_CC_SKIN + 0.05), q.z), CC_PW_R, 0.16));
-			h = hmin3(h, hit3(cap, MID_CC_LENS_BLUE));
-		}
-
-		{
-			vec3 q = pf - vec3(CC_PW_LOCK_U, 0.0, bs);
-			float barrel = sd_cyl_y(vec3(q.x, q.y - (RM_CC_SKIN + 0.055), q.z),
-				0.235, 0.055);
+			vec3 q = pf - vec3(CC_PW_LOCK_U, 0.0, CC_PW_KEY_S);
+			float barrel = sd_cyl_y(vec3(q.x, q.y - (RM_CC_SKIN + 0.055), q.z), 0.235, 0.055);
 			barrel = max(barrel, -sd_box(vec3(q.x, q.y - (RM_CC_SKIN + 0.105), q.z),
 				vec3(0.032, 0.055, 0.145)));
 			h = hmin3(h, hit3(barrel, MID_CC_BRASS));
 		}
-
+		{
+			vec3 lamp = pf - vec3(CC_PW_LOCK_U, RM_CC_SKIN + 0.05, CC_PW_LAMP_S);
+			h = hmin3(h, hit3(sd_cyl_y(lamp, 0.21, 0.05), MID_CC_BRASS));
+			h = hmin3(h, hit3(sd_sphere(vec3(lamp.x, lamp.y - 0.09, lamp.z), 0.155),
+				MID_CC_LENS_GREEN));
+		}
+		float hn = (CC_LID_N0 + CC_LID_N1) * 0.5;
+		h = hmin3(h, hit3(sd_round_box(vec3(pf.x - (CC_LID_U0 + CC_LID_U1) * 0.5, pf.y - hn,
+			pf.z - CC_LID_HINGE_S), vec3((CC_LID_U1 - CC_LID_U0) * 0.5 - 0.04, 0.055, 0.055),
+			0.055), MID_CC_BRASS));
 		for (int sgn = 0; sgn < 2; sgn++) {
-			float u = sgn != 0 ? CC_PW_G_U : -CC_PW_G_U;
-			h = hmin3(h, hit3(sd_round_box(
-				vec3(pf.x - u, pf.y - (RM_CC_SKIN + CC_PW_G_N * 0.5), pf.z - CC_PW_G_S0),
-				vec3(0.070, CC_PW_G_N * 0.5, 0.070), 0.040), MID_CC_BRASS));
+			float u = sgn != 0 ? CC_LID_U1 - 0.14 : CC_LID_U0 + 0.14;
+			h = hmin3(h, hit3(sd_round_box(vec3(pf.x - u, pf.y - (RM_CC_SKIN + hn) * 0.5,
+				pf.z - CC_LID_HINGE_S), vec3(0.065, (hn - RM_CC_SKIN) * 0.5, 0.05), 0.03),
+				MID_CC_BRASS));
+		}
+		if (u_cc_lid > 0.5) {
+			float ds = pf.z - CC_LID_HINGE_S, dn = pf.y - hn;
+			float ls = (CC_LID_S0 + CC_LID_S1) * 0.5;
+			vec3 q = vec3(pf.x - (CC_LID_U0 + CC_LID_U1) * 0.5, ds * u_cc_rot.y + dn * u_cc_rot.x,
+				CC_LID_HINGE_S + ds * u_cc_rot.x - dn * u_cc_rot.y - ls);
+			h = hmin3(h, hit3(sd_round_box(q,
+				vec3((CC_LID_U1 - CC_LID_U0) * 0.5, (CC_LID_N1 - CC_LID_N0) * 0.5,
+					(CC_LID_S1 - CC_LID_S0) * 0.5), 0.035), MID_CC_CHEEK));
+			h = hmin3(h, hit3(sd_round_box(vec3(q.x, q.y - (CC_LID_N1 - hn - 0.015),
+				q.z - (CC_LID_S0 - ls) - 0.07), vec3(0.25, 0.03, 0.045), 0.02), MID_CC_BRASS));
 		}
 	}
 
-	/* the pilot lenses along the lip */
-	for (int i = 0; i < 6; i++) {
-		float u = -inner + 0.70 + float(i) * (2.0 * (inner - 0.70) / 5.0);
+	/* the pilot lenses along the lip: the nearest across, which is the nearest of the six */
+	{
+		float u0 = -inner + 0.70, pitch = 2.0 * (inner - 0.70) / 5.0;
+		float k = clamp(floor((pf.x - u0) / pitch + 0.5), 0.0, 5.0);
+		int i = int(k);
+		float u = u0 + k * pitch;
 		vec3 q = pf - vec3(u, 0.0, -panel.hl + 0.136);
 		h = hmin3(h, hit3(sd_cyl_y(vec3(q.x, q.y - (RM_CC_SKIN + 0.035), q.z),
 			0.13, 0.035), MID_CC_BRASS));
@@ -939,8 +998,20 @@ int console_owner(vec3 p)
 		} else {
 			q = cc_to_face(panel, p);
 		}
-		vec3 d = vec3(q.x - CC_U[i], q.y - 0.45, q.z - CC_S[i]);
-		if (sd_box(d, vec3(CC_HU[i], 0.60, CC_HS[i])) < 0.0) {
+		if (CC_ON[i] == CC_ON_LID && u_cc_lid > 1.5) {
+			/* the lid up on its hinge (draw.c) */
+			if (i != CC_LID) {
+				continue;
+			}
+			float hn = (CC_LID_N0 + CC_LID_N1) * 0.5;
+			float ds = q.z - CC_LID_HINGE_S, dn = q.y - hn;
+			q = vec3(q.x, hn + ds * u_cc_rot.y + dn * u_cc_rot.x,
+				CC_LID_HINGE_S + ds * u_cc_rot.x - dn * u_cc_rot.y);
+		}
+		float n0 = CC_ON[i] == CC_ON_LID ? CC_LID_N0 - 0.02 : -0.15;
+		float n1 = CC_ON[i] == CC_ON_UNDER ? CC_LID_N0 - 0.02 : 1.15;
+		vec3 d = vec3(q.x - CC_U[i], q.y - (n0 + n1) * 0.5, q.z - CC_S[i]);
+		if (sd_box(d, vec3(CC_HU[i], (n1 - n0) * 0.5, CC_HS[i])) < 0.0) {
 			return i + 1;
 		}
 	}
@@ -1175,7 +1246,7 @@ hit3 map_shelf(vec3 p)
 			vec3(0.26, 0.20, 0.55), 0.06), MID_CC_BRASS));
 	}
 
-	for (int i = 0; i < DESK_SHELF_COUNT; i++) {
+	for (int i = 0; i < SHELF_ROW; i++) {
 		vec3 c, e;
 		binder_bound(i, c, e);
 		float db = sd_box(p - c, e);
@@ -1212,8 +1283,12 @@ hit3 scene_map(vec3 p)
 		if (u_layer == 3) {
 			h = hmin3(h, map_shelf(p));
 		}
-		h = hmin3(h, map_console(p));
-		h = hmin3(h, map_post(p));
+		/* the console and the post box on the desk are pictures laid
+		 * over its sheet */
+		if (u_layer != 1) {
+			h = hmin3(h, map_console(p));
+			h = hmin3(h, map_post(p));
+		}
 	}
 
 	h = hmin3(h, hit3(sd_round_box(p - vec3(0.0, -RM_TOP_T * 0.5, (RM_ZN + RM_ZF) * 0.5),
@@ -1360,8 +1435,19 @@ struct mtl {
 	float edge;
 };
 
-void walnut_at(vec3 q, float u, float v, inout mtl m, float plank, float use)
+void walnut_at(vec3 q, float u, float v, inout mtl m, float plank, float use, bool desk)
 {
+	/* walnut, or the desk's own timber */
+	vec3 w_light = desk ? u_wood_light : vec3(0.234, 0.114, 0.049);
+	vec3 w_dark = desk ? u_wood_dark : vec3(0.052, 0.021, 0.009);
+	vec4 w_tone = desk ? u_wood_tone : vec4(0.80, 0.44, 0.82, 0.38);
+	vec3 w_fleck = desk ? u_wood_fleck : vec3(0.14, 0.11, 0.07);
+	vec4 w_grain = desk ? u_wood_grain : vec4(46.0, 7.0, 0.30, 7.2);
+	vec3 w_sap = desk ? u_wood_sap : vec3(0.265, 0.190, 0.124);
+	vec3 w_faded = desk ? u_wood_faded : vec3(0.208, 0.156, 0.112);
+	float w_late = desk ? u_wood_late.x : 2.7;
+	float w_dust = desk ? u_wood_late.y : 1.0;
+
 	float board = plank > 0.0 ? floor(u / plank) : 0.0;
 	float bu = plank > 0.0 ? u - board * plank : u;
 	float jitter = room_seed(int(board), 3);
@@ -1371,28 +1457,28 @@ void walnut_at(vec3 q, float u, float v, inout mtl m, float plank, float use)
 	float r = abs(bu - pith + wob * plank * 0.30);
 
 	float season = room_fbm2(r * 0.52 + board * 5.3, 2.7) - 0.5;
-	float rate = (7.2 + jitter * 2.4) * (1.0 + season * 0.85);
+	float rate = (w_grain.w + jitter * 2.4) * (1.0 + season * 0.85);
 	float ring = r * rate
 		+ room_fbm(v * 0.16 + board * 2.1, r * 0.8) * 3.4
 		+ room_fbm2(v * 0.62 + board * 9.1, r * 1.9) * 1.25;
 	float g = 0.5 + 0.5 * ssin(ring * 2.0 * M_PI);
-	g = spow(g, 2.7);
+	g = spow(g, w_late);
 
 	float cath = smoothstepf(0.0, plank * 0.18, r);
 	g = g + (g * 0.55 + 0.28 - g) * (1.0 - cath);
 
 	float btone = room_seed(int(board), 4);
-	vec3 light = vec3(0.234, 0.114, 0.049) * (0.80 + btone * 0.44);
-	vec3 dark = vec3(0.052, 0.021, 0.009) * (0.82 + btone * 0.38);
+	vec3 light = w_light * (w_tone.x + btone * w_tone.y);
+	vec3 dark = w_dark * (w_tone.z + btone * w_tone.w);
 	m.albedo = mix(light, dark, clampf(g, 0.0, 1.0));
 
-	float fleck = spow(room_noise(u * 46.0, v * 7.0), 7.0);
-	m.albedo += vec3(0.14, 0.11, 0.07) * fleck;
+	float fleck = spow(room_noise(u * w_grain.x, v * 7.0), w_grain.y);
+	m.albedo += w_fleck * fleck;
 	float sap = smoothstepf(0.62, 0.86, room_fbm(u * 0.5 + 31.0, v * 0.11));
-	m.albedo = mix(m.albedo, vec3(0.265, 0.190, 0.124), sap * 0.35);
+	m.albedo = mix(m.albedo, w_sap, sap * 0.35);
 
 	float pore = spow(room_noise(u * 130.0, v * 6.5), 4.0);
-	m.albedo *= 1.0 - pore * 0.30;
+	m.albedo *= 1.0 - pore * w_grain.z;
 
 	if (plank > 0.0) {
 		float seam = abs(bu - plank * 0.5);
@@ -1405,7 +1491,7 @@ void walnut_at(vec3 q, float u, float v, inout mtl m, float plank, float use)
 	m.coat_rough = 0.19 + room_fbm(u * 0.8, v * 0.8) * 0.085;
 	m.bump_freq = 26.0;
 	m.bump_amp = 0.030;
-	m.dust = 1.0;
+	m.dust = w_dust;
 
 	if (use <= 0.0) {
 		return;
@@ -1414,7 +1500,7 @@ void walnut_at(vec3 q, float u, float v, inout mtl m, float plank, float use)
 	float touch = clampf(use * (0.30 + 0.85 * room_touch(q)), 0.0, 1.0);
 
 	float bleach = room_sun(q) * (0.55 + 0.45 * use);
-	vec3 faded = mix(m.albedo, vec3(0.208, 0.156, 0.112), 0.62);
+	vec3 faded = mix(m.albedo, w_faded, 0.62);
 	m.albedo = mix(m.albedo, faded, bleach * 0.40);
 
 	float sc = scratch_at(u, v, 1.90, 13.0, 0.026, 1.0) * 0.85
@@ -1441,6 +1527,25 @@ void walnut_at(vec3 q, float u, float v, inout mtl m, float plank, float use)
 		* clampf(room_fbm2(q.x * 0.34 + 11.0, q.z * 0.34 + 2.0) * 1.5 - 0.30, 0.0, 1.0);
 	m.albedo = mix(m.albedo, vec3(0.062, 0.050, 0.042), grime * 0.26);
 	m.rough = clampf(m.rough + grime * 0.16, 0.05, 1.0);
+}
+
+/* A stain over the desk's wood: through it, the grain as it was (draw.c, stained). */
+vec3 stained(vec3 a)
+{
+	if (u_stain == 1) {
+		return a * vec3(1.16, 0.90, 0.42);
+	}
+	if (u_stain == 2) {
+		return a * vec3(0.60, 0.48, 0.38);
+	}
+	if (u_stain == 3) {
+		return a * vec3(0.28, 0.23, 0.20);
+	}
+	if (u_stain == 4) {
+		float lum = a.x * 0.30 + a.y * 0.59 + a.z * 0.11;
+		return mix(a, vec3(0.93, 0.96, 1.0) * (lum * 1.18), 0.72);
+	}
+	return a;
 }
 
 void desk_stains(vec3 w, inout mtl m)
@@ -1841,6 +1946,23 @@ mtl icon_material(int id, vec3 pw)
 		m.edge = 2.4;
 		break;
 	}
+	case MID_BINDER_FAV: {
+		float t = room_fbm(w.x * 26.0, w.y * 26.0);
+		float weave = 0.5 + 0.5 * ssin(w.x * 120.0) * ssin(w.y * 120.0);
+		m.albedo = mix(vec3(0.300, 0.156, 0.022), vec3(0.420, 0.220, 0.036), t);
+		m.albedo *= 0.92 + weave * 0.14;
+		float head = smoothstepf(RM_BN_FOOT + 3.6, RM_BN_FOOT + 7.4, w.y);
+		float fade = clampf(head * (0.20 + room_fbm2(w.x * 1.7 + 4.0, w.y * 0.8) * 0.9), 0.0, 1.0);
+		m.albedo = mix(m.albedo, vec3(0.300, 0.240, 0.160), fade * 0.30);
+		float sc = scratch_at(w.y, w.x, 0.46, 5.0, 0.010, 27.0) * 0.8;
+		m.albedo = mix(m.albedo, m.albedo * 1.30, clampf(sc, 0.0, 1.0) * 0.30);
+		m.rough = 0.82 + fade * 0.10;
+		m.bump_freq = 78.0;
+		m.bump_amp = 0.070;
+		m.dust = 1.0;
+		m.edge = 2.4;
+		break;
+	}
 	case MID_BOOK_LEATHER: {
 		float t = room_fbm(w.x * 30.0, w.y * 30.0);
 		float peb = spow(room_noise(w.x * 70.0, w.y * 70.0), 1.8);
@@ -1965,10 +2087,12 @@ mtl icon_material(int id, vec3 pw)
 	case MID_CC_LENS_AMBER:
 	case MID_CC_LENS_GREEN:
 	case MID_CC_LENS_BLUE:
-	case MID_CC_LENS_RED: {
+	case MID_CC_LENS_RED:
+	case MID_CC_LENS_WHITE: {
 		vec3 tint = id == MID_CC_LENS_AMBER ? vec3(0.620, 0.310, 0.060)
 			: id == MID_CC_LENS_GREEN ? vec3(0.110, 0.420, 0.160)
 			: id == MID_CC_LENS_RED ? vec3(0.640, 0.098, 0.062)
+			: id == MID_CC_LENS_WHITE ? vec3(0.720, 0.700, 0.640)
 			: vec3(0.110, 0.230, 0.560);
 		m.albedo = tint * 0.34;
 		m.rough = 0.075;
@@ -1994,7 +2118,13 @@ mtl icon_material(int id, vec3 pw)
 		break;
 	}
 	if (wood.w >= 0.0) {
-		walnut_at(w, wood.x, wood.y, m, wood.z, wood.w);
+		/* the desk's parts are of the desk's own timber, under its stain */
+		bool desk = id == MID_DESK_TOP || id == MID_DESK_BODY || id == MID_DRAWER_FACE
+			|| id == MID_DRAWER_WOOD;
+		walnut_at(w, wood.x, wood.y, m, wood.z, wood.w, desk);
+		if (desk) {
+			m.albedo = stained(m.albedo);
+		}
 		if (id == MID_DRAWER_WOOD) {
 			m.coat = 0.0;
 			m.albedo *= 0.78;
@@ -2176,18 +2306,24 @@ int room_owner(vec3 p, int id)
 		if (id == MID_BOOK_LEATHER || id == MID_BOOK_GILT) {
 			return DESK_SHELF_COUNT + 1;
 		}
-		if (id != MID_BINDER_A && id != MID_BINDER_B && id != MID_BINDER_LABEL
-			&& id != MID_FOLDER_PAPER) {
+		if (id != MID_BINDER_A && id != MID_BINDER_B && id != MID_BINDER_FAV
+			&& id != MID_BINDER_LABEL && id != MID_FOLDER_PAPER) {
 			return 0;
 		}
-		for (int i = 0; i < DESK_SHELF_COUNT; i++) {
+		int best = -1;
+		float bd = 1e9;
+		for (int i = 0; i < SHELF_ROW; i++) {
 			vec3 c, e;
 			binder_bound(i, c, e);
 			if (sd_box(p - c, e) < 0.0) {
-				return i + 1;
+				float d = shelf_binder_map(p, i).d;
+				if (d < bd) {
+					bd = d;
+					best = i;
+				}
 			}
 		}
-		return 0;
+		return best < 0 ? 0 : best < DESK_SHELF_COUNT ? best + 1 : DESK_SHELF_FAV + 1;
 	}
 	if (id <= 0 || id > MID_GEAR) {
 		return 0;

@@ -36,7 +36,7 @@ Depends: xfce4-terminal, thunar, gvfs, udisks2, thunar-volman, tumbler, mousepad
  xfce4-settings, qt6-gtk-platformtheme, qt5-gtk-platformtheme,
  xdg-desktop-portal, xdg-desktop-portal-wlr, xdg-desktop-portal-gtk,
  fonts-noto-core, fonts-noto-cjk, fonts-noto-color-emoji, fonts-urw-base35,
- xdg-user-dirs, xdg-utils, xwayland, wl-clipboard, grim, slurp, libnotify-bin,
+ xdg-user-dirs, xdg-utils, xwayland, wl-clipboard, grim, ffmpeg, slurp, libnotify-bin,
  dbus-user-session, nwg-look | gnome-tweaks, adwaita-icon-theme-legacy | yaru-theme-icon, ibus
 Recommends: fonts-klee, ibus-mozc,
  libreoffice-writer, libreoffice-calc, libreoffice-impress, libreoffice-gtk3,

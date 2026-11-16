@@ -16,6 +16,11 @@
  * directory, the pairs and their difference are written there.
  *
  *   desk-gputest --room [width height [dir]]
+ *
+ * And a trial: the bookcase's view laid from pictures of its faces, next
+ * to the same view traced (draw.c, desk_room_faces_test).
+ *
+ *   desk-gputest --faces [width height [dir]]
  */
 
 #include "compat.h"
@@ -262,9 +267,26 @@ static double cpu_march(int w, int h, int steps)
 	return now_sec() - t0;
 }
 
+/* DESK_WOOD and DESK_STAIN, as shell.conf says them: the desk traced both ways, and laid from its
+ * faces, of that (the faces' pictures themselves are always baked of the desk as it was made). */
+static void wood_from_env(void)
+{
+	int wood = DESK_WOOD_WALNUT, stain = DESK_STAIN_NATURAL;
+	if (getenv("DESK_WOOD") && !desk_wood_parse(getenv("DESK_WOOD"), &wood)) {
+		fprintf(stderr, "desk-gputest: no wood called %s\n", getenv("DESK_WOOD"));
+	}
+	if (getenv("DESK_STAIN") && !desk_stain_parse(getenv("DESK_STAIN"), &stain)) {
+		fprintf(stderr, "desk-gputest: no stain called %s\n", getenv("DESK_STAIN"));
+	}
+	desk_set_wood(wood, stain);
+}
+
 int main(int argc, char **argv)
 {
 	desk_compat();
+	if (!(argc > 1 && strcmp(argv[1], "--faces-bake") == 0)) {
+		wood_from_env();
+	}
 	if (argc > 1 && strcmp(argv[1], "--room") == 0) {
 		int rw = argc > 3 ? atoi(argv[2]) : 480;
 		int rh = argc > 3 ? atoi(argv[3]) : 300;
@@ -273,6 +295,30 @@ int main(int argc, char **argv)
 			return 2;
 		}
 		return desk_room_selftest(rw, rh, argc > 4 ? argv[4] : NULL) ? 0 : 1;
+	}
+
+	if (argc > 3 && strcmp(argv[1], "--tour") == 0) {
+		int tw = argc > 5 ? atoi(argv[4]) : 1920;
+		int th = argc > 5 ? atoi(argv[5]) : 1080;
+		if (tw < 16 || th < 16) {
+			fprintf(stderr, "usage: desk-gputest --tour PATH DIR [width height]\n");
+			return 2;
+		}
+		return desk_room_tour(argv[2], argv[3], tw, th) ? 0 : 1;
+	}
+
+	if (argc > 2 && strcmp(argv[1], "--faces-bake") == 0) {
+		return desk_room_faces_bake(argv[2], argc > 3 ? atoi(argv[3]) : 1920,
+			argc > 4 ? atoi(argv[4]) : 3) ? 0 : 1;
+	}
+	if (argc > 1 && strcmp(argv[1], "--faces") == 0) {
+		int rw = argc > 3 ? atoi(argv[2]) : 1440;
+		int rh = argc > 3 ? atoi(argv[3]) : 900;
+		if (rw < 16 || rh < 16) {
+			fprintf(stderr, "usage: desk-gputest --faces [width height [dir]]\n");
+			return 2;
+		}
+		return desk_room_faces_test(rw, rh, argc > 4 ? argv[4] : NULL) ? 0 : 1;
 	}
 
 	int w = argc > 2 ? atoi(argv[1]) : 2880;

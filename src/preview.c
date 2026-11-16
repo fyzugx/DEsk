@@ -756,14 +756,409 @@ static int write_lock(const char *path, int w, int h)
 	return 0;
 }
 
+/* --lock-film: the door's moves as they are filmed ahead (desk_lock_films)
+ * against the same moments traced as they go now (coarse) and traced
+ * finely: for each move, a sheet of frames through it -- traced as it goes,
+ * from the film, and fine -- and the name on the board of each at the
+ * screen's size; how long the films took, how long a frame from one takes
+ * to lay, and how far it is from the fine one (both made smaller by four,
+ * so that what counts is where things are, not how sharp).
+ * DESK_PREVIEW_GFX=ultra (or medium) for that level; DESK_LOCK_BOB to let
+ * the head bob; DESK_LOCK_FILM_FRAMES=<dir> for each of the three frames
+ * at the door's own size; DESK_LOCK_FILM_MOODS=1 to change the hour and
+ * the weather after, and say what was made again. Sheets go to
+ * PATH-walk.png and so on. */
+static double lf_now(void)
+{
+	struct timespec t;
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	return t.tv_sec + t.tv_nsec * 1e-9;
+}
+
+/* a cairo onto the door's own picture, in the screen's units */
+static cairo_t *lf_cr(cairo_surface_t *s, int w, int h)
+{
+	cairo_t *c = cairo_create(s);
+	cairo_scale(c, (double)cairo_image_surface_get_width(s) / w,
+		(double)cairo_image_surface_get_height(s) / h);
+	return c;
+}
+
+static void lf_pose(int move, double t, struct desk_lock_look *lk)
+{
+	struct desk_lock_times tm;
+	memset(&tm, 0, sizeof tm);
+	tm.inside = move == DESK_LOCK_MOVE_OPEN || move == DESK_LOCK_MOVE_OUT;
+	switch (move) {
+	case DESK_LOCK_MOVE_WALK:
+		tm.walking = true;
+		tm.walk_t = t;
+		break;
+	case DESK_LOCK_MOVE_LEAN:
+		tm.checking = true;
+		tm.check_t = t;
+		break;
+	case DESK_LOCK_MOVE_FAIL:
+		tm.checking = tm.failing = true;
+		tm.check_t = t + 10.0;
+		tm.fail_t = t;
+		break;
+	case DESK_LOCK_MOVE_OPEN:
+		tm.checking = tm.opening = true;
+		tm.check_t = t + 10.0;
+		tm.open_t = t;
+		break;
+	default:
+		tm.leaving = true;
+		tm.leave_t = t;
+		break;
+	}
+	desk_lock_pose(&tm, lk);
+}
+
+/* mean of |a - b| over the colours, both made four times smaller */
+static double lf_apart(cairo_surface_t *a, cairo_surface_t *b, int w, int h)
+{
+	int sw = w / 4, sh = h / 4;
+	cairo_surface_t *s[2];
+	for (int i = 0; i < 2; i++) {
+		s[i] = cairo_image_surface_create(CAIRO_FORMAT_RGB24, sw, sh);
+		cairo_t *c = cairo_create(s[i]);
+		cairo_scale(c, 0.25, 0.25);
+		cairo_set_source_surface(c, i ? b : a, 0, 0);
+		cairo_pattern_set_filter(cairo_get_source(c), CAIRO_FILTER_GOOD);
+		cairo_paint(c);
+		cairo_destroy(c);
+		cairo_surface_flush(s[i]);
+	}
+	double sum = 0.0;
+	for (int y = 0; y < sh; y++) {
+		const uint32_t *ra = (const uint32_t *)(const void *)(cairo_image_surface_get_data(s[0])
+			+ (size_t)y * cairo_image_surface_get_stride(s[0]));
+		const uint32_t *rb = (const uint32_t *)(const void *)(cairo_image_surface_get_data(s[1])
+			+ (size_t)y * cairo_image_surface_get_stride(s[1]));
+		for (int x = 0; x < sw; x++) {
+			for (int c = 0; c < 3; c++) {
+				sum += abs((int)((ra[x] >> (8 * c)) & 0xff) - (int)((rb[x] >> (8 * c)) & 0xff));
+			}
+		}
+	}
+	cairo_surface_destroy(s[0]);
+	cairo_surface_destroy(s[1]);
+	return sum / (3.0 * sw * sh);
+}
+
+static int write_lock_film(const char *path, int w, int h)
+{
+	const char *gfx = getenv("DESK_PREVIEW_GFX");
+	if (gfx) {
+		desk_set_gfx(!strcmp(gfx, "ultra") ? DESK_GFX_ULTRA : !strcmp(gfx, "medium")
+			? DESK_GFX_MEDIUM : DESK_GFX_HIGH);
+	}
+	desk_scene_warm(w, h, false);
+	desk_apps_init(false);
+	cairo_surface_t *inside = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+	cairo_t *ic = cairo_create(inside);
+	desk_draw_shelf(ic, w, h, -1, 0.0, -1);
+	desk_draw_shelf_gadgets(ic, w, h, time(NULL));
+	cairo_destroy(ic);
+	char login[64], name[128];
+	desk_lock_user(login, sizeof login, name, sizeof name);
+	cairo_surface_t *pic = desk_lock_picture();
+	struct desk_lock_look base;
+	memset(&base, 0, sizeof base);
+	base.name = name;
+	base.picture = pic;
+	base.steady = getenv("DESK_LOCK_BOB") ? 0.0 : 1.0;
+	base.inside_view = DESK_VIEW_SHELF;
+	base.inside = inside;
+	base.now_s = 3.3;
+	const char *dc = getenv("DESK_LOCK_DECOR");
+	if (dc) {
+		base.mood.set = true;
+		base.mood.sun_el = -30.0;
+		base.mood.moon = 0.8;
+		base.mood.decor = !strcmp(dc, "xmas") ? DESK_DECOR_XMAS
+			: !strncmp(dc, "newyear", 7) ? DESK_DECOR_NEWYEAR
+			: !strcmp(dc, "birthday") ? DESK_DECOR_BIRTHDAY
+			: !strcmp(dc, "halloween") ? DESK_DECOR_HALLOWEEN : 0;
+		base.mood.year = 2027;
+	}
+	unsigned all = 0;
+	for (int m = 1; m < DESK_LOCK_MOVES; m++) {
+		all |= 1u << m;
+	}
+	double t0 = lf_now();
+	desk_lock_films(w, h, &base, all);
+	desk_lock_films_settle();
+	printf("filmed ahead in %.2f s\n", lf_now() - t0);
+	static const struct { int move; const char *name; double len; } MV[] = {
+		{ DESK_LOCK_MOVE_WALK, "walk", DESK_LOCK_WALK_S },
+		{ DESK_LOCK_MOVE_LEAN, "lean", DESK_LOCK_TRY_AT + DESK_LOCK_TRY_S },
+		{ DESK_LOCK_MOVE_FAIL, "fail", 0.72 },
+		{ DESK_LOCK_MOVE_OPEN, "open", DESK_LOCK_PUSH1 },
+		{ DESK_LOCK_MOVE_OUT, "out", DESK_LOCK_OUT_END },
+	};
+	enum { K = 6 };
+	/* the door at its own size, as the compositor has it (paint_lock) */
+	int ow, oh;
+	desk_ambient_size(w, h, &ow, &oh);
+	printf("the door at %dx%d for a %dx%d screen\n", ow, oh, w, h);
+	int cw = w / 3, ch = h / 3;
+	/* the name on the board, at the screen's size: where it is at the door */
+	int nx = (int)(w * 0.36), ny = (int)(h * 0.10), nw = (int)(w * 0.28), nh = (int)(h * 0.22);
+	char out[1024];
+	for (size_t mi = 0; mi < sizeof MV / sizeof MV[0]; mi++) {
+		cairo_surface_t *sheet = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, cw * K, ch * 3);
+		cairo_t *sc = cairo_create(sheet);
+		cairo_surface_t *crop = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, nw * 3, nh * K);
+		cairo_t *cc = cairo_create(crop);
+		double lay_ms = 0.0, apart = 0.0;
+		for (int q = 0; q < K; q++) {
+			double t = MV[mi].len * (q + 0.5) / K;
+			struct desk_lock_look lk = base;
+			lf_pose(MV[mi].move, t, &lk);
+			if (MV[mi].move != DESK_LOCK_MOVE_OPEN && MV[mi].move != DESK_LOCK_MOVE_OUT) {
+				lk.inside = NULL;
+			}
+			cairo_surface_t *f[3];
+			for (int r = 0; r < 3; r++) {
+				f[r] = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, ow, oh);
+			}
+			/* traced as it goes now: the frame rate found first, on the
+			 * moments before this one */
+			struct desk_lock_look live = lk;
+			for (int i = 8; i >= 1; i--) {
+				struct desk_lock_look warm = base;
+				lf_pose(MV[mi].move, t * (1.0 - i / 40.0), &warm);
+				warm.inside = lk.inside;
+				warm.move = DESK_LOCK_MOVE_NONE;
+				cairo_t *c = lf_cr(f[0], w, h);
+				desk_draw_lock(c, w, h, &warm);
+				cairo_destroy(c);
+			}
+			desk_lock_settle();   /* nothing of those moments still being traced */
+			live.move = DESK_LOCK_MOVE_NONE;
+			cairo_t *c = lf_cr(f[0], w, h);
+			desk_draw_lock(c, w, h, &live);
+			cairo_destroy(c);
+			/* from the film: laid no bigger than the compositor lays it
+			 * (paint_lock), and scaled up as its GPU would */
+			int rw = ow, rh = oh;
+			if (desk_lock_filmed(w, h, &lk) && (double)ow * oh > 2.1e6) {
+				double fr = sqrt(2.1e6 / ((double)ow * oh));
+				rw = (int)(ow * fr);
+				rh = (int)(oh * fr);
+			}
+			cairo_surface_t *laid = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, rw, rh);
+			c = lf_cr(laid, w, h);
+			double a = lf_now();
+			desk_draw_lock(c, w, h, &lk);
+			lay_ms += (lf_now() - a) * 1e3;
+			cairo_destroy(c);
+			c = cairo_create(f[1]);
+			cairo_scale(c, (double)ow / rw, (double)oh / rh);
+			cairo_set_source_surface(c, laid, 0, 0);
+			cairo_pattern_set_filter(cairo_get_source(c), CAIRO_FILTER_BILINEAR);
+			cairo_paint(c);
+			cairo_destroy(c);
+			cairo_surface_destroy(laid);
+			/* fine: stood still there, and let the fine trace come */
+			for (int i = 0; i < 3; i++) {
+				c = lf_cr(f[2], w, h);
+				desk_draw_lock(c, w, h, &live);
+				cairo_destroy(c);
+			}
+			desk_lock_settle();
+			c = lf_cr(f[2], w, h);
+			desk_draw_lock(c, w, h, &live);
+			cairo_destroy(c);
+			apart += lf_apart(f[1], f[2], ow, oh);
+			const char *frames = getenv("DESK_LOCK_FILM_FRAMES");
+			for (int r = 0; frames && r < 3; r++) {
+				/* each at the screen's size, to look at closely */
+				char fp[1024];
+				snprintf(fp, sizeof fp, "%s/%s-%d-%s.png", frames, MV[mi].name, q,
+					r == 0 ? "live" : r == 1 ? "film" : "fine");
+				cairo_surface_write_to_png(f[r], fp);
+			}
+			for (int r = 0; r < 3; r++) {
+				cairo_save(sc);
+				cairo_translate(sc, q * cw, r * ch);
+				cairo_scale(sc, (double)cw / ow, (double)ch / oh);
+				cairo_set_source_surface(sc, f[r], 0, 0);
+				cairo_pattern_set_filter(cairo_get_source(sc), CAIRO_FILTER_GOOD);
+				cairo_paint(sc);
+				cairo_restore(sc);
+				cairo_set_source_surface(cc, f[r], r * nw - nx * ow / w, q * nh - ny * oh / h);
+				cairo_rectangle(cc, r * nw, q * nh, nw, nh);
+				cairo_fill(cc);
+				cairo_surface_destroy(f[r]);
+			}
+		}
+		printf("%-5s a frame from the film laid in %.1f ms; %.2f apart from the fine trace\n",
+			MV[mi].name, lay_ms / K, apart / K);
+		cairo_destroy(sc);
+		cairo_destroy(cc);
+		snprintf(out, sizeof out, "%s-%s.png", path, MV[mi].name);
+		cairo_surface_write_to_png(sheet, out);
+		snprintf(out, sizeof out, "%s-%s-name.png", path, MV[mi].name);
+		cairo_surface_write_to_png(crop, out);
+		cairo_surface_destroy(sheet);
+		cairo_surface_destroy(crop);
+	}
+	if (getenv("DESK_LOCK_FILM_MOODS")) {
+		/* the door as the hour and the weather change: made again only
+		 * where what it looks like does (a quick settle: nothing was made) */
+		static const struct { const char *what; double el, az; int wx; } MO[] = {
+			{ "night, 20 below", -20.0, 10.0, DESK_WX_CLEAR },
+			{ "night, 30 below, the sun round", -30.0, 80.0, DESK_WX_CLEAR },
+			{ "day, 30 up", 30.0, 160.0, DESK_WX_CLEAR },
+			{ "day, 30.4 up", 30.4, 161.0, DESK_WX_CLEAR },
+			{ "day, 32 up", 32.0, 161.0, DESK_WX_CLEAR },
+			{ "day, 32 up, rain", 32.0, 161.0, DESK_WX_RAIN },
+		};
+		for (size_t i = 0; i < sizeof MO / sizeof MO[0]; i++) {
+			base.mood.set = true;
+			base.mood.sun_el = MO[i].el;
+			base.mood.sun_az = MO[i].az;
+			base.mood.moon = 0.8;
+			base.mood.weather = MO[i].wx;
+			base.mood.heavy = 0.5;
+			double a = lf_now();
+			desk_lock_films(w, h, &base, all);
+			desk_lock_films_settle();
+			double made = lf_now() - a;
+			/* and a frame of the walk up, as the door is now */
+			struct desk_lock_look lk = base;
+			lk.inside = NULL;
+			lf_pose(DESK_LOCK_MOVE_WALK, 0.5, &lk);
+			int ow, oh;
+			desk_ambient_size(w, h, &ow, &oh);
+			cairo_surface_t *f = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, ow, oh);
+			cairo_t *c = lf_cr(f, w, h);
+			a = lf_now();
+			desk_draw_lock(c, w, h, &lk);
+			double drawn = lf_now() - a;
+			cairo_destroy(c);
+			cairo_surface_destroy(f);
+			printf("%-32s films made in %6.2f s; a frame of the walk up drawn in %5.1f ms\n",
+				MO[i].what, made, drawn * 1e3);
+		}
+	}
+	desk_lock_films(w, h, NULL, 0);
+	cairo_surface_destroy(inside);
+	if (pic) {
+		cairo_surface_destroy(pic);
+	}
+	printf("wrote %s-*.png\n", path);
+	return 0;
+}
+
+/* --camera: Print's camera, as it is set at first and in each of its
+ * other ways (the dial turned, the self-timer on and its lamp lit, the
+ * power off, the shutter down and the lever out; a tape brought up to it,
+ * going in, and in), s pixels to its unit, one under another on the
+ * desk's dark. */
+static int write_camera(const char *path, double s)
+{
+	if (s <= 0.0) {
+		s = 1.5;
+	}
+	const struct desk_finder_camera ways[] = {
+		{ .dial = 0.0, .power = 1.0, .count = 1 },
+		{ .dial = 1.0, .timer = 1.0, .lamp = true, .power = 1.0, .count = 12 },
+		{ .dial = 2.0, .timer = 2.0, .power = 0.0, .press = 1.0, .wind = 1.0, .count = 36 },
+		{ .dial = 0.0, .power = 1.0, .count = 1, .tape = 0.36 },
+		{ .dial = 0.0, .power = 1.0, .count = 1, .tape = 0.70 },
+		{ .dial = 0.0, .power = 1.0, .count = 1, .tape = 1.0 },
+	};
+	const int n = (int)(sizeof ways / sizeof ways[0]);
+	int w = (int)ceil(DESK_FINDER_CAMERA_W * s), h = (int)ceil(DESK_FINDER_CAMERA_H * s);
+	cairo_surface_t *img = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h * n);
+	cairo_t *cr = cairo_create(img);
+	cairo_set_source_rgb(cr, 0.23, 0.17, 0.12);
+	cairo_paint(cr);
+	for (int i = 0; i < n; i++) {
+		cairo_save(cr);
+		cairo_translate(cr, 0.0, h * i);
+		desk_draw_finder_camera(cr, s, &ways[i]);
+		cairo_restore(cr);
+	}
+	cairo_destroy(cr);
+	bool ok = cairo_surface_write_to_png(img, path) == CAIRO_STATUS_SUCCESS;
+	cairo_surface_destroy(img);
+	if (!ok) {
+		fprintf(stderr, "cannot write %s\n", path);
+		return 1;
+	}
+	printf("wrote %s\n", path);
+	return 0;
+}
+
 #define PREVIEW_USAGE "usage: desk-preview [-o file.png] [-s 1600x1000] [--no-window] " \
 	"[--closed] [--apps] [--shelf] [--console] [--post] [--sounds DIR] [--calendar] " \
-	"[--memo] [--lock] [--boot[=u,u,...]] [--agenda] [--book] [--book-anim[=u,u,...]] " \
-	"[--lang en|ja|zh|ko|es|fr|de] [--binder-anim=N[:u,u,...]]\n"
+	"[--memo] [--lock] [--lock-film] [--boot[=u,u,...]] [--agenda] [--book] [--book-anim[=u,u,...]] " \
+	"[--lang en|ja|zh|ko|es|fr|de] [--binder-anim=N[:u,u,...]] [--camera[=SCALE]]\n"
+
+/* DESK_MAT (a preset, #rrggbb, photo or clear), DESK_MAT_PHOTO, DESK_MAT_SIZE
+ * (small, medium, large) and DESK_MAT_UNDER (whole, free: the papers in
+ * $XDG_CONFIG_HOME/desk/desk-mat), as shell.conf says them, for a picture of
+ * a mat. */
+static void preview_mat(void)
+{
+	const char *name = getenv("DESK_MAT");
+	if (!name) {
+		return;
+	}
+	struct desk_mat m = { .size = DESK_MAT_MEDIUM };
+	if (getenv("DESK_MAT_SIZE")) {
+		desk_mat_size_parse(getenv("DESK_MAT_SIZE"), &m.size);
+	}
+	const char *under = getenv("DESK_MAT_UNDER");
+	if (!strcmp(name, "clear")) {
+		m.kind = DESK_MAT_CLEAR;
+		m.under = under && !strcmp(under, "whole") ? DESK_MAT_UNDER_WHOLE : DESK_MAT_UNDER_FREE;
+		snprintf(m.photo, sizeof m.photo, "%s", getenv("DESK_MAT_PHOTO") ? getenv("DESK_MAT_PHOTO") : "");
+		desk_mat_papers_poll();
+	} else if (!strcmp(name, "photo") && getenv("DESK_MAT_PHOTO")) {
+		desk_mat_preset("charcoal", &m);
+		m.kind = DESK_MAT_PHOTO;
+		snprintf(m.photo, sizeof m.photo, "%s", getenv("DESK_MAT_PHOTO"));
+	} else if (!desk_mat_preset(name, &m)) {
+		return;
+	}
+	desk_set_mat(&m);
+	/* a photo is read on a thread, and the key changes when it is there
+	 * (or when it could not be read): wait for that */
+	bool photo = m.kind == DESK_MAT_PHOTO || (m.kind == DESK_MAT_CLEAR && m.photo[0]
+		&& m.under == DESK_MAT_UNDER_WHOLE);
+	uint64_t was = desk_overlay_key(DESK_OVL_MAT, 0, 0);
+	for (int i = 0; i < 400 && photo
+		&& desk_overlay_key(DESK_OVL_MAT, 0, 0) == was; i++) {
+		nanosleep(&(struct timespec){ 0, 50000000 }, NULL);
+	}
+}
+
+/* DESK_WOOD and DESK_STAIN, as shell.conf says them (desk_wood, desk_stain):
+ * what the desk in the picture is made of. */
+static void preview_wood(void)
+{
+	int wood = DESK_WOOD_WALNUT, stain = DESK_STAIN_NATURAL;
+	if (getenv("DESK_WOOD") && !desk_wood_parse(getenv("DESK_WOOD"), &wood)) {
+		fprintf(stderr, "desk-preview: no wood called %s\n", getenv("DESK_WOOD"));
+	}
+	if (getenv("DESK_STAIN") && !desk_stain_parse(getenv("DESK_STAIN"), &stain)) {
+		fprintf(stderr, "desk-preview: no stain called %s\n", getenv("DESK_STAIN"));
+	}
+	desk_set_wood(wood, stain);
+}
 
 int main(int argc, char **argv)
 {
 	desk_compat();
+	preview_wood();
+	preview_mat();
 	/* DESK_LOCK_DECOR=halloween: the bookcase dressed too (--shelf, and
 	 * the room through the door) */
 	if (getenv("DESK_LOCK_DECOR") && !strcmp(getenv("DESK_LOCK_DECOR"), "halloween")) {
@@ -777,7 +1172,7 @@ int main(int argc, char **argv)
 	bool post = false;
 	bool calendar = false, memo = false;
 	const char *boot = NULL;
-	bool lock = false;
+	bool lock = false, lock_film = false;
 	bool agenda = false;
 	bool book = false, book_anim = false;
 	const char *anim_times = NULL;
@@ -803,12 +1198,17 @@ int main(int argc, char **argv)
 			post = true;
 		} else if (strcmp(argv[i], "--sounds") == 0 && i + 1 < argc) {
 			return write_sounds(argv[i + 1]);
+		} else if (strncmp(argv[i], "--camera", 8) == 0
+			&& (argv[i][8] == '\0' || argv[i][8] == '=')) {
+			return write_camera(path, argv[i][8] == '=' ? atof(argv[i] + 9) : 1.5);
 		} else if (strcmp(argv[i], "--calendar") == 0) {
 			calendar = true;
 		} else if (strcmp(argv[i], "--memo") == 0) {
 			memo = true;
 		} else if (strcmp(argv[i], "--lock") == 0) {
 			lock = true;
+		} else if (strcmp(argv[i], "--lock-film") == 0) {
+			lock_film = true;
 		} else if (strncmp(argv[i], "--boot", 6) == 0
 			&& (argv[i][6] == '\0' || argv[i][6] == '=')) {
 			boot = argv[i][6] == '=' ? argv[i] + 7 : "";
@@ -870,6 +1270,9 @@ int main(int argc, char **argv)
 	}
 	if (lock) {
 		return write_lock(path, w, h);
+	}
+	if (lock_film) {
+		return write_lock_film(path, w, h);
 	}
 	if (agenda) {
 		return write_agenda(path, w, h);
@@ -944,6 +1347,7 @@ int main(int argc, char **argv)
 		desk_draw_shelf(cr, w, h, 3, 1.0, -1);
 		desk_draw_shelf_gadgets(cr, w, h, time(NULL));
 	} else {
+		desk_mat_settle(w);   /* the prints under a clear mat, read for this size */
 		desk_draw_desktop(cr, w, h, time(NULL), demo, drawer);
 	}
 	cairo_status_t st = cairo_surface_write_to_png(surf, path);

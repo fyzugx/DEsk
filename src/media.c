@@ -10,6 +10,7 @@
  * that is worked out here from the last they said and the rate.
  * ================================================================ */
 
+#define _GNU_SOURCE
 #include "media.h"
 
 #include <math.h>
@@ -39,12 +40,13 @@ struct player {
 	char identity[64];
 	char title[128], artist[128];
 	char track[256];         /* what tells one track from the next */
+	char track_id[128];      /* what it calls the track, to be sent somewhere in it */
 	int status;
 	double length;           /* seconds; < 0 unknown */
 	double pos, pos_at;      /* seconds, and when that was so; pos < 0 unknown */
 	double stale;            /* what it goes on adding from the last track; 0 none */
 	double rate;
-	bool can_prev, can_next, can_play, can_pause, can_raise;
+	bool can_prev, can_next, can_play, can_pause, can_raise, can_seek;
 	double active_at;        /* when it last started playing, or changed track */
 	double since;            /* when the track it has came up */
 	double asked_at;
@@ -362,6 +364,7 @@ static void read_metadata(struct player *p, sd_bus_message *m, double now)
 		p->since = now;
 		p->active_at = now;
 	}
+	str_copy(p->track_id, sizeof p->track_id, id);
 	str_copy(p->title, sizeof p->title, title);
 	str_copy(p->artist, sizeof p->artist, artist);
 	p->length = length;
@@ -408,6 +411,8 @@ static void apply(struct player *p, const char *name, sd_bus_message *m, double 
 		read_bool(m, &p->can_pause);
 	} else if (strcmp(name, "CanRaise") == 0) {
 		read_bool(m, &p->can_raise);
+	} else if (strcmp(name, "CanSeek") == 0) {
+		read_bool(m, &p->can_seek);
 	} else if (strcmp(name, "Identity") == 0) {
 		read_string(m, p->identity, sizeof p->identity);
 	} else {
@@ -704,12 +709,44 @@ static struct player *current(void)
 	return best;
 }
 
-void desk_media_read(struct desk_media *out, double now)
+/* The player of a program, by what it calls itself: a browser's name on the bus has
+ * less in it than its window's id does (org.mozilla.firefox: firefox; Google-chrome:
+ * chrome), and it may be running several. */
+static struct player *player_of(const char *app)
+{
+	static const char *const KNOWN[] = { "firefox", "chromium", "chrome", "brave", "edge",
+		"vivaldi", "opera", "librewolf", "zen", "waterfox", "epiphany", "falkon" };
+	char want[64] = "";
+	if (app) {
+		for (size_t i = 0; i < sizeof KNOWN / sizeof KNOWN[0] && !want[0]; i++) {
+			if (strcasestr(app, KNOWN[i])) {
+				str_copy(want, sizeof want, KNOWN[i]);
+			}
+		}
+		if (!want[0]) {
+			const char *dot = strrchr(app, '.');
+			str_copy(want, sizeof want, dot ? dot + 1 : app);
+		}
+	}
+	struct player *best = NULL;
+	for (int i = 0; want[0] && i < MEDIA_MAX; i++) {
+		struct player *p = &g_players[i];
+		if (!p->used || !p->got || !(strcasestr(p->name, want) || strcasestr(p->identity, want))) {
+			continue;
+		}
+		if (!best || standing(p) > standing(best)
+			|| (standing(p) == standing(best) && p->active_at > best->active_at)) {
+			best = p;
+		}
+	}
+	return best ? best : current();
+}
+
+static void read_player(const struct player *p, struct desk_media *out, double now)
 {
 	memset(out, 0, sizeof *out);
 	out->length = -1.0;
 	out->position = -1.0;
-	struct player *p = current();
 	if (!p) {
 		return;
 	}
@@ -736,11 +773,21 @@ void desk_media_read(struct desk_media *out, double now)
 	out->can_play = p->can_play;
 	out->can_pause = p->can_pause;
 	out->can_raise = p->can_raise;
+	out->can_seek = p->can_seek;
 }
 
-void desk_media_command(int what)
+void desk_media_read(struct desk_media *out, double now)
 {
-	struct player *p = current();
+	read_player(current(), out, now);
+}
+
+void desk_media_read_for(const char *app, struct desk_media *out, double now)
+{
+	read_player(player_of(app), out, now);
+}
+
+static void command(struct player *p, int what)
+{
 	if (!p || !g_bus) {
 		return;
 	}
@@ -756,6 +803,65 @@ void desk_media_command(int what)
 	p->active_at = now_mono();
 	sd_bus_call_method_async(g_bus, NULL, p->name, MPRIS_PATH, iface, method, on_ignore, NULL, "");
 	sd_bus_flush(g_bus);
+}
+
+void desk_media_command(int what)
+{
+	command(current(), what);
+}
+
+void desk_media_command_for(const char *app, int what)
+{
+	command(player_of(app), what);
+}
+
+/* Sent somewhere: what it says next is what is so, but it is shown going there now. */
+static void went(struct player *p, double at, double now)
+{
+	if (p->length > 0.0 && at > p->length) {
+		at = p->length;
+	}
+	p->pos = at > 0.0 ? at : 0.0;
+	p->pos_at = now;
+	p->stale = 0.0;
+	p->active_at = now;
+	changed();
+}
+
+void desk_media_seek_for(const char *app, double by)
+{
+	struct player *p = player_of(app);
+	if (!p || !g_bus || !p->can_seek) {
+		return;
+	}
+	double now = now_mono();
+	sd_bus_call_method_async(g_bus, NULL, p->name, MPRIS_PATH, MPRIS_PLAYER, "Seek", on_ignore, NULL,
+		"x", (int64_t)(by * 1e6));
+	sd_bus_flush(g_bus);
+	double here = where(p, now);
+	if (here >= 0.0) {
+		went(p, here + by, now);
+	}
+}
+
+void desk_media_goto_for(const char *app, double at)
+{
+	struct player *p = player_of(app);
+	if (!p || !g_bus || !p->can_seek) {
+		return;
+	}
+	double now = now_mono();
+	if (p->track_id[0] == '/') {
+		sd_bus_call_method_async(g_bus, NULL, p->name, MPRIS_PATH, MPRIS_PLAYER, "SetPosition", on_ignore,
+			NULL, "ox", p->track_id, (int64_t)(at * 1e6));
+	} else {
+		/* (a player that gives its tracks no name can still be sent by so much) */
+		double here = where(p, now);
+		sd_bus_call_method_async(g_bus, NULL, p->name, MPRIS_PATH, MPRIS_PLAYER, "Seek", on_ignore, NULL,
+			"x", (int64_t)((at - (here > 0.0 ? here : 0.0)) * 1e6));
+	}
+	sd_bus_flush(g_bus);
+	went(p, at, now);
 }
 
 /* ---- the bus in the compositor's loop ------------------------------ */

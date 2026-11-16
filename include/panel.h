@@ -14,12 +14,14 @@
 struct desk_meters {
 	double cpu;        /* 0..1, busy fraction since the last read */
 	double mem;        /* 0..1 */
+	double mem_gb, mem_total_gb;   /* in use, and all there is; 0 unknown */
 	double temp_c;     /* degrees; < -100 when nothing measures it */
 	double load;       /* one minute load average, per core */
 
 	bool net_up;       /* a carrier, and a route to somewhere */
 	bool net_routed;
 	double net_rate;   /* 0..1, recent traffic against a rough ceiling */
+	double net_in, net_out;   /* bytes a second, down and up; < 0 not yet known */
 	char net_if[32];
 	bool net_wireless; /* the route goes out of a radio, not a cable */
 	double net_signal; /* 0..1 link quality; only means anything on a radio */

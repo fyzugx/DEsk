@@ -130,6 +130,8 @@ report() {
 		[ -r "$b/type" ] && echo "power supply: ${b##*/}, $(cat "$b/type")"
 	done
 	grep -h 'once-a-second round took' "$state/session.log" 2>/dev/null | head -n 3
+	# which screen each touch screen and each pen went to, and whether the machine says it is folded back
+	grep -h 'touch: \|tablet mode: \|pen: ' "$state/session.log" 2>/dev/null | head -n 16
 	pkg_version xdg-desktop-portal-wlr
 
 	section "Settings"

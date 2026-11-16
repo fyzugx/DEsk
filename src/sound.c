@@ -69,6 +69,13 @@ struct voice {
 	int n;
 	double pos, rate;
 	float gl, gr;
+	/* going round until stopped (desk_sound_loop), and the gains it is
+	 * gliding to (desk_sound_set); it stops by itself once it has not
+	 * been set for a second (keep, in frames played), as a thing let go
+	 * of does */
+	bool loop;
+	float gl_to, gr_to;
+	long keep;
 	long age;                /* frames played */
 	long stop_at, fade;      /* fading out from stop_at, over fade frames */
 	int lane;                /* the stream it goes to (-1: none yet) */
@@ -213,12 +220,23 @@ static bool mix(float *out, int frames, int lane)
 			g_started[g_started_n].off = i;
 			g_started_n++;
 		}
+		if (v->loop && v->age > v->keep && v->age < v->stop_at) {
+			v->stop_at = v->age;
+			v->fade = RATE / 10;
+		}
 		for (; i < frames; i++) {
 			int i0 = (int)v->pos;
 			if (i0 + 1 >= v->n) {
-				v->handle = 0;
-				break;
+				if (!v->loop) {
+					v->handle = 0;
+					break;
+				}
+				v->pos -= (double)(v->n - 1);
+				i0 = (int)v->pos;
 			}
+			/* (10 ms to a new gain: no step to be heard as a click) */
+			v->gl += (v->gl_to - v->gl) * 0.002f;
+			v->gr += (v->gr_to - v->gr) * 0.002f;
 			double g = 1.0;
 			if (v->age >= v->stop_at) {
 				g = 1.0 - (double)(v->age - v->stop_at) / (double)(v->fade > 0 ? v->fade : 1);
@@ -886,11 +904,130 @@ static void file_run(void)
 	fclose(f);
 }
 
+/* ---- the baked ones ----
+ *
+ * Some of the sounds are not made here but in Faust, by ear, and baked
+ * (art/sound/bake.py): <name>-<n>.wav, n from 1, 16-bit mono at RATE and
+ * half as loud as they are played. Where there is one, it is played
+ * instead of what sfx.c makes. They are looked for where the pictures are
+ * (draw.c desk_art_dirs): beside the prefix the binary is in
+ * (bin/../share/desk/sound), the source's art/sound when run from where it
+ * was built, then the prefix it was built for; DESK_ART_DIR=<a source's
+ * art>, there only. */
+
+#define BAKED_DIR_LEN 1100
+static int baked_dirs(char dirs[3][BAKED_DIR_LEN])
+{
+	const char *env = getenv("DESK_ART_DIR");
+	if (env && *env) {
+		snprintf(dirs[0], BAKED_DIR_LEN, "%.1000s/sound", env);
+		return 1;
+	}
+	char exe[1024] = "";
+	ssize_t k = readlink("/proc/self/exe", exe, sizeof exe - 1);
+	exe[k > 0 ? k : 0] = '\0';
+	char *slash = strrchr(exe, '/');
+	if (slash) {
+		*slash = '\0';
+	}
+	int nd = 0;
+	if (exe[0]) {
+		snprintf(dirs[nd++], BAKED_DIR_LEN, "%s/../share/desk/sound", exe);
+		snprintf(dirs[nd++], BAKED_DIR_LEN, "%s/../art/sound", exe);
+	}
+#ifdef DESK_DATADIR
+	snprintf(dirs[nd++], BAKED_DIR_LEN, "%s/desk/sound", DESK_DATADIR);
+#endif
+	return nd;
+}
+
+/* A baked take, as floats at the loudness it is played (the caller frees
+ * it); NULL if it is not there, or not 16-bit mono at RATE. */
+static float *baked_read(const char *path, int *frames)
+{
+	*frames = 0;
+	FILE *f = fopen(path, "rbe");
+	if (!f) {
+		return NULL;
+	}
+	unsigned char h[12];
+	float *x = NULL;
+	if (fread(h, 1, 12, f) != 12 || memcmp(h, "RIFF", 4) || memcmp(h + 8, "WAVE", 4)) {
+		fclose(f);
+		return NULL;
+	}
+	bool fmt_ok = false;
+	unsigned char c[8];
+	while (fread(c, 1, 8, f) == 8) {
+		uint32_t len = c[4] | c[5] << 8 | c[6] << 16 | (uint32_t)c[7] << 24;
+		if (!memcmp(c, "fmt ", 4) && len >= 16) {
+			unsigned char fm[16];
+			if (fread(fm, 1, 16, f) != 16) {
+				break;
+			}
+			fmt_ok = (fm[0] | fm[1] << 8) == 1 && (fm[2] | fm[3] << 8) == 1
+				&& (uint32_t)(fm[4] | fm[5] << 8 | fm[6] << 16 | (uint32_t)fm[7] << 24) == RATE
+				&& (fm[14] | fm[15] << 8) == 16;
+			fseek(f, (long)(len - 16 + (len & 1)), SEEK_CUR);
+		} else if (!memcmp(c, "data", 4) && fmt_ok && len >= 4 && len < 64u << 20) {
+			int n = (int)(len / 2);
+			int16_t *q = malloc((size_t)n * sizeof *q);
+			x = q ? malloc((size_t)n * sizeof *x) : NULL;
+			if (x && fread(q, 2, (size_t)n, f) == (size_t)n) {
+				for (int i = 0; i < n; i++) {
+					x[i] = (float)q[i] * (2.0f / 32767.0f);
+				}
+				*frames = n;
+			} else {
+				free(x);
+				x = NULL;
+			}
+			free(q);
+			break;
+		} else {
+			fseek(f, (long)(len + (len & 1)), SEEK_CUR);
+		}
+	}
+	fclose(f);
+	return x;
+}
+
+/* Sound s's baked take v (from 0), or NULL. */
+static float *baked_take(enum desk_sound s, int v, int *frames)
+{
+	char dirs[3][BAKED_DIR_LEN], path[BAKED_DIR_LEN + 64];
+	int nd = baked_dirs(dirs);
+	for (int i = 0; i < nd; i++) {
+		snprintf(path, sizeof path, "%.1000s/%.40s-%d.wav", dirs[i], desk_sound_name(s), v + 1);
+		float *x = baked_read(path, frames);
+		if (x) {
+			return x;
+		}
+	}
+	*frames = 0;
+	return NULL;
+}
+
 /* ---- the thread: make the sounds, find somewhere to play them ---- */
 
 static void bank_make(void)
 {
 	for (int s = 0; s < DESK_SND_COUNT; s++) {
+		/* baked, as many takes as there are; else made */
+		for (int v = 0; v < MAX_VARIANTS; v++) {
+			int n = 0;
+			float *x = baked_take(s, v, &n);
+			if (!x) {
+				break;
+			}
+			g_bank[s].x[g_bank[s].count] = x;
+			g_bank[s].n[g_bank[s].count] = n;
+			g_bank[s].count++;
+		}
+		g_bank[s].last = -1;
+		if (g_bank[s].count) {
+			continue;
+		}
 		int nv = desk_sound_variants(s);
 		nv = nv > MAX_VARIANTS ? MAX_VARIANTS : nv;
 		for (int v = 0; v < nv; v++) {
@@ -1088,19 +1225,51 @@ int desk_sound_play(enum desk_sound s, double pan, double gain, double rate)
 	return desk_sound_play_in(s, pan, gain, rate, 0.0);
 }
 
-static int play(enum desk_sound s, double pan, double gain, double rate, double in, bool exact);
+static int play(enum desk_sound s, double pan, double gain, double rate, double in, bool exact,
+	bool loop);
 
 int desk_sound_play_in(enum desk_sound s, double pan, double gain, double rate, double in)
 {
-	return play(s, pan, gain, rate, in, false);
+	return play(s, pan, gain, rate, in, false, false);
 }
 
 int desk_sound_play_exact(enum desk_sound s, double pan, double gain, double rate, double in)
 {
-	return play(s, pan, gain, rate, in, true);
+	return play(s, pan, gain, rate, in, true, false);
 }
 
-static int play(enum desk_sound s, double pan, double gain, double rate, double in, bool exact)
+int desk_sound_loop(enum desk_sound s, double pan, double gain)
+{
+	return play(s, pan, gain, 0.0, 0.0, true, true);
+}
+
+static void pan_gains(double pan, double g, float *gl, float *gr)
+{
+	pan = pan < -1.0 ? -1.0 : (pan > 1.0 ? 1.0 : pan);
+	double a = (pan + 1.0) * 0.25 * 3.14159265358979;
+	*gl = (float)(g * cos(a));
+	*gr = (float)(g * sin(a));
+}
+
+void desk_sound_set(int handle, double pan, double gain)
+{
+	if (handle <= 0) {
+		return;
+	}
+	pthread_mutex_lock(&g_mix);
+	for (int i = 0; i < MAX_VOICES; i++) {
+		struct voice *v = &g_voices[i];
+		if (v->handle == handle) {
+			pan_gains(pan, gain, &v->gl_to, &v->gr_to);
+			v->keep = v->age + RATE;
+			break;
+		}
+	}
+	pthread_mutex_unlock(&g_mix);
+}
+
+static int play(enum desk_sound s, double pan, double gain, double rate, double in, bool exact,
+	bool loop)
 {
 	if (!atomic_load(&g_ready) || g_backend == B_NONE || s < 0 || s >= DESK_SND_COUNT) {
 		return 0;
@@ -1146,10 +1315,11 @@ static int play(enum desk_sound s, double pan, double gain, double rate, double 
 	 * a note of a tune */
 	v->rate = (rate > 0.0 ? rate : 1.0) * (exact ? 1.0 : 1.0 + 0.035 * (dice() * 2.0 - 1.0));
 	double g = exact ? gain : gain * pow(10.0, (dice() * 2.0 - 1.0) * 1.2 / 20.0);
-	pan = pan < -1.0 ? -1.0 : (pan > 1.0 ? 1.0 : pan);
-	double a = (pan + 1.0) * 0.25 * 3.14159265358979;
-	v->gl = (float)(g * cos(a));
-	v->gr = (float)(g * sin(a));
+	pan_gains(pan, g, &v->gl, &v->gr);
+	v->gl_to = v->gl;
+	v->gr_to = v->gr;
+	v->loop = loop;
+	v->keep = RATE;
 	v->age = 0;
 	v->stop_at = (long)1 << 50;
 	v->fade = 1;
@@ -1265,7 +1435,8 @@ double desk_sound_latency(void)
 bool desk_sound_write_wav(enum desk_sound s, int variant, const char *path)
 {
 	int n = 0;
-	float *x = desk_sfx_make(s, variant, &n);
+	float *x = baked_take(s, variant, &n);
+	x = x ? x : desk_sfx_make(s, variant, &n);
 	if (!x) {
 		return false;
 	}

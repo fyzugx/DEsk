@@ -14,6 +14,8 @@
 #   desk-ctl logout --now   it ends at once, and the windows with it: what
 #                           they have not saved is lost (the desk's own memo
 #                           and calendar keep theirs).
+#   desk-ctl calculator     the calculator out of the drawer onto the desk (what
+#                           its line on the shelves runs).
 #
 # From a terminal on the desk, or -- when the desk will not answer at all --
 # from another VT (Ctrl+Alt+F3, logged in as the same user).
@@ -32,7 +34,7 @@ esac
 # the desk that holds the lock, and nothing else by that number
 if [ -z "$pid" ] || [ "$(cat "/proc/$pid/comm" 2>/dev/null)" != desk ]; then
 	case "${1:-}" in
-	reset | logout)
+	reset | logout | calculator)
 		echo "desk-ctl: DEsk is not running here (nothing in $lock)" >&2
 		exit 1
 		;;
@@ -43,6 +45,17 @@ case "${1:-}" in
 reset)
 	kill -USR1 "$pid"
 	echo "DEsk: set right again."
+	;;
+calculator)
+	# SIGRTMIN+1 (the desk's own handler, wm.c cad_signal): util-linux's or procps's kill knows
+	# it by name, the shell's often not; 35 is what it comes to with glibc
+	if [ -x /usr/bin/kill ]; then
+		/usr/bin/kill -s RTMIN+1 "$pid"
+	elif [ -x /bin/kill ]; then
+		/bin/kill -s RTMIN+1 "$pid"
+	else
+		kill -35 "$pid"
+	fi
 	;;
 logout)
 	if [ "${2:-}" = --now ]; then

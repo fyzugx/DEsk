@@ -30,6 +30,7 @@ DEsk v0.1 (BETA) の技術的な全体像です。どんなプログラムがあ
 | `desk-ctl` | `scripts/desk-ctl`（sh） | 固まった机のための `reset` と `logout`。端末やほかの VT から使います。 |
 | `desk-window` | `scripts/desk-window`（sh） | 今のセッションの中に DEsk を窓として起動します。 |
 | `desk-screenshot` | `scripts/desk-screenshot`（sh） | Print / Alt+Print：grim で撮り、ピクチャに保存し、手紙で知らせます。 |
+| `desk-record` | `scripts/desk-record`（sh） | テープを入れたカメラの録画：DEsk が渡す画面の絵（標準入力）とスピーカーの音を ffmpeg で映像にし、ビデオ/Screencasts に mp4 で保存し、手紙で知らせます。 |
 
 ### セッションの始まり
 
@@ -45,10 +46,15 @@ DEsk v0.1 (BETA) の技術的な全体像です。どんなプログラムがあ
 
 | ファイル | 行数 | 役割 |
 | --- | ---: | --- |
-| `src/wm.c` | 約 22,500 | コンポジタ：wlroots の準備、出力、入力、窓（xdg-shell と Xwayland）、シーンの層、机のすべての操作（引き出し、眺め、カレンダー、メモ、ポスト、トレイ、時計、ロック、Ctrl+Alt+Del）、`shell.conf` と `displays.conf`、複数の画面。 |
+| `src/wm.c` | 約 32,600 | コンポジタ：wlroots の準備、出力、入力、窓（xdg-shell と Xwayland）、シーンの層、机のすべての操作（引き出し、眺め、カレンダー、メモ、ポスト、トレイ、時計、ロック、Ctrl+Alt+Del）、`shell.conf` と `displays.conf`、複数の画面。 |
+| `src/touch.c` | 約 210 | 指が何をしたか（タップ、置いたまま、動き出した、速さ、手全体）だけを言う部品。机のことは知らない。意味を決めるのは `wm.c`。 |
+| `src/thing-keyboard.c`、`src/keyboardart.c` | 約 2,800 | 画面のキーボード（タイプライター）。指を自分で受ける物。キーはキーマップから読み、本物のキーボードとして送る。絵は画面に合わせて切って印字する。ペンで書く紙もこの中。 |
+| `src/handwriting.c` | 約 1,000 | 書いた字を 1 文字ずつ読む。表はその機械のフォントから作る。 |
 | `src/draw.c` | 約 34,900 | 描画ライブラリ：レイトレースの部屋（基準の C のトレーサ、GPU の駆動、キャッシュ）と、cairo で描くすべて（紙、枠、折りたたみ、丸める動き、本とバインダー、Control Panel の動く部分、手紙、カレンダーとメモ、Shell Settings のフォーム、玄関の扉）。 |
 | `src/room.glsl` | 約 2,400 | 部屋のトレーサを GLES 3.00 のフラグメントシェーダにしたもの。`draw.c` の C を一行ずつ移したもので、基準は C です。 |
 | `src/gpu.c` | 約 800 | シェーダ用の画面外の EGL/GBM/GLES コンテキスト。画面と同じレンダーノードを選びます。 |
+| `src/looks.c`、`src/lookfile.c` | 約 360 | 引き出しのプログラムに着せられる見た目：カードかアイコン、引き出しの小物、机の物、そしてルック（絵と少しの言葉のフォルダ、docs/LOOKS.ja.md）：DEsk の（`art/looks/looks.py`）、みんなの、自分の。選ぶカードは draw.c、選ぶ動きは wm.c。 |
+| `src/look.c` | 約 490 | `desk-look`（GTK 3）：どこからでも選んだ画像（見本のカードが呼ぶ）や名指しの画像、Blender で模型から（`art/looks/bake.py`）ルックを作り、点検する。 |
 | `src/apps.c` | 約 2,000 | `.desktop` ファイルをワーカースレッドで走査し、8 つの棚に分け、アイコンを探し、標準の端末・ブラウザ・ファイル・エディタを選び、プログラムを起動します。 |
 | `src/i18n.c` | 約 1,700 | 言葉の表（7 か国語）と月・曜日の名前。仕組みは `include/i18n.h` に。 |
 | `src/fonts.c` | 約 280 | 役割ごとの書体（CJK は地域ごと）。 |
@@ -57,6 +63,7 @@ DEsk v0.1 (BETA) の技術的な全体像です。どんなプログラムがあ
 | `src/post.c` | 約 440 | 通知デーモン（`org.freedesktop.Notifications`）。 |
 | `src/tray.c` | 約 1,350 | StatusNotifierItem のウォッチャーとホスト（トレイの紙片）。 |
 | `src/media.c` | 約 800 | MPRIS のクライアント（時計の MEDIA、メディアキー）。 |
+| `src/saver.c` | 約 240 | `org.freedesktop.ScreenSaver` の Inhibit：X11 と Flatpak のアプリが画面を点けたままにする頼み。 |
 | `src/ime.c` | 約 760 | どの入力メソッドがオンか（IBus、fcitx5）。 |
 | `src/session.c` | 約 470 | autostart とセッションの環境。 |
 | `src/lock.c`、`src/user.c` | | PAM でのパスワード確認（スレッドで）、扉に出す名前と写真。 |
@@ -65,13 +72,25 @@ DEsk v0.1 (BETA) の技術的な全体像です。どんなプログラムがあ
 | `src/occasion.c` | 約 530 | 日付（誕生日、新年など）と玄関の天気（open-meteo.com。切れます）。 |
 | `src/cards.c` | 約 190 | wlroots に渡す DRM のカード：画面の口を持つ本物のカードがあれば、ファームウェアの画面（simpledrm）を外す。 |
 | `src/agenda.c`、`src/memo.c` | | カレンダーの付箋とメモ帳の紙。`$XDG_DATA_HOME/desk` に保存。 |
+| `include/thing.h`、`src/things.c` | 約 250 | 紙ではない物とは何か、物が机に頼めること、物の一覧（[THINGS.ja.md](THINGS.ja.md)）。 |
+| `src/thing-phone.c`、`src/phone.c` | 約 900 | 動画の小窓を画面にする電話：キーと操作部、絵の置き方。 |
+| `src/thing-notebook.c`、`src/notebook.c`、`src/nbink.c`、`src/notepad.c` | 約 6,200 | desk-notepad の窓を一番上のページにするノートとその筆箱、desk-notepad 本体（打つのもペンで書くのも、ページをめくる）。 |
+| `src/thing-calc.c`、`src/calc.c`、`src/calcart.c` | 約 2,200 | 電卓：机の上のふるまい、計算、絵。 |
 | `src/camera.c` | 約 260 | カメラやマイクが使われているか（時計の二つのランプ）。 |
+| `src/rec.c` | 約 310 | Print の録画：DEsk が画面から読んだ絵を、別のスレッドからソケットで `desk-record` に渡す。 |
 | `src/sfx.c`、`src/sound.c` | 約 2,750 | すべての音を起動時に合成し、ミキサーのスレッドで鳴らします（libpulse、または実行時に読み込む ALSA）。 |
 | `src/preview.c`、`src/gputest.c` | | 開発用の道具（§2）。 |
 | `include/desk.h` | 約 1,200 | 描画ライブラリの API。`wm.c`・`settings.c`・`index.c`・道具が使います。 |
 | `include/compat.h` | | 旧名（DeskWM）の設定とデータを引き継ぎます。 |
 | `protocols/` | | wlr-output-management と wlr-output-power-management の XML。 |
-| `scripts/` | | インストーラ、セッションのスクリプト、ビルドの補助（`glsl2c.py`、`room-key.py`）、`check-words.py`（訳のテスト）。 |
+| `scripts/` | | インストーラ、セッションのスクリプト、ビルドの補助（`glsl2c.py`、`room-key.py`、`bin2c.py`）、`check-words.py`（訳のテスト）。 |
+| `art/camera/` | | Print のカメラと、それに入れるテープ：`camera.py` が Blender（4.5）で組み、光を当てて焼き、部品を `camera.png` に詰める。引き出しに横たわったカメラは `camera-top.png`（`camera-top.h`）。各部品の位置は `camera-map.h`。どちらもリポジトリに置いて実行ファイルに埋め込む（`bin2c.py`）ので、ビルドに Blender は要らない。要るのは絵を作り直す時だけ。 |
+| `art/case.py` | | 机の上の物を Blender（4.5）で焼く時の共通部分：トレーサと同じ部屋（画面の形と机の幅ごとのカメラ、ランプ、机と壁、部屋の光、トーンカーブ）、机に落ちる影ごと焼く方法、書き出し（画面の形と机の幅ごとに PNG を 1 枚ずつ `THING-case.bin` に、何の絵かを `THING-case.h` に）。draw.c が今の画面の両隣の絵を、面ごとに射影変換で机の焼きの上に置く（`room_cases_paint`。机の上に描く他の物より下）。カメラと同じくリポジトリに置いて埋め込む。 |
+| `art/clock/` | | 机の上の時計の筐体（机の焼きでは抜いてある）：`clock.py` がトレーサと同じ寸法に組み、`case.py` で画面の形 12 通りぶん焼く（`clock-case.bin`、`clock-case.h`）。 |
+| `art/post/` | | 机の右奥のポスト（扉は閉じたまま。机の焼きでは抜いてある）：`post.py` がトレーサと同じ寸法に組み、`case.py` で画面の形 12 通り × 机の幅 3 通りぶん焼く（`post-case.bin`、`post-case.h`）。札と差し込み口の郵便は、今まで通り上に描く。 |
+| `art/kit.py` | | 机に置く物の絵に共通のもの。Blender（4.5）で作る：材質、形、キー、光、一つの目、磨き（[THINGS.ja.md](THINGS.ja.md)）。 |
+| `art/phone/`、`art/notebook/`、`art/calc/` | | 物ごとの台本と絵。 |
+| `art/console/` | | 机の左奥の Control Panel（しまった状態。机の焼きでは抜いてある）：`console.py` が机から見える所（台座と銘板の棚、くるみの頬板、パネルの下とパイロットランプ、終わりのボタンの組）をトレーサと同じ寸法に組み、`case.py` で画面の形 12 通り × 机の幅 3 通りぶん焼く（`console-case.bin`、`console-case.h`）。銘板と灯ったランプは、今まで通り上に描く。 |
 | `session/` | | セッションのエントリ、PAM のファイル、autostart、既定のアプリの一覧、ポータルの設定。 |
 | `themes/` | | DEsk のアイコンテーマ（`themes/make-icons.py` で生成）と GTK テーマ。 |
 | `packaging/` | | おすすめのプログラム一式のための Debian の equivs ファイル。 |
@@ -133,6 +152,8 @@ DEsk は **CPU 上の cairo** で `struct desk_buf`（cairo の画像サーフ�
 
 `struct desk_toplevel` は xdg-shell か Xwayland の窓を表します。サーバー側の装飾を頼む窓（xdg-decoration か KDE の server-decoration）には DEsk の紙の枠が付き、自分で枠を描く窓も `paper_for_all_windows = no` でなければ紙に載ります。操作は右上の角だけです：Fold（たたんで最小化）、Unfold / Refold（最大化と元に戻す）、Discard（閉じる。丸めて投げる）。閉じるときは必ずまずクライアントに頼みます。
 
+窓は紙以外の物にもなれます。**物**（`include/thing.h`、[THINGS.ja.md](THINGS.ja.md)）が窓を引き受けると、窓をどれだけ内側に置くか、どう描くか、手がどこで触れるか、紙の決まりのどれを使わないかを物が決めます。物はそれぞれ自分のファイルを持ち、`thing.h` に書かれたことだけで机を知ります。今その窓が何かは `view_thing` が答えます。
+
 ### 4.6 二つ以上の画面
 
 机が描かれるのは一つの画面だけで、レイアウトの位置 0,0 にある画面です（`first_output`）。ほかの画面には机の続きの板が出ます（`side_desks_paint`、`desk_draw_side_desk`）。部屋から天板の帯を切り出し、鏡に映すように繰り返して敷くので、板目は画面の境を越えて続きます。窓はそこにも置けます。最大化と全画面は窓のある画面で、新しい窓はポインタのある画面に出ます。机の画面でのこと（引き出し、眺め）で、ほかの画面の窓は動きません。画面を外すと、そこにあった窓は残った一番近い画面へ移ります（`windows_onto_screens`）。表示の道具が決めた配置は、画面の組ごとに `displays.conf` に覚えます。
@@ -148,6 +169,8 @@ libsystemd がある（`-Dpost=enabled`）と、DEsk はイベントループの
 - `org.freedesktop.Notifications` のサーバー（`post.c`）：ポストの手紙。
 - StatusNotifierWatcher（バスにほかにいなければ）とホスト（`tray.c`）。
 - MPRIS のクライアント（`media.c`）：再生中のもの、メディアキー。
+- `org.freedesktop.ScreenSaver`（バスにほかにいなければ。`saver.c`）：Inhibit と
+  UnInhibit。Wayland のやり方で頼まないアプリのため。
 - IBus（専用のバス）と fcitx5（`ime.c`）、セッションの終わりには logind。
 
 ## 5. 描画ライブラリ（`src/draw.c`）
@@ -223,7 +246,7 @@ DEsk が書くファイルはすべて、別の名前に書いてから名前を
 
 - **言葉**：`TR("English")` は英語で `WORDS`（`src/i18n.c`）を引きます。言語ごとに列がある表です（`enum desk_lang`：en、ja、zh、ko、es、fr、de）。訳の無い語は英語のまま出ます。キーには文脈を付けられます（`"clock|DAY"`）。`desk-index` は `index.c` に自分の表を持ちます。`meson test` が両方の表を確かめます（`scripts/check-words.py`）。
 - **書体**：役割（UI、印刷、見出し、刻印、タイプ、画面、手書き）ごとにラテン文字の一覧と CJK の一覧があり、CJK の一覧は中国語・日本語・韓国語ごとに選び直します（Noto CJK の SC・JP・KR）。同じ字でも国によって字形が違うためです。
-- **音**：録音は一つもありません。`sfx.c` が起動時に、固有振動、雑音、ぱりぱりという音、きしみからすべての音を合成し、`sound.c` が少しずつ違う版を、画面上のその物の位置の左右に振って鳴らします。
+- **音**：録音は一つもありません。`sfx.c` が起動時に、固有振動、雑音、ぱりぱりという音、きしみからほとんどの音を合成します。耳で選んだもの（引き出し、マットの上に置く・滑らせる紙、Control Panel）は同じ作り方で Faust で作って焼いてあり（`art/sound`、`bake.py`）、あればそちらを読みます。`sound.c` が少しずつ違う版を、画面上のその物の位置の左右に振って鳴らします。窓を滑らせる音は、2 つの音を回しながら速さで混ぜます。
 
 ## 9. ビルドと確認
 

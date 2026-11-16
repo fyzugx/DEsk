@@ -30,6 +30,8 @@
   coreutils,
   curl,
   dbus,
+  ffmpeg,
+  pulseaudio,
   dconf,
   glib,
   gawk,
@@ -54,6 +56,8 @@ let
     coreutils
     curl
     dbus
+    ffmpeg
+    pulseaudio
     glib
     gawk
     gnugrep
@@ -73,8 +77,9 @@ let
 in
 stdenv.mkDerivation (finalAttrs: {
   pname = "desk";
-  # the same as meson.build's version, which desk --version prints
-  version = "0.1.5";
+  # the same as meson.build's version; desk --version names the release
+  # by it (0.2.0 is "DEsk v0.2", 0.2.1 "DEsk v0.2.1")
+  version = "0.2.0";
 
   # Build the source alongside this packaging, not a separate release download.
   src = lib.cleanSourceWith {
@@ -189,7 +194,7 @@ stdenv.mkDerivation (finalAttrs: {
   doInstallCheck = true;
   installCheckPhase = ''
     runHook preInstallCheck
-    "$out/bin/desk" --version | grep -F 'DEsk v${finalAttrs.version}'
+    "$out/bin/desk" --version | grep -F 'DEsk v${lib.versions.majorMinor finalAttrs.version}'
     # DesktopNames is a display-manager extension, not an application key
     # accepted by desktop-file-validate. Retain it in the installed session.
     sed '/^DesktopNames=/d' "$out/share/wayland-sessions/desk.desktop" > "$TMPDIR/desk-session.desktop"

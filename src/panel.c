@@ -126,8 +126,10 @@ static double cpu_busy(void)
 	return f < 0.0 ? 0.0 : (f > 1.0 ? 1.0 : f);
 }
 
-static double mem_used(void)
+/* The fraction in use; and in gigabytes, in use and all there is. */
+static double mem_used(double *gb, double *total_gb)
 {
+	*gb = *total_gb = 0.0;
 	FILE *f = fopen("/proc/meminfo", "re");
 	if (!f) {
 		return 0.0;
@@ -148,6 +150,9 @@ static double mem_used(void)
 	if (total <= 0.0) {
 		return 0.0;
 	}
+	/* kB */
+	*gb = fmax(total - avail, 0.0) / (1024.0 * 1024.0);
+	*total_gb = total / (1024.0 * 1024.0);
 	double used = (total - avail) / total;
 	return used < 0.0 ? 0.0 : (used > 1.0 ? 1.0 : used);
 }
@@ -197,6 +202,7 @@ static void network(struct desk_meters *m)
 	m->net_up = false;
 	m->net_routed = false;
 	m->net_rate = 0.0;
+	m->net_in = m->net_out = -1.0;
 	m->net_if[0] = '\0';
 	m->net_wireless = false;
 	m->net_signal = 0.0;
@@ -245,9 +251,12 @@ static void network(struct desk_meters *m)
 	double rx = read_number(p, 0.0);
 	snprintf(p, sizeof p, "/sys/class/net/%s/statistics/tx_bytes", m->net_if);
 	double tx = read_number(p, 0.0);
-	double total = rx + tx, bytes, unused, secs;
-	if (rate_since(&g_net_marks, now_sec(), total, 0.0, true, &bytes, &unused, &secs)) {
-		double bps = bytes / secs;
+	double din, dout, secs;
+	if (rate_since(&g_net_marks, now_sec(), rx, tx, true, &din, &dout, &secs)) {
+		/* a counter that went back (the interface came again) is nothing */
+		m->net_in = fmax(din, 0.0) / secs;
+		m->net_out = fmax(dout, 0.0) / secs;
+		double bps = m->net_in + m->net_out;
 		/* a needle, not a graph: log scale from a trickle to ten megabytes */
 		if (bps > 1.0) {
 			double r = log10(bps) / 7.0;
@@ -574,7 +583,7 @@ void desk_meters_read(struct desk_meters *out)
 	}
 	memset(out, 0, sizeof *out);
 	out->cpu = cpu_busy();
-	out->mem = mem_used();
+	out->mem = mem_used(&out->mem_gb, &out->mem_total_gb);
 	supply_last(NULL, &out->temp_c);
 	out->load = 0.0;
 	char buf[128];

@@ -26,6 +26,8 @@
  * (desk_px_per_pt). docs/ARCHITECTURE.md has the overview.
  * ================================================================ */
 
+#include "calcart.h"
+#include "notebook.h"
 #include "fonts.h"
 #include "i18n.h"
 #include "memo.h"
@@ -39,6 +41,7 @@
 #include <strings.h>
 
 #include <ctype.h>
+#include <limits.h>
 #include <locale.h>
 #include <math.h>
 #include <stdarg.h>
@@ -633,6 +636,11 @@ struct key_light {
 	double ang;      /* angular radius seen from the surface */
 };
 
+/* For pictures of the room's faces taken apart by light (the faces
+ * trial): the room's lamp as bright everywhere as on a surface square to
+ * it, and nothing in its way. Set only while nothing else is shading. */
+static bool g_rf_flat, g_rf_unshadowed;
+
 static struct key_light key_at(vec3 p, int kind)
 {
 	struct key_light k;
@@ -661,6 +669,9 @@ static struct key_light key_at(vec3 p, int kind)
 		/* inside the shade's beam, or out at the edge of the pool */
 		double ax = vdot(vmul(k.dir, -1.0), vnorm(ROOM_LAMP_AIM));
 		k.irr *= smoothstepf(ROOM_LAMP_CONE_IN, ROOM_LAMP_CONE_OUT, ax);
+		if (g_rf_flat) {
+			k.irr = LIT_KEY_IRRADIANCE;
+		}
 	}
 	return k;
 }
@@ -877,6 +888,8 @@ enum {
 	MID_POST_DARK,
 	MID_BOOK_LEATHER,
 	MID_BOOK_GILT,
+	MID_BINDER_FAV,
+	MID_CC_LENS_WHITE,
 };
 
 static hit3 map_term(vec3 p)
@@ -1432,6 +1445,13 @@ static hit3 room_gadgets(vec3 p)
 		if (up && g_room_layer != 3) {
 			continue;
 		}
+		/* The clock on the desk is a picture, rendered once and laid over
+		 * the desk's sheet (room_cases_paint), shadow and all. It is traced
+		 * only where the camera moves: in the moves, and the views they end
+		 * in. */
+		if (i == DESK_GADGET_CLOCK && g_room_layer == 1) {
+			continue;
+		}
 		double base = g->foot + g->plinth;
 		double gz = gadget_z(g);
 		vec3 c = up ? v3(g->x, base + g->h * 0.5, gz) : v3(g->x, g->h * 0.5, gz);
@@ -1525,9 +1545,14 @@ static hit3 room_items(vec3 p)
  * backlight, on a fader under the lamp's). The nameplate and its ledge are
  * at the very left end, under that column (RM_CC_PLATE_X0), so the rest
  * of the front is the tray's. */
-#define RM_CC_X0 (-15.20 - RM_HX_GROW)
-#define RM_CC_X1 (-5.10 - RM_HX_GROW)
-#define RM_CC_PLATE_X0 (-15.05 - RM_HX_GROW)
+/* (each where it is on the desk as designed, _0, less how far the corner
+ * has moved out) */
+#define RM_CC_X0_0 (-15.20)
+#define RM_CC_X1_0 (-5.10)
+#define RM_CC_PLATE_X0_0 (-15.05)
+#define RM_CC_X0 (RM_CC_X0_0 - RM_HX_GROW)
+#define RM_CC_X1 (RM_CC_X1_0 - RM_HX_GROW)
+#define RM_CC_PLATE_X0 (RM_CC_PLATE_X0_0 - RM_HX_GROW)
 #define RM_CC_CHEEK 0.72
 #define RM_CC_PLINTH 0.50
 /* the plinth runs out in front of the panel as a ledge, because a plate you
@@ -1540,7 +1565,8 @@ static hit3 room_items(vec3 p)
 /* and the plate is cut as short as its legend can be engraved -- narrow
  * letters, the screws close in -- because every bit of plinth past it is
  * room for another slip */
-#define RM_CC_LEDGE_X1 (-11.50 - RM_HX_GROW)
+#define RM_CC_LEDGE_X1_0 (-11.50)
+#define RM_CC_LEDGE_X1 (RM_CC_LEDGE_X1_0 - RM_HX_GROW)
 /* where the plinth's front is, past the ledge: a hair behind the lip, so
  * the case throws a line of shadow under itself */
 #define RM_CC_PLINTH_Z0 (RM_CC_PZ0 - 0.05)
@@ -1550,12 +1576,20 @@ static hit3 room_items(vec3 p)
 #define RM_CC_PZ0 (-5.70)
 #define RM_CC_PY1 3.30
 #define RM_CC_PZ1 (-8.20)
-/* the tower, steeper, carrying the instruments */
+/* the tower, steeper, carrying the instruments -- and since 2026-11-10 the knob and the faders
+ * too, the top half of a panel in four (the meters at its left, what is turned and slid at its
+ * right), so it is longer than it was (2.33 up its slope; now 2.90) at the same slope */
 #define RM_CC_TY0 3.30
 #define RM_CC_TZ0 (-8.20)
-#define RM_CC_TY1 5.40
-#define RM_CC_TZ1 (-9.20)
+#define RM_CC_TY1 5.918
+#define RM_CC_TZ1 (-9.447)
 #define RM_CC_ZB (-10.60)   /* the back of the case */
+/* The front of the carcass, the body under both faces: behind the tower's back where the
+ * carcass's top meets it (0.72 of the way up), since the tower leans back off the fold and a
+ * body as far forward as the fold stood out through the tower's face as a ledge. Not cut
+ * along the tower instead: SVGA3D runs a dummy for the room's shader that one more max()
+ * makes. */
+#define RM_CC_BODY_Z0 (-8.95)
 /* Both faces are boxes this thick, so their skin -- the plane every
  * fitting has to stand on -- is here and not at the frame's origin. */
 #define RM_CC_SKIN 0.17
@@ -1580,14 +1614,20 @@ static double g_cc_out = 1.0;
  * settled -- so at drawing time it was reading a four by three travel and
  * projecting the nameplate four hundred pixels off the top of the screen.
  * Anything drawn over a baked sheet has to use the sheet's own shape. */
-static double cc_stow_at(double aspect)
+static double cc_stow_for(double aspect, double hx)
 {
 	const double k = 0.15;
 	double a = fmax(aspect, 0.2);
 	double y = RM_CC_PY0 + (RM_CC_PY1 - RM_CC_PY0) * k;
 	double z = RM_CC_PZ0 + (RM_CC_PZ1 - RM_CC_PZ0) * k;
-	double zf = RM_ZN - 2.0 * RM_HX / a;
+	double zf = RM_ZN - 2.0 * hx / a;
 	return z - (zf + (RM_FOV_X_V * 0.5 / a) * y);
+}
+
+/* (for the desk the room is of) */
+static double cc_stow_at(double aspect)
+{
+	return cc_stow_for(aspect, RM_HX);
 }
 
 /* How far forward it comes when it is out. The desk is shallower on a
@@ -1656,8 +1696,18 @@ enum {
 	CC_PW_OFF, CC_PW_BOOT, CC_PW_OUT, CC_PW_KEY,
 	CC_SCREEN,
 	CC_LOCK,
+	/* (2026-11-10) SLEEP beside LOCK, the screens put to sleep; SUSPEND under the lid with the
+	 * three, the machine put to sleep; the four on the lid; and the lid itself, last of all,
+	 * so that a point on one of the four is that one's rather than the lid's */
+	CC_SLEEP, CC_PW_SUSPEND,
+	CC_AIR, CC_SAVE, CC_NIGHT, CC_DISPLAY,
+	CC_LID,
 	CC_COUNT,
 };
+
+/* What a control is on: the face; under the lid, which is all you can reach of it when the
+ * lid is up; or the lid, and what is on it, which is the whole of it when the lid is down. */
+enum { CC_ON_FACE = 0, CC_ON_UNDER, CC_ON_LID };
 
 /* Where each control sits on its face: which face, then across and up it. */
 struct cc_control {
@@ -1666,60 +1716,138 @@ struct cc_control {
 	double hu, hs;   /* how much of it you can reach for */
 	double fu, fs;   /* the printed face, which fits inside its bezel */
 	int round;       /* the face is clipped to a circle */
+	int on;          /* CC_ON_* */
 };
 
-/* The controls sit a little way up the panel rather than across the middle
- * of it, because the desk's far edge cuts the machine off there when it is
- * stowed. A cut through the middle of a fitting leaves half of it standing
- * on the fascia -- half the volume knob's brass skirt was sitting up there
- * like a rising sun -- and the only fix is for the cut to land in front of
- * everything. */
+/* The panel in four (owner 2026-11-10: 左上、右上、左下、右下): up on the tower, the
+ * meters at the left -- the tube, and the battery's and the line's one over the other -- and
+ * at the right what is turned and slid -- the volume, and the lamp's and the screen's faders
+ * one over the other; down on the panel, at the left the two switches with LOCK and SLEEP
+ * under them, and at the right the walnut lid, with AIRPLANE, POWER SAVE, NIGHT and DISPLAY on
+ * it, SHUT DOWN, RESTART, LOG OUT and SUSPEND under it, and the key beside it.
+ *
+ * The desk's far edge cuts the machine off when it is stowed, and a cut through the middle of a
+ * fitting leaves half of it standing on the fascia -- half the volume knob's brass skirt was
+ * sitting up there like a rising sun. So the row of LOCK and SLEEP is down at the lip, all of it
+ * in front of that cut on a screen of any shape (it is what the desk sees of the machine, with
+ * the pilot lenses), and everything else -- the lid's free edge, and the caps on it, which stand
+ * furthest out -- is behind it, from five by four to the widest (the cut comes up the panel as
+ * the screen gets squarer). */
 static const struct cc_control CC[CC_COUNT] = {
-	/* The four working controls sit a little higher up the panel than they
-	 * did. What went in under them is the only thing on this machine that
-	 * ends the session, and it had to have somewhere to be. */
-	{ 0, -3.25,  0.52, 0.66, 0.60, 0.74, 1.00, 0 },   /* wifi lever */
-	{ 0, -1.70,  0.52, 0.62, 0.56, 0.70, 0.96, 0 },   /* bluetooth toggle */
-	{ 0,  0.25,  0.52, 0.90, 0.90, 0.95, 1.18, 0 },   /* volume knob */
-	{ 0,  2.80,  1.06, 0.99, 0.36, 1.01, 0.56, 0 },   /* the lamp's fader */
-	{ 1, -2.75,  0.00, 1.25, 1.25, 1.06, 1.06, 1 },   /* the tube */
-	{ 1,  0.15,  0.25, 1.00, 0.70, 0.75, 0.49, 0 },   /* battery meter */
-	{ 1,  2.85,  0.05, 1.05, 0.90, 0.79, 0.66, 0 },   /* network meter */
-	{ 0, -1.55, -1.00, 0.46, 0.40, 0.50, 0.42, 0 },   /* SHUT DOWN */
-	{ 0,  0.00, -1.00, 0.46, 0.40, 0.50, 0.42, 0 },   /* RESTART */
-	{ 0,  1.55, -1.00, 0.46, 0.40, 0.50, 0.42, 0 },   /* LOG OUT */
-	{ 0,  3.10, -1.00, 0.56, 0.40, 0.58, 0.42, 0 },   /* the lock, and the key */
-	/* and under the lamp's fader, the screen's: the backlight of a laptop's
-	 * panel, or of nothing, which it says */
-	{ 0,  2.80,  0.12, 0.99, 0.36, 1.01, 0.56, 0 },
-	/* and down at the left, outside the glass because it ends nothing,
-	 * the one that locks the screen: a button like the three, blue */
-	{ 0, -3.35, -1.00, 0.46, 0.40, 0.50, 0.42, 0 },
+	{ 0, -3.05,  0.74, 0.66, 0.60, 0.74, 1.00, 0, CC_ON_FACE },   /* wifi lever */
+	{ 0, -1.15,  0.74, 0.62, 0.56, 0.70, 0.96, 0, CC_ON_FACE },   /* bluetooth toggle */
+	{ 1,  1.40,  0.00, 0.90, 0.90, 0.95, 1.18, 0, CC_ON_FACE },   /* volume knob */
+	{ 1,  3.32,  0.66, 0.92, 0.36, 0.94, 0.56, 0, CC_ON_FACE },   /* the lamp's fader */
+	{ 1, -2.95,  0.00, 1.25, 1.25, 1.06, 1.06, 1, CC_ON_FACE },   /* the tube */
+	{ 1, -0.66,  0.70, 0.82, 0.60, 0.64, 0.42, 0, CC_ON_FACE },   /* battery meter */
+	{ 1, -0.66, -0.70, 0.82, 0.60, 0.64, 0.42, 0, CC_ON_FACE },   /* network meter */
+	{ 0,  1.155, 1.07, 0.50, 0.50, 0.52, 0.52, 0, CC_ON_UNDER },  /* SHUT DOWN */
+	{ 0,  2.625, 1.07, 0.50, 0.50, 0.52, 0.52, 0, CC_ON_UNDER },  /* RESTART */
+	{ 0,  1.155, -0.80, 0.50, 0.50, 0.52, 0.52, 0, CC_ON_UNDER },  /* LOG OUT */
+	{ 0,  3.86,  0.80, 0.44, 0.78, 0.44, 0.78, 0, CC_ON_FACE },   /* the lock, and the key under it */
+	/* under the lamp's fader, the screen's: the backlight of a laptop's panel, or of nothing,
+	 * which it says */
+	{ 1,  3.32, -0.66, 0.92, 0.36, 0.94, 0.56, 0, CC_ON_FACE },
+	/* and down at the left, out in the open because it ends nothing, the one that locks the
+	 * screen: a button like the others, blue */
+	{ 0, -3.05, -1.00, 0.46, 0.40, 0.50, 0.42, 0, CC_ON_FACE },
+	{ 0, -1.15, -1.00, 0.46, 0.40, 0.50, 0.42, 0, CC_ON_FACE },   /* SLEEP */
+	{ 0,  2.625, -0.80, 0.50, 0.50, 0.52, 0.52, 0, CC_ON_UNDER },  /* SUSPEND */
+	{ 0,  1.155, 1.07, 0.50, 0.50, 0.52, 0.52, 0, CC_ON_LID },    /* AIRPLANE */
+	{ 0,  2.625, 1.07, 0.50, 0.50, 0.52, 0.52, 0, CC_ON_LID },    /* POWER SAVE */
+	{ 0,  1.155, -0.80, 0.50, 0.50, 0.52, 0.52, 0, CC_ON_LID },    /* NIGHT */
+	{ 0,  2.625, -0.80, 0.50, 0.50, 0.52, 0.52, 0, CC_ON_LID },    /* DISPLAY */
+	{ 0,  1.89,  0.135, 1.47, 1.435, 1.47, 1.435, 0, CC_ON_LID }, /* the lid */
 };
 
-/* ---- the guarded set along the bottom of the operating panel ----
+/* ---- the guarded set at the bottom right of the operating panel ----
  *
- * The three that end the session, the lock that lets you at them, and the
- * glass over the lot. Laid out here because the tracer, the picker and the
- * cairo half all have to agree about where a button is to within nothing.
+ * The four that end the session or put the machine to sleep, the lock that lets you at them,
+ * and the walnut lid over them -- which carries the four that are pressed every day, so they
+ * are under the hand with it down. Laid out here because the tracer, the picker and the cairo
+ * half all have to agree about where a button is to within nothing.
  *
- * The button sits above the middle of its own face, because the word for
- * what it does goes under it, the way every other legend on this panel
- * does. */
+ * LOCK and SLEEP are the size the three under the glass were. The lid runs the height of the
+ * quarter, from just behind the pilot lenses to the hinge, so the eight in and on it are bigger
+ * than those two, two by two (2026-11-10, the owner: the buttons on the lid were small). The key
+ * lies upright under its lock, so the lock's column is only as wide as the lock, and the lid
+ * has the rest (2026-11-11, the owner: the key upright, and the room it gave to the buttons). From
+ * the desk, with the machine stowed, the lid's front and the two at the front of it show, as
+ * LOCK and SLEEP do, and nothing under it. */
 #define CC_PW_R      0.285   /* the cap */
 #define CC_PW_RING   0.395   /* the brass ring round it, which carries the word */
-#define CC_PW_LOCK_U 2.85    /* the barrel */
-#define CC_PW_KEY_U  3.28    /* where the key lies when it is not in the lock */
-#define CC_PW_G_U    2.30    /* the glass, across */
-#define CC_PW_G_S0 (-0.58)   /* its hinge, up the panel */
-#define CC_PW_G_S1 (-1.44)   /* its free edge */
-#define CC_PW_G_N    0.42    /* how far it stands off the panel, shut */
-#define CC_PW_SWING  1.34    /* how far it swings, in radians */
+#define CC_PW_DOME   0.50    /* the sphere the cap's dome is cut from */
+#define CC_LB_R      0.325   /* the eight in and on the lid: their caps */
+#define CC_LB_RING   0.45    /* and rings */
+#define CC_LB_DOME   0.637   /* (a dome as high as the small one's, on a wider cap) */
+#define CC_PW_LOCK_U 3.86    /* the barrel, in the column between the lid and the cheek */
+#define CC_PW_KEY_S  1.16    /* and up the panel: the top row's */
+#define CC_PW_KEY_REST 0.80  /* where the key's tip lies when it is not in the lock: under the
+                              * barrel, upright, its bow towards the lip */
+#define CC_PW_LAMP_S (-0.16) /* the set's own lamp, under the key: lit with the key home */
+/* the lid: across, up (its free edge, and its back edge before the hinge), and how far its
+ * underside and its top stand off the panel, shut; where its hinge is; how far it swings */
+#define CC_LID_U0    0.42
+#define CC_LID_U1    3.36
+#define CC_LID_S0  (-1.30)   /* (short of the pilot lenses, which from the desk it hid) */
+#define CC_LID_S1    1.57
+#define CC_LID_N0    0.40
+#define CC_LID_N1    0.54
+#define CC_LID_HINGE_S 1.64
+#define CC_LID_SWING 1.92    /* 110 degrees: past upright, leaning back towards the tower */
+/* the brass strip that parts the left half of the panel from the right, on both faces */
+#define CC_PART_U    0.30
 
-static double cc_pw_btn_s(void)
+/* What each button's cap is cast in, by control (0: it is not a button). */
+static int cc_btn_mid(int i)
 {
-	return CC[CC_PW_OFF].s;
+	switch (i) {
+	case CC_LOCK: case CC_PW_SUSPEND: case CC_NIGHT:
+		return MID_CC_LENS_BLUE;
+	case CC_SLEEP: case CC_DISPLAY:
+		return MID_CC_LENS_WHITE;
+	case CC_PW_OFF:
+		return MID_CC_LENS_RED;
+	case CC_PW_BOOT: case CC_AIR:
+		return MID_CC_LENS_AMBER;
+	case CC_PW_OUT: case CC_SAVE:
+		return MID_CC_LENS_GREEN;
+	default:
+		return 0;
+	}
 }
+
+/* The one on the lid where one under it is, for one under it; any other, itself. */
+static int cc_twin(int i)
+{
+	if (CC[i].on != CC_ON_UNDER) {
+		return i;
+	}
+	for (int k = 0; k < CC_COUNT; k++) {
+		if (CC[k].on == CC_ON_LID && cc_btn_mid(k) && CC[k].u == CC[i].u && CC[k].s == CC[i].s) {
+			return k;
+		}
+	}
+	return i;
+}
+
+/* (a point in a control's box is that control's from the face up to here: the eight in and on
+ * the lid are told apart by how far off the panel the point is) */
+static double cc_owner_n0(int i)
+{
+	return CC[i].on == CC_ON_LID ? CC_LID_N0 - 0.02 : -0.15;
+}
+
+static double cc_owner_n1(int i)
+{
+	return CC[i].on == CC_ON_UNDER ? CC_LID_N0 - 0.02 : 1.15;
+}
+
+/* How the lid is traced over the set: 1 shut, in every sheet but one; 2 up on its hinge, all
+ * the way (CC_LID_SWING), in the console's own view's second sheet (rr->console_bare), which is
+ * what is under it and the lid's underside and its shadow; 0 not at all. As it swings the lid
+ * is laid over from those two (cc_lid_*). */
+static double g_cc_lid = 1.0;
 
 static void cc_faces(struct cc_face *panel, struct cc_face *tower)
 {
@@ -1727,36 +1855,44 @@ static void cc_faces(struct cc_face *panel, struct cc_face *tower)
 	cc_face_build(RM_CC_TY0, RM_CC_TZ0, RM_CC_TY1, RM_CC_TZ1, tower);
 }
 
-/* The four corners of the glass, at a given point in its swing. It is
- * hinged along its top edge, so opening it lifts the near edge out of the
- * panel and towards whoever is looking. */
-static void cc_guard_quad(double open, double slide, double aspect, vec3 out[4])
+/* The four corners of the lid's top, at a given point in its swing. It is hinged along its
+ * back edge, so opening it lifts the free edge off the panel and up towards the tower. In the
+ * order cc_quad has them: its back left, back right, front left, front right. */
+static void cc_lid_corners(double open, double n, double slide, double aspect, vec3 out[4])
 {
 	struct cc_face panel, tower;
 	cc_faces(&panel, &tower);
-	double th = clampf(open, 0.0, 1.0) * CC_PW_SWING;
-	double d = CC_PW_G_S1 - CC_PW_G_S0;          /* negative: down the face */
-	double s1 = CC_PW_G_S0 + d * cos(th);
-	double n1 = CC_PW_G_N - d * sin(th);
-	const double U[4] = { -CC_PW_G_U, CC_PW_G_U, -CC_PW_G_U, CC_PW_G_U };
-	const double S[4] = { CC_PW_G_S0, CC_PW_G_S0, s1, s1 };
-	const double N[4] = { CC_PW_G_N, CC_PW_G_N, n1, n1 };
+	double th = clampf(open, 0.0, 1.0) * CC_LID_SWING;
+	double hn = (CC_LID_N0 + CC_LID_N1) * 0.5;
+	/* each corner turned about the hinge: (s, n) from it, round by th, the free edge (down the
+	 * panel from the hinge) coming up off it. (It went round the other way, into the panel, which
+	 * from the front looks much the same until the lid is half way.) */
+	const double U[4] = { CC_LID_U0, CC_LID_U1, CC_LID_U0, CC_LID_U1 };
+	const double S[4] = { CC_LID_S1, CC_LID_S1, CC_LID_S0, CC_LID_S0 };
 	for (int k = 0; k < 4; k++) {
-		out[k] = cc_world(&panel, U[k], N[k], S[k], slide, aspect);
+		double ds = S[k] - CC_LID_HINGE_S, dn = n - hn;
+		double rs = ds * cos(th) + dn * sin(th), rn = dn * cos(th) - ds * sin(th);
+		out[k] = cc_world(&panel, U[k], hn + rn, CC_LID_HINGE_S + rs, slide, aspect);
 	}
 }
 
-/* The four corners of a control's face, for cairo to print into. */
+/* The four corners of a control's face, for cairo to print into. The four on the lid are
+ * printed as high over the panel as the lid lifts them: laid at the panel's own height, their
+ * words and icons were half a unit under the caps, and the view's perspective slid them off
+ * the caps, towards the middle of the view (2026-11-11, the owner: 描画ズレ). */
 static void cc_quad(int i, double slide, double aspect, vec3 out[4])
 {
 	struct cc_face panel, tower;
 	cc_faces(&panel, &tower);
 	const struct cc_face *f = CC[i].tower ? &tower : &panel;
+	double n = CC[i].tower ? 0.05 : 0.03;
+	if (CC[i].on == CC_ON_LID && i != CC_LID) {
+		n += CC_LID_N1 - RM_CC_SKIN;
+	}
 	for (int k = 0; k < 4; k++) {
 		double du = (k & 1) ? CC[i].fu : -CC[i].fu;
 		double ds = (k & 2) ? -CC[i].fs : CC[i].fs;
-		out[k] = cc_world(f, CC[i].u + du, CC[i].tower ? 0.05 : 0.03,
-			CC[i].s + ds, slide, aspect);
+		out[k] = cc_world(f, CC[i].u + du, n, CC[i].s + ds, slide, aspect);
 	}
 }
 
@@ -1802,6 +1938,22 @@ static void cc_face_size(int i, double *fw, double *fh)
 	*fh = ceil(2.0 * CC[i].fs * cc_face_px());
 }
 
+/* A button, about q (in its face's coordinates, from its middle): a brass ring standing off the
+ * face at base, the skirt the cap sits in, and the cap -- a shallow dome, a big sphere (dome)
+ * with all but its crown cut away rather than a small one sitting on the panel like an egg --
+ * in cast glass, mat. Its crown stands 0.20 off base whatever its width: a wider cap is cut
+ * from a bigger sphere. The ring is wide, because the word for what the button does is cut
+ * round the bottom of it. */
+static hit3 cc_button(vec3 q, double ring, double cap, double dome, double base, int mat)
+{
+	hit3 h = { sd_cyl_y(v3(q.x, q.y - (base + 0.045), q.z), ring, 0.045), MID_CC_BRASS };
+	h = hmin3(h, (hit3){ sd_cyl_y(v3(q.x, q.y - (base + 0.075), q.z), cap + 0.045, 0.075),
+		MID_CC_BRASS });
+	double d = fmax(sd_sphere(v3(q.x, q.y - (base + 0.20 - dome), q.z), dome),
+		sd_cyl_y(v3(q.x, q.y - (base + 0.05), q.z), cap, 0.16));
+	return hmin3(h, (hit3){ d, mat });
+}
+
 static hit3 map_console(vec3 p)
 {
 	hit3 h = { 1e9, 0 };
@@ -1840,10 +1992,10 @@ static hit3 map_console(vec3 p)
 			MID_CC_STEEL });
 	}
 
-	/* the carcass: a box under both faces, so the thing has a body */
+	/* the carcass: a box under both faces, so the thing has a body (RM_CC_BODY_Z0) */
 	h = hmin3(h, (hit3){ sd_round_box(vsub(p,
-		v3(cx, (RM_CC_PLINTH + RM_CC_TY1 * 0.72) * 0.5, (RM_CC_PZ1 + RM_CC_ZB) * 0.5)),
-		v3(inner, (RM_CC_TY1 * 0.72 - RM_CC_PLINTH) * 0.5, (RM_CC_PZ1 - RM_CC_ZB) * 0.5),
+		v3(cx, (RM_CC_PLINTH + RM_CC_TY1 * 0.72) * 0.5, (RM_CC_BODY_Z0 + RM_CC_ZB) * 0.5)),
+		v3(inner, (RM_CC_TY1 * 0.72 - RM_CC_PLINTH) * 0.5, (RM_CC_BODY_Z0 - RM_CC_ZB) * 0.5),
 		0.10), MID_CC_STEEL });
 
 	/* the two faces */
@@ -1890,6 +2042,56 @@ static hit3 map_console(vec3 p)
 			v3(CC[idx].hu * 0.78, 0.07, CC[idx].hs * 0.74), 0.03), MID_CC_GLASS });
 	}
 
+	/* the brass that parts the panel in four: a strip up each face between its left half and
+	 * its right, and a rod along the fold between the panel and the tower. The panel's strip
+	 * stops short of the row along the lip, behind the cut the desk's far edge makes. */
+	h = hmin3(h, (hit3){ sd_round_box(v3(tf.x - CC_PART_U, tf.y - (RM_CC_SKIN + 0.015), tf.z),
+		v3(0.035, 0.015, tower.half - 0.10), 0.015), MID_CC_BRASS });
+	h = hmin3(h, (hit3){ sd_round_box(v3(pf.x - CC_PART_U, pf.y - (RM_CC_SKIN + 0.015),
+		pf.z - (panel.half - 0.06 - 0.45) * 0.5),
+		v3(0.035, 0.015, (panel.half - 0.06 + 0.45) * 0.5), 0.015), MID_CC_BRASS });
+	h = hmin3(h, (hit3){ sd_round_box(v3(pf.x, pf.y - (RM_CC_SKIN + 0.03),
+		pf.z - (panel.half - 0.04)), v3(inner - 0.06, 0.03, 0.03), 0.03), MID_CC_BRASS });
+
+	/* the knob, up on the tower: fluted bakelite on a brass skirt, with a pointer */
+	{
+		vec3 q = vsub(tf, v3(CC[CC_VOL].u, 0, CC[CC_VOL].s));
+		h = hmin3(h, (hit3){ sd_cyl_y(v3(q.x, q.y - (RM_CC_SKIN + 0.035), q.z),
+			0.88, 0.035), MID_CC_BRASS });
+		/* A fine knurl, not a deep one: a radial ripple this size breaks
+		 * the distance bound the marcher relies on, and the knob came back
+		 * looking chewed round the rim.
+		 *
+		 * And the bakelite stops well inside the brass, because the brass
+		 * is a scale and a scale needs somewhere to be. */
+		double ang = atan2(q.z, q.x);
+		double flute = 0.500 + 0.010 * pow(fmax(0.0, cos(ang * 18.0)), 2.0);
+		/* A radius that varies with the angle is not a distance field: the
+		 * true distance to a rippled rim is shorter than a plain cylinder
+		 * reports, by about sqrt(1 + (A k / R)^2), so the marcher steps
+		 * past it and the rim comes back chewed. Hand it a lower bound and
+		 * it stops doing that. Shrinking the knob made this worse, because
+		 * the same ripple on a smaller radius is a steeper one. */
+		/* (and low: standing 0.47 off its skirt, the view's slant moved its top half a
+		 * knob off its foot -- 2026-11-11, the owner: 回す物の高さを下げましょう) */
+		h = hmin3(h, (hit3){ 0.85 * sd_cyl_y(v3(q.x, q.y - (RM_CC_SKIN + 0.19), q.z),
+			flute, 0.12), MID_CC_BAKELITE });
+		/* the pointer is drawn on, because it turns */
+	}
+
+	/* the two faders, the lamp's and the screen's, up on the tower beside it: a milled handle
+	 * in a long slot */
+	for (int fd = 0; fd < 2; fd++) {
+		int idx = fd ? CC_SCREEN : CC_BRIGHT;
+		vec3 q = vsub(tf, v3(CC[idx].u, 0, CC[idx].s));
+		double plate = sd_round_box(v3(q.x, q.y - (RM_CC_SKIN + 0.04), q.z),
+			v3(CC[idx].hu * 0.95, 0.04, 0.30), 0.04);
+		plate = fmax(plate, -sd_box(v3(q.x, q.y - (RM_CC_SKIN + 0.14), q.z),
+			v3(CC[idx].hu * 0.82, 0.14, 0.11)));
+		h = hmin3(h, (hit3){ plate, MID_CC_BRASS });
+		/* the handle slides, so it is drawn rather than baked */
+	}
+
 	/* ---- what you reach for on the panel ---- */
 
 	/* two switches, each on its brass plate with its pilot lamp above */
@@ -1910,101 +2112,67 @@ static hit3 map_console(vec3 p)
 			sw ? MID_CC_LENS_BLUE : MID_CC_LENS_AMBER });
 	}
 
-	/* the knob: fluted bakelite on a brass skirt, with a pointer */
+	/* The buttons -- LOCK and SLEEP at the lip, the four under the lid, the four on it where it
+	 * is traced at all -- as one: the one nearest across the panel, exactly, and for the rest
+	 * no nearer than the next nearest's ring. Each lies inside its own ring, which is less than
+	 * half the way to the next, so wherever a button is the one nearest is that one; and the
+	 * shader carries one button rather than ten (SVGA3D silently runs nothing for a program as
+	 * long as ten made it). */
 	{
-		vec3 q = vsub(pf, v3(CC[CC_VOL].u, 0, CC[CC_VOL].s));
-		h = hmin3(h, (hit3){ sd_cyl_y(v3(q.x, q.y - (RM_CC_SKIN + 0.035), q.z),
-			0.88, 0.035), MID_CC_BRASS });
-		/* A fine knurl, not a deep one: a radial ripple this size breaks
-		 * the distance bound the marcher relies on, and the knob came back
-		 * looking chewed round the rim.
-		 *
-		 * And the bakelite stops well inside the brass, because the brass
-		 * is a scale and a scale needs somewhere to be. */
-		double ang = atan2(q.z, q.x);
-		double flute = 0.500 + 0.010 * pow(fmax(0.0, cos(ang * 18.0)), 2.0);
-		/* A radius that varies with the angle is not a distance field: the
-		 * true distance to a rippled rim is shorter than a plain cylinder
-		 * reports, by about sqrt(1 + (A k / R)^2), so the marcher steps
-		 * past it and the rim comes back chewed. Hand it a lower bound and
-		 * it stops doing that. Shrinking the knob made this worse, because
-		 * the same ripple on a smaller radius is a steeper one. */
-		h = hmin3(h, (hit3){ 0.85 * sd_cyl_y(v3(q.x, q.y - (RM_CC_SKIN + 0.29), q.z),
-			flute, 0.25), MID_CC_BAKELITE });
-		/* the pointer is drawn on, because it turns */
+		int best = -1;
+		double d1 = 1e9, d2 = 1e9, r2 = CC_PW_RING;
+		for (int i = 0; i < CC_COUNT; i++) {
+			/* The four on the lid are where the four under it are: those four stand for both,
+			 * and the nearest of them is its twin on the lid while the lid is traced. Asking
+			 * which of the eight the lid leaves to be seen, button by button, made the
+			 * shader one SVGA3D runs a dummy for. */
+			if (!cc_btn_mid(i) || CC[i].on == CC_ON_LID) {
+				continue;
+			}
+			double d = hypot(pf.x - CC[i].u, pf.z - CC[i].s);
+			double ring = CC[i].on == CC_ON_FACE ? CC_PW_RING : CC_LB_RING;
+			if (d < d1) {
+				d2 = d1;
+				r2 = best >= 0 ? (CC[best].on == CC_ON_FACE ? CC_PW_RING : CC_LB_RING) : r2;
+				d1 = d;
+				best = i;
+			} else if (d < d2) {
+				d2 = d;
+				r2 = ring;
+			}
+		}
+		if (best >= 0) {
+			/* (shut: the four on it; lifted, the lid is up off them, and the four under it
+			 * are what is there) */
+			int b = CC[best].on == CC_ON_UNDER && fabs(g_cc_lid - 1.0) < 0.5 ? cc_twin(best)
+				: best;
+			bool big = CC[b].on == CC_ON_FACE;
+			h = hmin3(h, cc_button(vsub(pf, v3(CC[b].u, 0, CC[b].s)),
+				big ? CC_PW_RING : CC_LB_RING, big ? CC_PW_R : CC_LB_R,
+				big ? CC_PW_DOME : CC_LB_DOME,
+				CC[b].on == CC_ON_LID ? CC_LID_N1 : RM_CC_SKIN, cc_btn_mid(b)));
+			h = hmin3(h, (hit3){ d2 - r2, 0 });
+		}
 	}
 
-	/* the two faders, the lamp's and the screen's: a milled handle in a
-	 * long slot */
-	for (int fd = 0; fd < 2; fd++) {
-		int idx = fd ? CC_SCREEN : CC_BRIGHT;
-		vec3 q = vsub(pf, v3(CC[idx].u, 0, CC[idx].s));
-		double plate = sd_round_box(v3(q.x, q.y - (RM_CC_SKIN + 0.04), q.z),
-			v3(CC[idx].hu * 0.95, 0.04, 0.30), 0.04);
-		plate = fmax(plate, -sd_box(v3(q.x, q.y - (RM_CC_SKIN + 0.14), q.z),
-			v3(CC[idx].hu * 0.82, 0.14, 0.11)));
-		h = hmin3(h, (hit3){ plate, MID_CC_BRASS });
-		/* the handle slides, so it is drawn rather than baked */
-	}
-
-	/* ---- the guarded set along the bottom of the panel ----
+	/* ---- the guarded set, at the bottom right ----
 	 *
-	 * The row of pilot lenses that used to run along here has gone to the
-	 * nameplate, where five of the same kind now read the line. This is
-	 * what a machine that can end the session ought to look like: a plate
-	 * of its own, three buttons under glass, and a lock.
-	 *
-	 * Not the glass, and not the key. Both move, and a baked one cannot. */
+	 * A plate of its own, four buttons that end the session or put the machine to sleep, a
+	 * lock, and a walnut lid over the four on a brass hinge -- with four of its own on top,
+	 * that anybody may press. The key is not baked: it moves. Nor is the lid, in the
+	 * console's own sheet, where it swings. */
 	{
-		/* the sub-plate the whole section is mounted on */
-		double ps = (CC_PW_G_S0 + CC_PW_G_S1) * 0.5;
+		/* the sub-plate the set is mounted on: a little wider than the lid, and short of the
+		 * pilot lenses in front */
 		h = hmin3(h, (hit3){ sd_round_box(
-			v3(pf.x - 0.50, pf.y - (RM_CC_SKIN + 0.035), pf.z - ps),
-			v3(2.90, 0.035, (CC_PW_G_S0 - CC_PW_G_S1) * 0.5 + 0.09), 0.05),
-			MID_CC_PANEL });
-
-		double bs = cc_pw_btn_s();
-		for (int i = 0; i < 3; i++) {
-			vec3 q = vsub(pf, v3(CC[CC_PW_OFF + i].u, 0, bs));
-			/* The ring it is set into. Wide, because the word for what it
-			 * does is engraved around the bottom of it -- there is no room
-			 * under a button for a legend down here, and a bezel is where
-			 * gear of this kind puts one anyway. */
-			h = hmin3(h, (hit3){ sd_cyl_y(
-				v3(q.x, q.y - (RM_CC_SKIN + 0.045), q.z),
-				CC_PW_RING, 0.045), MID_CC_BRASS });
-			h = hmin3(h, (hit3){ sd_cyl_y(
-				v3(q.x, q.y - (RM_CC_SKIN + 0.075), q.z),
-				CC_PW_R + 0.045, 0.075), MID_CC_BRASS });
-			/* and the cap: a shallow dome, which is a big sphere with all
-			 * but its crown cut away rather than a small one sitting on
-			 * the panel like an egg */
-			double cap = fmax(
-				sd_sphere(v3(q.x, q.y - (RM_CC_SKIN - 0.30), q.z), 0.50),
-				sd_cyl_y(v3(q.x, q.y - (RM_CC_SKIN + 0.05), q.z),
-					CC_PW_R, 0.16));
-			h = hmin3(h, (hit3){ cap,
-				i == 0 ? MID_CC_LENS_RED
-				: i == 1 ? MID_CC_LENS_AMBER : MID_CC_LENS_GREEN });
-		}
-
-		/* LOCK, the same button out on its own: no glass over it, since
-		 * locking the screen loses nobody anything */
-		{
-			vec3 q = vsub(pf, v3(CC[CC_LOCK].u, 0, CC[CC_LOCK].s));
-			h = hmin3(h, (hit3){ sd_cyl_y(v3(q.x, q.y - (RM_CC_SKIN + 0.045), q.z),
-				CC_PW_RING, 0.045), MID_CC_BRASS });
-			h = hmin3(h, (hit3){ sd_cyl_y(v3(q.x, q.y - (RM_CC_SKIN + 0.075), q.z),
-				CC_PW_R + 0.045, 0.075), MID_CC_BRASS });
-			double cap = fmax(
-				sd_sphere(v3(q.x, q.y - (RM_CC_SKIN - 0.30), q.z), 0.50),
-				sd_cyl_y(v3(q.x, q.y - (RM_CC_SKIN + 0.05), q.z), CC_PW_R, 0.16));
-			h = hmin3(h, (hit3){ cap, MID_CC_LENS_BLUE });
-		}
+			v3(pf.x - (CC_LID_U0 + CC_LID_U1) * 0.5, pf.y - (RM_CC_SKIN + 0.035),
+				pf.z - (CC_LID_S0 + CC_LID_HINGE_S + 0.04) * 0.5),
+			v3((CC_LID_U1 - CC_LID_U0) * 0.5 + 0.04, 0.035,
+				(CC_LID_HINGE_S - CC_LID_S0 + 0.08) * 0.5), 0.05), MID_CC_PANEL });
 
 		/* the lock: a brass barrel with a slot across it */
 		{
-			vec3 q = vsub(pf, v3(CC_PW_LOCK_U, 0, bs));
+			vec3 q = vsub(pf, v3(CC_PW_LOCK_U, 0, CC_PW_KEY_S));
 			double barrel = sd_cyl_y(v3(q.x, q.y - (RM_CC_SKIN + 0.055), q.z),
 				0.235, 0.055);
 			barrel = fmax(barrel, -sd_box(
@@ -2012,22 +2180,56 @@ static hit3 map_console(vec3 p)
 				v3(0.032, 0.055, 0.145)));
 			h = hmin3(h, (hit3){ barrel, MID_CC_BRASS });
 		}
+		/* and under it the set's own lamp, green, lit while the key is home */
+		{
+			vec3 lamp = vsub(pf, v3(CC_PW_LOCK_U, RM_CC_SKIN + 0.05, CC_PW_LAMP_S));
+			h = hmin3(h, (hit3){ sd_cyl_y(lamp, 0.21, 0.05), MID_CC_BRASS });
+			h = hmin3(h, (hit3){ sd_sphere(v3(lamp.x, lamp.y - 0.09, lamp.z), 0.155),
+				MID_CC_LENS_GREEN });
+		}
 
-		/* the two lugs the glass is hung on */
+		/* the hinge: a brass knuckle the width of the lid, on two brackets */
+		double hn = (CC_LID_N0 + CC_LID_N1) * 0.5;
+		h = hmin3(h, (hit3){ sd_round_box(v3(pf.x - (CC_LID_U0 + CC_LID_U1) * 0.5, pf.y - hn,
+			pf.z - CC_LID_HINGE_S), v3((CC_LID_U1 - CC_LID_U0) * 0.5 - 0.04, 0.055, 0.055),
+			0.055), MID_CC_BRASS });
 		for (int sgn = 0; sgn < 2; sgn++) {
-			double u = sgn ? CC_PW_G_U : -CC_PW_G_U;
-			h = hmin3(h, (hit3){ sd_round_box(
-				v3(pf.x - u, pf.y - (RM_CC_SKIN + CC_PW_G_N * 0.5),
-					pf.z - CC_PW_G_S0),
-				v3(0.070, CC_PW_G_N * 0.5, 0.070), 0.040), MID_CC_BRASS });
+			double u = sgn ? CC_LID_U1 - 0.14 : CC_LID_U0 + 0.14;
+			h = hmin3(h, (hit3){ sd_round_box(v3(pf.x - u, pf.y - (RM_CC_SKIN + hn) * 0.5,
+				pf.z - CC_LID_HINGE_S), v3(0.065, (hn - RM_CC_SKIN) * 0.5, 0.05), 0.03),
+				MID_CC_BRASS });
+		}
+
+		/* the lid, where it is traced at all: a walnut board, and a brass lip along its free
+		 * edge to lift it by, between the two in front (the four on it are with the other
+		 * buttons, above) -- shut, or up on its hinge, as the console's other sheet has it
+		 * (g_cc_lid 2): the point turned back about the hinge onto the lid as it lies shut */
+		if (g_cc_lid > 0.5) {
+			double lc = g_cc_lid > 1.5 ? cos(CC_LID_SWING) : 1.0;
+			double lsn = g_cc_lid > 1.5 ? sin(CC_LID_SWING) : 0.0;
+			double ds = pf.z - CC_LID_HINGE_S, dn = pf.y - hn;
+			double ls = (CC_LID_S0 + CC_LID_S1) * 0.5;
+			vec3 q = v3(pf.x - (CC_LID_U0 + CC_LID_U1) * 0.5, ds * lsn + dn * lc,
+				CC_LID_HINGE_S + ds * lc - dn * lsn - ls);
+			h = hmin3(h, (hit3){ sd_round_box(q,
+				v3((CC_LID_U1 - CC_LID_U0) * 0.5, (CC_LID_N1 - CC_LID_N0) * 0.5,
+					(CC_LID_S1 - CC_LID_S0) * 0.5), 0.035), MID_CC_CHEEK });
+			h = hmin3(h, (hit3){ sd_round_box(v3(q.x, q.y - (CC_LID_N1 - hn - 0.015),
+				q.z - (CC_LID_S0 - ls) - 0.07), v3(0.25, 0.03, 0.045), 0.02), MID_CC_BRASS });
 		}
 	}
 
 	/* a row of small pilot lenses along the front edge of the panel. Pushed
 	 * right down to the lip, because the guarded set went in above them and
-	 * these are what the desk sees of the machine. */
-	for (int i = 0; i < 6; i++) {
-		double u = -inner + 0.70 + i * (2.0 * (inner - 0.70) / 5.0);
+	 * these are what the desk sees of the machine. The six are at one height,
+	 * one way up the panel and evenly across it, so the nearest across it is
+	 * the nearest of all, and that one is enough: the shader carries one lens,
+	 * not six (it is that close to the length SVGA3D runs a dummy for). */
+	{
+		double u0 = -inner + 0.70, pitch = 2.0 * (inner - 0.70) / 5.0;
+		double k = fmin(fmax(floor((pf.x - u0) / pitch + 0.5), 0.0), 5.0);
+		int i = (int)k;
+		double u = u0 + k * pitch;
 		vec3 q = vsub(pf, v3(u, 0, -panel.half + 0.136));
 		h = hmin3(h, (hit3){ sd_cyl_y(v3(q.x, q.y - (RM_CC_SKIN + 0.035), q.z),
 			0.13, 0.035), MID_CC_BRASS });
@@ -2053,8 +2255,20 @@ static int console_owner(vec3 p)
 	cc_faces(&panel, &tower);
 	for (int i = 0; i < CC_COUNT; i++) {
 		vec3 q = cc_to_face(CC[i].tower ? &tower : &panel, p);
-		vec3 d = v3(q.x - CC[i].u, q.y - 0.45, q.z - CC[i].s);
-		if (sd_box(d, v3(CC[i].hu, 0.60, CC[i].hs)) < 0.0) {
+		if (CC[i].on == CC_ON_LID && g_cc_lid > 1.5) {
+			/* the lid up on its hinge: the four on it turned away, and a point of the lid the
+			 * lid's where it would be, shut (map_console) */
+			if (i != CC_LID) {
+				continue;
+			}
+			double hn = (CC_LID_N0 + CC_LID_N1) * 0.5;
+			double ds = q.z - CC_LID_HINGE_S, dn = q.y - hn;
+			double lc = cos(CC_LID_SWING), lsn = sin(CC_LID_SWING);
+			q = v3(q.x, hn + ds * lsn + dn * lc, CC_LID_HINGE_S + ds * lc - dn * lsn);
+		}
+		double n0 = cc_owner_n0(i), n1 = cc_owner_n1(i);
+		vec3 d = v3(q.x - CC[i].u, q.y - (n0 + n1) * 0.5, q.z - CC[i].s);
+		if (sd_box(d, v3(CC[i].hu, (n1 - n0) * 0.5, CC[i].hs)) < 0.0) {
 			return i + 1;
 		}
 	}
@@ -2071,7 +2285,8 @@ static int console_owner(vec3 p)
  * the words across the middle of the desk.
  *
  * Cast iron under a coat of enamel, brass where hands and letters go. */
-#define RM_PB_CX (9.60 + RM_HX_GROW)
+#define RM_PB_X0 9.60          /* where it stands on the desk as designed */
+#define RM_PB_CX (RM_PB_X0 + RM_HX_GROW)
 #define RM_PB_HX 1.90
 #define RM_PB_HZ 0.80
 #define RM_PB_PLINTH 0.34     /* the foot it stands on */
@@ -2238,7 +2453,11 @@ static hit3 map_post(vec3 p)
 
 /* Eight box files standing in one row across both bays, four either side of
  * the centre stile. One row of eight reads as a set of eight things you can
- * take down; two stacked groups of four read as a filing system. */
+ * take down; two stacked groups of four read as a filing system. At the
+ * left end of the row a ninth, slimmer -- as thick as the book at the
+ * other end -- in mustard buckram: the favourites (DESK_SHELF_FAV, owner
+ * 2026-11-10). It leans as the first of the eight does, against it. The
+ * table is by place in the row; shelf_row_thing says which thing that is. */
 struct shelf_binder {
 	double x;        /* centre of the spine */
 	double hw;       /* half the spine width */
@@ -2248,7 +2467,9 @@ struct shelf_binder {
 	int mid;
 };
 
-static const struct shelf_binder SHELF_BINDERS[DESK_SHELF_COUNT] = {
+#define SHELF_ROW (DESK_SHELF_COUNT + 1)
+
+static const struct shelf_binder SHELF_BINDERS[SHELF_ROW] = {
 	{ -13.20, 1.65, 9.40, -0.055, 6.10, MID_BINDER_A },
 	{  -9.60, 1.65, 9.05,  0.000, 5.90, MID_BINDER_B },
 	{  -6.00, 1.65, 9.55,  0.000, 6.20, MID_BINDER_A },
@@ -2257,7 +2478,21 @@ static const struct shelf_binder SHELF_BINDERS[DESK_SHELF_COUNT] = {
 	{   6.00, 1.65, 9.10,  0.000, 5.95, MID_BINDER_B },
 	{   9.60, 1.65, 9.50,  0.000, 6.20, MID_BINDER_A },
 	{  13.20, 1.65, 9.25,  0.000, 6.00, MID_BINDER_B },
+	/* its side against the first's, as the book's is against the last's */
+	{ -16.07, 1.10, 9.30, -0.055, 6.05, MID_BINDER_FAV },
 };
+
+/* the thing on the shelf at place r in the row, and back */
+static int shelf_row_thing(int r)
+{
+	return r < DESK_SHELF_COUNT ? r : DESK_SHELF_FAV;
+}
+
+static const struct shelf_binder *shelf_binder_of(int thing)
+{
+	return thing >= 0 && thing < DESK_SHELF_COUNT ? &SHELF_BINDERS[thing]
+		: thing == DESK_SHELF_FAV ? &SHELF_BINDERS[DESK_SHELF_COUNT] : NULL;
+}
 
 #define RM_BN_DEPTH 6.40
 #define RM_BN_ZF (RM_SH_ZF - 0.55)               /* the spine, facing out */
@@ -2473,7 +2708,7 @@ static hit3 map_shelf(vec3 p)
 			v3(0.26, 0.20, 0.55), 0.06), MID_CC_BRASS });
 	}
 
-	for (int i = 0; i < DESK_SHELF_COUNT; i++) {
+	for (int i = 0; i < SHELF_ROW; i++) {
 		vec3 c, e;
 		binder_bound(i, &c, &e);
 		double db = sd_box(vsub(p, c), e);
@@ -2535,9 +2770,12 @@ static hit3 map_room(vec3 p)
 			h = hmin3(h, map_shelf(p));
 		}
 		/* The console and the post box are part of the desk, so they are
-		 * in every view of it. */
-		h = hmin3(h, map_console(p));
-		h = hmin3(h, map_post(p));
+		 * in every view of it -- in the desk's own sheet as pictures laid
+		 * over it (room_cases_paint), shadows and all. */
+		if (g_room_layer != 1) {
+			h = hmin3(h, map_console(p));
+			h = hmin3(h, map_post(p));
+		}
 	}
 
 	/* the top board, bullnosed along the front */
@@ -2775,11 +3013,33 @@ struct mtl {
 	double edge;       /* how hard the convex edges have been rubbed, 1 = as built */
 };
 
-/* Walnut, in three dimensions. Rings are the distance from a pith running
+/* A timber: its colours, and how its grain is made. Walnut is the room's;
+ * the desk may be of another (desk_set_wood), and the bookcase and the
+ * console stay walnut, being other furniture. */
+struct wood {
+	vec3 light, dark;    /* earlywood and latewood */
+	double tone[4];      /* how each goes with the board: light's least and span, dark's */
+	vec3 fleck;          /* added where a medullary ray is cut */
+	double fleck_w;      /* rays to the unit across the grain: walnut's are fine */
+	double fleck_p;      /* and how few of them show: the higher, the fewer */
+	vec3 sap;            /* the odd streak of sapwood */
+	double pore;         /* how dark the open pores are */
+	double rate;         /* rings to the unit near the pith */
+	double late;         /* how narrow the latewood band is */
+	vec3 faded;          /* what the sun leaves of it */
+	double dust;         /* how much the dust that settles on it shows: on black, less */
+};
+
+#define WOOD_WALNUT_INIT { { 0.234, 0.114, 0.049 }, { 0.052, 0.021, 0.009 }, \
+	{ 0.80, 0.44, 0.82, 0.38 }, { 0.14, 0.11, 0.07 }, 46.0, 7.0, { 0.265, 0.190, 0.124 }, 0.30, \
+	7.2, 2.7, { 0.208, 0.156, 0.112 }, 1.0 }
+static const struct wood WOOD_WALNUT = WOOD_WALNUT_INIT;
+
+/* Timber, in three dimensions. Rings are the distance from a pith running
  * down the length of the board, so the figure opens into cathedrals where
  * the saw cut across the growth and closes into stripes where it did not --
  * which is the thing that separates real timber from a brown gradient. */
-static void walnut_at(vec3 q, double u, double v, struct mtl *m, double plank,
+static void timber_at(const struct wood *wd, vec3 q, double u, double v, struct mtl *m, double plank,
 	double use)
 {
 	double board = plank > 0.0 ? floor(u / plank) : 0.0;
@@ -2796,13 +3056,13 @@ static void walnut_at(vec3 q, double u, double v, struct mtl *m, double plank,
 	 * not, so the spacing swells and tightens as you go out from the pith,
 	 * and the line of each ring wanders along the length of the board. */
 	double season = room_fbm2(r * 0.52 + board * 5.3, 2.7) - 0.5;
-	double rate = (7.2 + jitter * 2.4) * (1.0 + season * 0.85);
+	double rate = (wd->rate + jitter * 2.4) * (1.0 + season * 0.85);
 	double ring = r * rate
 		+ room_fbm(v * 0.16 + board * 2.1, r * 0.8) * 3.4
 		+ room_fbm2(v * 0.62 + board * 9.1, r * 1.9) * 1.25;
 	/* and latewood is a narrow hard band, not half of a sine */
 	double g = 0.5 + 0.5 * sin(ring * 2.0 * M_PI);
-	g = pow(g, 2.7);
+	g = pow(g, wd->late);
 
 	/* cathedral: where the ring spacing widens the grain flares */
 	double cath = smoothstepf(0.0, plank * 0.18, r);
@@ -2810,19 +3070,19 @@ static void walnut_at(vec3 q, double u, double v, struct mtl *m, double plank,
 
 	/* No two boards came off the same part of the log. */
 	double btone = room_seed((int)board, 4);
-	vec3 light = vmul(v3(0.234, 0.114, 0.049), 0.80 + btone * 0.44);
-	vec3 dark = vmul(v3(0.052, 0.021, 0.009), 0.82 + btone * 0.38);
+	vec3 light = vmul(wd->light, wd->tone[0] + btone * wd->tone[1]);
+	vec3 dark = vmul(wd->dark, wd->tone[2] + btone * wd->tone[3]);
 	m->albedo = vmix(light, dark, clampf(g, 0, 1));
 
 	/* medullary fleck and the odd streak of sapwood */
-	double fleck = pow(room_noise(u * 46.0, v * 7.0), 7.0);
-	m->albedo = vadd(m->albedo, vmul(v3(0.14, 0.11, 0.07), fleck));
+	double fleck = pow(room_noise(u * wd->fleck_w, v * 7.0), wd->fleck_p);
+	m->albedo = vadd(m->albedo, vmul(wd->fleck, fleck));
 	double sap = smoothstepf(0.62, 0.86, room_fbm(u * 0.5 + 31.0, v * 0.11));
-	m->albedo = vmix(m->albedo, v3(0.265, 0.190, 0.124), sap * 0.35);
+	m->albedo = vmix(m->albedo, wd->sap, sap * 0.35);
 
 	/* open pores: short dashes that run with the grain, not with the ring */
 	double pore = pow(room_noise(u * 130.0, v * 6.5), 4.0);
-	m->albedo = vmul(m->albedo, 1.0 - pore * 0.30);
+	m->albedo = vmul(m->albedo, 1.0 - pore * wd->pore);
 
 	if (plank > 0.0) {
 		double seam = fabs(bu - plank * 0.5);
@@ -2838,7 +3098,7 @@ static void walnut_at(vec3 q, double u, double v, struct mtl *m, double plank,
 	m->coat_rough = 0.19 + room_fbm(u * 0.8, v * 0.8) * 0.085;
 	m->bump_freq = 26.0;
 	m->bump_amp = 0.030;
-	m->dust = 1.0;
+	m->dust = wd->dust;
 
 	if (use <= 0.0) {
 		return;
@@ -2852,7 +3112,7 @@ static void walnut_at(vec3 q, double u, double v, struct mtl *m, double plank,
 	 * goes out unevenly, because things stood on it for a while and then
 	 * got moved. */
 	double bleach = room_sun(q) * (0.55 + 0.45 * use);
-	vec3 faded = vmix(m->albedo, v3(0.208, 0.156, 0.112), 0.62);
+	vec3 faded = vmix(m->albedo, wd->faded, 0.62);
 	m->albedo = vmix(m->albedo, faded, bleach * 0.40);
 
 	/* Scratches, lying both ways: things dragged across the boards and
@@ -2894,6 +3154,150 @@ static void walnut_at(vec3 q, double u, double v, struct mtl *m, double plank,
 		* clampf(room_fbm2(q.x * 0.34 + 11.0, q.z * 0.34 + 2.0) * 1.5 - 0.30, 0.0, 1.0);
 	m->albedo = vmix(m->albedo, v3(0.062, 0.050, 0.042), grime * 0.26);
 	m->rough = clampf(m->rough + grime * 0.16, 0.05, 1.0);
+}
+
+static void walnut_at(vec3 q, double u, double v, struct mtl *m, double plank, double use)
+{
+	timber_at(&WOOD_WALNUT, q, u, v, m, plank, use);
+}
+
+/* ---- what the desk is made of (desk_set_wood) ---- */
+
+/* The timbers it may be, as the boards of a desk come: the same lacquer on
+ * each, so that what differs is the wood. (Leather and linoleum lie on it,
+ * as mats: desk_mat_preset.) */
+static const struct wood DESK_WOODS[DESK_WOOD_COUNT] = {
+	[DESK_WOOD_WALNUT] = WOOD_WALNUT_INIT,
+	/* white oak: wide, open rings; coarse pores; the rays cut as flecks */
+	[DESK_WOOD_OAK] = { { 0.50, 0.31, 0.13 }, { 0.25, 0.135, 0.048 }, { 0.84, 0.30, 0.86, 0.28 },
+		{ 0.12, 0.09, 0.05 }, 18.0, 5.0, { 0.56, 0.42, 0.24 }, 0.45, 5.0, 2.0,
+		{ 0.50, 0.38, 0.22 }, 1.0 },
+	/* cherry: fine and close, red, and redder in the sun */
+	[DESK_WOOD_CHERRY] = { { 0.44, 0.15, 0.062 }, { 0.20, 0.052, 0.020 },
+		{ 0.84, 0.32, 0.84, 0.30 }, { 0.07, 0.04, 0.02 }, 40.0, 8.0, { 0.52, 0.32, 0.17 }, 0.12,
+		8.5, 2.4, { 0.40, 0.14, 0.055 }, 0.9 },
+	/* hard maple: pale, its rings hardly there, its pores closed */
+	[DESK_WOOD_MAPLE] = { { 0.74, 0.56, 0.32 }, { 0.58, 0.40, 0.19 }, { 0.88, 0.24, 0.88, 0.22 },
+		{ 0.05, 0.045, 0.03 }, 60.0, 9.0, { 0.78, 0.62, 0.38 }, 0.06, 9.5, 3.4,
+		{ 0.72, 0.58, 0.36 }, 1.0 },
+	/* ebony as furniture is made of it (Macassar): near black, striped through
+	 * with dark brown, the stripes wandering along the board */
+	[DESK_WOOD_EBONY] = { { 0.120, 0.074, 0.042 }, { 0.011, 0.008, 0.006 },
+		{ 0.85, 0.30, 0.85, 0.30 }, { 0.016, 0.012, 0.009 }, 46.0, 7.0, { 0.090, 0.062, 0.040 }, 0.25,
+		2.6, 1.15, { 0.110, 0.080, 0.056 }, 0.30 },
+};
+
+static _Atomic int g_desk_wood = DESK_WOOD_WALNUT, g_desk_stain = DESK_STAIN_NATURAL;
+/* While the faces' pictures are put right for this room (rf_fix), the desk
+ * is as it was made, as it is in them: what is put right is the light, and
+ * the wood is put in afterwards (desk_relight). */
+static _Thread_local bool g_desk_as_made;
+/* What the desk is made of in the room being traced: what was wanted as the
+ * trace began (wood_bake_begin), so that the GPU and the C, and every sheet
+ * of one room, are of one wood whatever is chosen meanwhile -- a desk of
+ * another wood chosen halfway through had the GPU's sheet of one wood
+ * checked against the C's of the other, and the GPU put down for it. */
+static _Atomic int g_wood_bake = DESK_WOOD_WALNUT, g_stain_bake = DESK_STAIN_NATURAL;
+
+static void wood_bake_begin(void)
+{
+	atomic_store(&g_wood_bake, atomic_load(&g_desk_wood));
+	atomic_store(&g_stain_bake, atomic_load(&g_desk_stain));
+}
+
+/* desk_look's number for the room being traced */
+static unsigned bake_look(void)
+{
+	return (unsigned)atomic_load(&g_wood_bake) * 8u + (unsigned)atomic_load(&g_stain_bake);
+}
+
+static const char *const WOOD_NAMES[DESK_WOOD_COUNT] = { "walnut", "oak", "cherry", "maple",
+	"ebony" };
+static const char *const STAIN_NAMES[DESK_STAIN_COUNT] = { "natural", "honey", "brown", "dark",
+	"grey" };
+
+bool desk_wood_parse(const char *s, int *wood)
+{
+	for (int i = 0; s && i < DESK_WOOD_COUNT; i++) {
+		if (!strcasecmp(s, WOOD_NAMES[i])) {
+			*wood = i;
+			return true;
+		}
+	}
+	return false;
+}
+
+bool desk_stain_parse(const char *s, int *stain)
+{
+	for (int i = 0; s && i < DESK_STAIN_COUNT; i++) {
+		if (!strcasecmp(s, STAIN_NAMES[i])) {
+			*stain = i;
+			return true;
+		}
+	}
+	/* (the other spelling) */
+	if (s && !strcasecmp(s, "gray")) {
+		*stain = DESK_STAIN_GREY;
+		return true;
+	}
+	return false;
+}
+
+bool desk_stain_offered(int wood, int stain)
+{
+	if (stain < 0 || stain >= DESK_STAIN_COUNT) {
+		return false;
+	}
+	return wood != DESK_WOOD_EBONY || (stain != DESK_STAIN_BROWN && stain != DESK_STAIN_DARK);
+}
+
+bool desk_set_wood(int wood, int stain)
+{
+	wood = wood < 0 || wood >= DESK_WOOD_COUNT ? DESK_WOOD_WALNUT : wood;
+	stain = desk_stain_offered(wood, stain) ? stain : DESK_STAIN_NATURAL;
+	int was_wood = atomic_exchange(&g_desk_wood, wood);
+	int was_stain = atomic_exchange(&g_desk_stain, stain);
+	return was_wood != wood || was_stain != stain;
+}
+
+/* What the desk is made of, as a number for the room traced of it: 0 for
+ * walnut as it was made, so that a room traced before there was a choice is
+ * still that room. */
+static unsigned desk_look(void)
+{
+	return (unsigned)atomic_load(&g_desk_wood) * 8u + (unsigned)atomic_load(&g_desk_stain);
+}
+
+/* A stain over the wood: through it, the grain as it was. */
+static vec3 stained(vec3 a, int stain)
+{
+	switch (stain) {
+	case DESK_STAIN_HONEY:
+		return vmul3(a, v3(1.16, 0.90, 0.42));
+	case DESK_STAIN_BROWN:
+		return vmul3(a, v3(0.60, 0.48, 0.38));
+	case DESK_STAIN_DARK:
+		return vmul3(a, v3(0.28, 0.23, 0.20));
+	case DESK_STAIN_GREY: {
+		/* a grey wash: the colour drawn out of it, the figure left */
+		double lum = a.x * 0.30 + a.y * 0.59 + a.z * 0.11;
+		return vmix(a, vmul(v3(0.93, 0.96, 1.0), lum * 1.18), 0.72);
+	}
+	default:
+		return a;
+	}
+}
+
+/* The desk's own wood, cut as a part of it is, under its stain. */
+static void desk_wood_at(vec3 q, double u, double v, struct mtl *m, double plank, double use)
+{
+	if (g_desk_as_made) {
+		timber_at(&WOOD_WALNUT, q, u, v, m, plank, use);
+		return;
+	}
+	int wood = atomic_load_explicit(&g_wood_bake, memory_order_relaxed);
+	timber_at(&DESK_WOODS[wood], q, u, v, m, plank, use);
+	m->albedo = stained(m->albedo, atomic_load_explicit(&g_stain_bake, memory_order_relaxed));
 }
 
 /* Somebody has been putting a cup down on this desk for years and not
@@ -3161,7 +3565,7 @@ static void icon_material(int kind, int id, vec3 p, struct mtl *m)
 		/* Inside faces are unfinished: same timber, no polish. */
 		double vert = fabs(w.x) > RM_DR_HX - 1.0;
 		/* never polished, and everything in here slides about */
-		walnut_at(w, vert ? w.z : w.x, vert ? w.y * 3.0 : w.z, m, 0.0, 0.60);
+		desk_wood_at(w, vert ? w.z : w.x, vert ? w.y * 3.0 : w.z, m, 0.0, 0.60);
 		m->coat = 0.0;
 		m->albedo = vmul(m->albedo, 0.78);
 		m->rough = clampf(m->rough + 0.22, 0.2, 1.0);
@@ -3169,16 +3573,16 @@ static void icon_material(int kind, int id, vec3 p, struct mtl *m)
 	}
 	case MID_DRAWER_FACE:
 		/* the one board in the room that gets pulled every day */
-		walnut_at(w, w.x, w.y * 2.6, m, 0.0, 1.10);
+		desk_wood_at(w, w.x, w.y * 2.6, m, 0.0, 1.10);
 		break;
 	case MID_DESK_TOP:
 		/* the top is made of boards running front to back */
-		walnut_at(w, w.x, w.z, m, 5.4, 1.00);
+		desk_wood_at(w, w.x, w.z, m, 5.4, 1.00);
 		desk_stains(w, m);
 		break;
 	case MID_DESK_BODY:
 		/* the ends and the back rail: knees and shoes, not hands */
-		walnut_at(w, w.z, w.y, m, 0.0, 0.50);
+		desk_wood_at(w, w.z, w.y, m, 0.0, 0.50);
 		m->albedo = vmul(m->albedo, 0.72);
 		m->coat *= 0.55;
 		break;
@@ -3357,6 +3761,26 @@ static void icon_material(int kind, int id, vec3 p, struct mtl *m)
 		m->edge = 2.4;
 		break;
 	}
+	case MID_BINDER_FAV: {
+		/* the favourites: mustard buckram, the same cloth as the green but
+		 * newer to the shelf, so the head has gone less far towards grey */
+		double t = room_fbm(w.x * 26.0, w.y * 26.0);
+		double weave = 0.5 + 0.5 * sin(w.x * 120.0) * sin(w.y * 120.0);
+		m->albedo = vmix(v3(0.300, 0.156, 0.022), v3(0.420, 0.220, 0.036), t);
+		m->albedo = vmul(m->albedo, 0.92 + weave * 0.14);
+		double head = smoothstepf(RM_BN_FOOT + 3.6, RM_BN_FOOT + 7.4, w.y);
+		double fade = clampf(head * (0.20 + room_fbm2(w.x * 1.7 + 4.0, w.y * 0.8) * 0.9),
+			0.0, 1.0);
+		m->albedo = vmix(m->albedo, v3(0.300, 0.240, 0.160), fade * 0.30);
+		double sc = scratch_at(w.y, w.x, 0.46, 5.0, 0.010, 27.0) * 0.8;
+		m->albedo = vmix(m->albedo, vmul(m->albedo, 1.30), clampf(sc, 0.0, 1.0) * 0.30);
+		m->rough = 0.82 + fade * 0.10;
+		m->bump_freq = 78.0;
+		m->bump_amp = 0.070;
+		m->dust = 1.0;
+		m->edge = 2.4;
+		break;
+	}
 	case MID_BOOK_LEATHER: {
 		/* Navy morocco: the grain pebbled, polished by the hands that took
 		 * it down, the head gone a little grey where the light falls. */
@@ -3517,13 +3941,15 @@ static void icon_material(int kind, int id, vec3 p, struct mtl *m)
 	case MID_CC_LENS_AMBER:
 	case MID_CC_LENS_GREEN:
 	case MID_CC_LENS_BLUE:
-	case MID_CC_LENS_RED: {
+	case MID_CC_LENS_RED:
+	case MID_CC_LENS_WHITE: {
 		/* Cast glass lenses. They are lit by the compositor over the top,
 		 * so the bake only has to make them read as glass with a filament
-		 * sitting cold behind them. */
+		 * sitting cold behind them. The white one is opal: milk glass. */
 		vec3 tint = id == MID_CC_LENS_AMBER ? v3(0.620, 0.310, 0.060)
 			: id == MID_CC_LENS_GREEN ? v3(0.110, 0.420, 0.160)
 			: id == MID_CC_LENS_RED ? v3(0.640, 0.098, 0.062)
+			: id == MID_CC_LENS_WHITE ? v3(0.720, 0.700, 0.640)
 			: v3(0.110, 0.230, 0.560);
 		m->albedo = vmul(tint, 0.34);
 		m->rough = 0.075;
@@ -3653,7 +4079,7 @@ static vec3 shade_surface(vec3 p, vec3 n_geo, vec3 rd, int kind, int id,
 
 	double ao = (depth > 0) ? 0.85 : scene_ao(p, n, kind);
 	double sh = 1.0;
-	if (nol > 0.0) {
+	if (nol > 0.0 && !g_rf_unshadowed) {
 		double bias = (kind == ROOM_KIND || kind == DRAWER_KIND) ? 0.040 : 0.010;
 		sh = (depth > 0) ? 1.0 : scene_shadow(vadd(p, vmul(n_geo, bias)), l, kind, kl.ang);
 	}
@@ -3750,25 +4176,34 @@ static bool gfx_shadows(void)
  * traces it), samples a side of each pixel (Ultra's three only up to 1600
  * wide: room_build_now), the films of the moves at 1/n of its size (0: none
  * -- the view is cut to), and the glow round what is brightest. The letter
- * is the level's, in the cache's file names. */
+ * is the level's, in the cache's file names. Last, how many of the samples
+ * of a pixel at an edge are traced where the room is laid from faces and
+ * no face covers them (0: all; rf_sparse). */
 struct room_q {
 	int cap, ss, film_div;
 	bool glow;
 	char tag;
+	int edge_traced;
 };
 static const struct room_q ROOM_Q[DESK_GFX_COUNT] = {
 	/* 2D: a sample a pixel, softened (room_bake) -- a quarter of the work of
 	 * four, which on a machine drawing on its CPU is the first start in a
-	 * quarter of the time, and looks the same stretched to the screen */
-	[DESK_GFX_2D] = { 640, 1, 0, false, 'f' },
-	[DESK_GFX_LOW] = { 960, 2, 6, true, 'l' },
-	[DESK_GFX_MEDIUM] = { 1280, 2, 4, true, 'm' },
-	[DESK_GFX_HIGH] = { 0, 2, 4, true, 'h' },
-	[DESK_GFX_ULTRA] = { -1, 3, 2, true, 'u' },
+	 * quarter of the time, and looks the same stretched to the screen. The
+	 * room itself as wide as the screen, though, and laid from its faces
+	 * not softened (room_level_cap) */
+	[DESK_GFX_2D] = { 640, 1, 0, false, 'f', 0 },
+	/* the room as wide as the screen at these two as well, where it is
+	 * laid from faces; these widths are where it is traced. Low traces
+	 * two of an edge's four, which on a machine of 2010 has the lamp up
+	 * about when it was at 960 */
+	[DESK_GFX_LOW] = { 960, 2, 6, true, 'l', 2 },
+	[DESK_GFX_MEDIUM] = { 1280, 2, 4, true, 'm', 0 },
+	[DESK_GFX_HIGH] = { 0, 2, 4, true, 'h', 0 },
+	[DESK_GFX_ULTRA] = { -1, 3, 2, true, 'u', 0 },
 };
 /* the level of the bake under way, from its start to its end (bakes are
  * one at a time, under g_render_lock) */
-static struct room_q g_bq = { 0, 2, 4, true, 'h' };
+static struct room_q g_bq = { 0, 2, 4, true, 'h', 0 };
 #define ICON_SS (g_bq.ss)
 #define ROOM_TILT_DIV (g_bq.film_div)
 /* How wide a room is traced. The trace costs in proportion to its area, and
@@ -3787,7 +4222,7 @@ static struct room_q g_bq = { 0, 2, 4, true, 'h' };
  * supersamples covering a pixel, and it indexed a five-entry array with
  * whatever the id buffer held -- which was fine only for as long as nothing
  * but the five drawer objects ever claimed one. */
-#define ROOM_ID_MAX 16
+#define ROOM_ID_MAX 24
 
 /* Rotated grid: four samples that never share an x or a y, which resolves
  * near horizontal and near vertical silhouettes far better than a 2x2 box. */
@@ -3863,11 +4298,17 @@ static void blur_pass_rect(float *buf, float *tmp, int w, int h, int stride)
  * the screen while working on it, and made every update anybody installed
  * trace the whole room again at their next login: on a machine with no GPU
  * to trace it, minutes of a dark room, after every update. */
-#define ROOM_LOOK 2u
+#define ROOM_LOOK 7u   /* 7: the volume knob lower (2026-11-11); 6: the key upright under its lock and the lid wider (2026-11-11); 5: the
+                        * console in four, its lid the quarter's height, and its sheet with the lid
+                        * up (2026-11-10) */
+
+static unsigned bake_look(void);
 
 static unsigned icon_build_tag(void)
 {
-	return DESK_ROOM_GLSL_KEY ^ (ROOM_LOOK * 2654435761u);
+	/* (what the desk being traced is made of: walnut as made is 0, the tag it
+	 * always had) */
+	return DESK_ROOM_GLSL_KEY ^ (ROOM_LOOK * 2654435761u) ^ (bake_look() * 0x9e3779b1u);
 }
 
 /* whether this machine's GPU traces the room right: asked again when the
@@ -4044,6 +4485,10 @@ static void shelf_set_width(const struct room_cam *c)
 	 * squarer screen its sides go past the frame rather than the book
 	 * going */
 	g_rm_sh_hx = fmax(g_rm_sh_hx, RM_BK_X0 + 2.0 * RM_BK_HW + RM_BK_GAP + RM_SH_SIDE);
+	/* nor for the favourites at the other end, leaning out at the head */
+	const struct shelf_binder *fv = &SHELF_BINDERS[DESK_SHELF_COUNT];
+	g_rm_sh_hx = fmax(g_rm_sh_hx, -fv->x + fv->hw + fabs(sin(fv->lean)) * fv->h + RM_BK_GAP
+		+ RM_SH_SIDE);
 }
 
 static void room_cam_shelf(double aspect, struct room_cam *c)
@@ -4179,6 +4624,48 @@ static int room_project(const struct room_cam *c, vec3 p, double *u, double *v)
 	return 1;
 }
 
+/* Where a ray from the camera through (u, v) of its frame meets the lid up on its hinge
+ * (g_cc_lid 2), in rf_hit's measure of the ray, or INFINITY. The lid up is in no face's
+ * picture, so the console's sheet with it up, laid from the faces, traces what is behind it. */
+static double cc_lid_ray(const struct room_cam *c, double u, double v)
+{
+	if (g_cc_lid < 1.5) {
+		return INFINITY;
+	}
+	struct cc_face panel, tower;
+	cc_faces(&panel, &tower);
+	vec3 rd = vadd(c->ww, vadd(vmul(c->uu, (u - 0.5) * c->fov_x),
+		vmul(c->vv, (0.5 - v) * c->fov_y)));
+	/* into the machine's own frame (the slide), the panel's, and back about the hinge onto
+	 * the lid as it lies shut (map_console) */
+	vec3 o = cc_to_face(&panel, vsub(c->eye, v3(0.0, 0.0, cc_dz(g_cc_out, g_rm_aspect))));
+	vec3 d = v3(vdot(rd, panel.ax), vdot(rd, panel.an), vdot(rd, panel.as));
+	double hn = (CC_LID_N0 + CC_LID_N1) * 0.5;
+	double lc = cos(CC_LID_SWING), lsn = sin(CC_LID_SWING);
+	double ods = o.z - CC_LID_HINGE_S, odn = o.y - hn;
+	const double lo[3] = { o.x, hn + ods * lsn + odn * lc, CC_LID_HINGE_S + ods * lc - odn * lsn };
+	const double ld[3] = { d.x, d.z * lsn + d.y * lc, d.z * lc - d.y * lsn };
+	/* its box, and its rounded edges and the lip */
+	const double b0[3] = { CC_LID_U0 - 0.06, CC_LID_N0 - 0.06, CC_LID_S0 - 0.06 };
+	const double b1[3] = { CC_LID_U1 + 0.06, CC_LID_N1 + 0.08, CC_LID_S1 + 0.06 };
+	double t0 = 0.0, t1 = INFINITY;
+	for (int k = 0; k < 3; k++) {
+		if (fabs(ld[k]) < 1e-12) {
+			if (lo[k] < b0[k] || lo[k] > b1[k]) {
+				return INFINITY;
+			}
+			continue;
+		}
+		double ta = (b0[k] - lo[k]) / ld[k], tb = (b1[k] - lo[k]) / ld[k];
+		t0 = fmax(t0, fmin(ta, tb));
+		t1 = fmin(t1, fmax(ta, tb));
+		if (t0 > t1) {
+			return INFINITY;
+		}
+	}
+	return t0;
+}
+
 struct room_render {
 	int w, h;
 	cairo_surface_t *background;
@@ -4192,6 +4679,11 @@ struct room_render {
 	double felt_mid;              /* how lit the drawer's felt is mid-row (0: not yet looked) */
 	unsigned char *shelf_ids;     /* 0 scenery, i+1 binder i */
 	unsigned char *console_ids;   /* 0 case, i+1 control i */
+	/* the console's view again with no lid over the guarded set, for what is under it as it
+	 * swings; traced after the views, before the films, and like them put in under
+	 * g_room_lock (room_bare_get) */
+	cairo_surface_t *console_bare;
+	unsigned char *console_bare_ids;
 	unsigned char *post_ids;      /* 0 box, i+1 letter i */
 	struct room_cam cam;
 	struct room_cam shelf_cam;
@@ -4239,6 +4731,7 @@ struct room_ctx {
 	struct room_cam cam;
 	int next_row;
 	pthread_mutex_t lock;
+	const unsigned char *need;   /* the samples to trace, or NULL: all */
 };
 
 /* Which object a surface belongs to, for the hover mask and for picking.
@@ -4258,18 +4751,27 @@ static int room_owner(vec3 p, int id)
 		if (id == MID_BOOK_LEATHER || id == MID_BOOK_GILT) {
 			return DESK_SHELF_COUNT + 1;
 		}
-		if (id != MID_BINDER_A && id != MID_BINDER_B && id != MID_BINDER_LABEL
-			&& id != MID_FOLDER_PAPER) {
+		if (id != MID_BINDER_A && id != MID_BINDER_B && id != MID_BINDER_FAV
+			&& id != MID_BINDER_LABEL && id != MID_FOLDER_PAPER) {
 			return 0;
 		}
-		for (int i = 0; i < DESK_SHELF_COUNT; i++) {
+		/* the bounds overlap where one leans towards the next (the
+		 * favourites and the first of the eight): the nearest of those
+		 * the point is in */
+		int best = -1;
+		double bd = 1e9;
+		for (int i = 0; i < SHELF_ROW; i++) {
 			vec3 c, e;
 			binder_bound(i, &c, &e);
 			if (sd_box(vsub(p, c), e) < 0.0) {
-				return i + 1;
+				double d = shelf_binder_map(p, i).d;
+				if (d < bd) {
+					bd = d;
+					best = i;
+				}
 			}
 		}
-		return 0;
+		return best < 0 ? 0 : shelf_row_thing(best) + 1;
 	}
 	if (id <= 0 || id > MID_GEAR) {
 		return 0;
@@ -4324,7 +4826,11 @@ static void room_row(struct room_ctx *ctx, int y)
 {
 	float *row = ctx->hi + (size_t)y * ctx->hw * 4;
 	unsigned char *idrow = ctx->idhi + (size_t)y * ctx->hw;
+	const unsigned char *need = ctx->need ? ctx->need + (size_t)y * ctx->hw : NULL;
 	for (int x = 0; x < ctx->hw; x++) {
+		if (need && !need[x]) {
+			continue;
+		}
 		idrow[x] = (unsigned char)room_sample(&ctx->cam, ctx->layer,
 			ctx->hw, ctx->hh, x, y, row + x * 4);
 	}
@@ -4350,6 +4856,29 @@ static bool room_stopping(void)
 static void thread_to_the_back(void)
 {
 	(void)setpriority(PRIO_PROCESS, 0, 19);
+}
+
+/* How many threads a job made ahead is shared out to. Before the lamp is up, all the machine has
+ * (up to eight): somebody is waiting for the room. After, half of them: what is made then -- the
+ * other views, the films of the moves, the door -- nobody is waiting for, and every core going
+ * flat out for the next twenty seconds made the desk itself slow to the hand on a Surface Pro,
+ * a machine with no fan that slows itself down as it warms (2026-11-12, the owner: CPU使用率が高い
+ * （起動直後？）). desk_bake_calm says which. */
+static _Atomic int g_bake_calm;
+
+void desk_bake_calm(bool calm)
+{
+	atomic_store(&g_bake_calm, calm ? 1 : 0);
+}
+
+static int bake_threads(void)
+{
+	long nproc = sysconf(_SC_NPROCESSORS_ONLN);
+	int n = nproc > 8 ? 8 : nproc > 0 ? (int)nproc : 1;
+	if (atomic_load(&g_bake_calm) && n > 1) {
+		n = (n + 1) / 2;
+	}
+	return n;
 }
 
 static void *room_worker(void *arg)
@@ -4380,11 +4909,7 @@ static void room_trace_cpu(struct room_ctx *ctx)
 {
 	ctx->next_row = 0;
 	pthread_mutex_init(&ctx->lock, NULL);
-	long nproc = sysconf(_SC_NPROCESSORS_ONLN);
-	int nthreads = (int)(nproc > 0 ? nproc : 1);
-	if (nthreads > 8) {
-		nthreads = 8;
-	}
+	int nthreads = bake_threads();
 	pthread_t th[8];
 	int started = 0;
 	for (int i = 0; i + 1 < nthreads; i++) {
@@ -4579,7 +5104,8 @@ static void gb_varr(struct glsl_buf *b, const char *name, const vec3 *v, int n)
 
 /* Every name room.glsl uses and this file defines. */
 #define ROOM_GLSL_INTS(X) \
-	X(DESK_DOCK_COUNT) X(DESK_GADGET_COUNT) X(DESK_SHELF_COUNT) \
+	X(DESK_DOCK_COUNT) X(DESK_GADGET_COUNT) X(DESK_GADGET_CLOCK) X(DESK_SHELF_COUNT) \
+	X(DESK_SHELF_FAV) X(SHELF_ROW) \
 	X(DESK_ICON_TERM) X(DESK_ICON_GLOBE) X(DESK_ICON_FOLDER) \
 	X(DESK_ICON_NOTES) X(DESK_ICON_GEAR) X(ROOM_SEED_ROW) \
 	X(MID_CRT_BODY) X(MID_CRT_BEZEL) X(MID_CRT_SCREEN) X(MID_CRT_KEYBED) \
@@ -4595,9 +5121,11 @@ static void gb_varr(struct glsl_buf *b, const char *name, const vec3 *v, int n)
 	X(MID_CC_GLASS) X(MID_CC_CHEEK) X(MID_CC_LENS_AMBER) \
 	X(MID_CC_LENS_GREEN) X(MID_CC_LENS_BLUE) X(MID_CC_LENS_RED) \
 	X(MID_POST_RED) X(MID_POST_DARK) X(MID_BOOK_LEATHER) X(MID_BOOK_GILT) \
+	X(MID_BINDER_FAV) X(MID_CC_LENS_WHITE) \
 	X(CC_WIFI) X(CC_BT) X(CC_VOL) X(CC_BRIGHT) X(CC_CRT) X(CC_BATT) \
 	X(CC_NET) X(CC_PW_OFF) X(CC_PW_BOOT) X(CC_PW_OUT) X(CC_PW_KEY) X(CC_SCREEN) X(CC_LOCK) \
-	X(CC_COUNT) \
+	X(CC_SLEEP) X(CC_PW_SUSPEND) X(CC_AIR) X(CC_SAVE) X(CC_NIGHT) X(CC_DISPLAY) X(CC_LID) \
+	X(CC_COUNT) X(CC_ON_FACE) X(CC_ON_LID) X(CC_ON_UNDER) \
 	X(GADGET_TENT)
 
 #define ROOM_GLSL_FLOATS(X) \
@@ -4612,9 +5140,11 @@ static void gb_varr(struct glsl_buf *b, const char *name, const vec3 *v, int n)
 	X(RM_CC_CHEEK) X(RM_CC_PLINTH) X(RM_CC_LEDGE) \
 	X(RM_CC_PLINTH_Z0) \
 	X(RM_CC_PY0) X(RM_CC_PZ0) X(RM_CC_PY1) X(RM_CC_PZ1) X(RM_CC_TY0) \
-	X(RM_CC_TZ0) X(RM_CC_TY1) X(RM_CC_TZ1) X(RM_CC_ZB) X(RM_CC_SKIN) \
-	X(CC_PW_R) X(CC_PW_RING) X(CC_PW_LOCK_U) X(CC_PW_G_U) \
-	X(CC_PW_G_S0) X(CC_PW_G_S1) X(CC_PW_G_N) \
+	X(RM_CC_TZ0) X(RM_CC_TY1) X(RM_CC_TZ1) X(RM_CC_ZB) X(RM_CC_BODY_Z0) X(RM_CC_SKIN) \
+	X(CC_PW_R) X(CC_PW_RING) X(CC_PW_DOME) X(CC_LB_R) X(CC_LB_RING) X(CC_LB_DOME) \
+	X(CC_PW_LOCK_U) X(CC_PW_KEY_S) \
+	X(CC_PW_LAMP_S) X(CC_LID_U0) X(CC_LID_U1) X(CC_LID_S0) X(CC_LID_S1) X(CC_LID_N0) \
+	X(CC_LID_N1) X(CC_LID_HINGE_S) X(CC_PART_U) \
 	X(RM_PB_HX) X(RM_PB_HZ) X(RM_PB_PLINTH) \
 	X(RM_PB_SHOULDER) X(RM_PB_CAP_T) X(RM_PB_TILT) X(RM_PB_SLOT_HU) \
 	X(RM_PB_SLOT_HS) X(RM_PB_SLOT_S) X(RM_PB_TOP_Y) X(RM_PB_TOP_DZ) \
@@ -4714,23 +5244,35 @@ static void room_glsl_build(struct glsl_buf *b, int pass)
 	}
 	{
 		enum { N = CC_COUNT };
-		int tower[N];
+		int tower[N], on[N];
 		double u[N], sv[N], hu[N], hs[N];
 		for (int i = 0; i < N; i++) {
 			tower[i] = CC[i].tower;
+			on[i] = CC[i].on;
 			u[i] = CC[i].u;
 			sv[i] = CC[i].s;
 			hu[i] = CC[i].hu;
 			hs[i] = CC[i].hs;
 		}
 		gb_iarr(b, "CC_TOWER", tower, N);
+		gb_iarr(b, "CC_ON", on, N);
+		int mid[N];
+		for (int i = 0; i < N; i++) {
+			mid[i] = cc_btn_mid(i);
+		}
+		gb_iarr(b, "CC_BTN", mid, N);
+		int twin[N];
+		for (int i = 0; i < N; i++) {
+			twin[i] = cc_twin(i);
+		}
+		gb_iarr(b, "CC_TWIN", twin, N);
 		gb_farr(b, "CC_U", u, N);
 		gb_farr(b, "CC_S", sv, N);
 		gb_farr(b, "CC_HU", hu, N);
 		gb_farr(b, "CC_HS", hs, N);
 	}
 	{
-		enum { N = DESK_SHELF_COUNT };
+		enum { N = SHELF_ROW };
 		double x[N], hw[N], h[N], lean[N], label_y[N];
 		int mid[N];
 		for (int i = 0; i < N; i++) {
@@ -5188,7 +5730,8 @@ static void room_gpu_uniforms_one(struct desk_gpu *g, const struct room_ctx *ctx
 		const char *name;
 		double v;
 	} f[] = {
-		{ "u_open", g_room_open }, { "u_cc_out", g_cc_out }, { "u_pb_open", g_pb_open },
+		{ "u_open", g_room_open }, { "u_cc_out", g_cc_out }, { "u_cc_lid", g_cc_lid },
+		{ "u_pb_open", g_pb_open },
 		{ "u_zf", g_rm_zf }, { "u_aspect", g_rm_aspect }, { "u_sh_hx", g_rm_sh_hx },
 		{ "u_hx", g_rm_hx },
 	};
@@ -5196,6 +5739,31 @@ static void room_gpu_uniforms_one(struct desk_gpu *g, const struct room_ctx *ctx
 		float v = (float)f[i].v;
 		desk_gpu_set(g, f[i].name, &v, 1);
 	}
+	/* the Control Panel's lid, as this sheet has it: shut, or up on its hinge (map_console) */
+	float rot[2] = { (float)(g_cc_lid > 1.5 ? cos(CC_LID_SWING) : 1.0),
+		(float)(g_cc_lid > 1.5 ? sin(CC_LID_SWING) : 0.0) };
+	desk_gpu_set(g, "u_cc_rot", rot, 2);
+	/* what the desk is made of, as the C has it (desk_wood_at) */
+	int wood = atomic_load(&g_wood_bake), stain = atomic_load(&g_stain_bake);
+	const struct wood *wd = &DESK_WOODS[wood];
+	const struct {
+		const char *name;
+		vec3 v;
+	} c3[] = {
+		{ "u_wood_light", wd->light }, { "u_wood_dark", wd->dark }, { "u_wood_fleck", wd->fleck },
+		{ "u_wood_sap", wd->sap }, { "u_wood_faded", wd->faded },
+	};
+	for (size_t i = 0; i < sizeof c3 / sizeof c3[0]; i++) {
+		float v[3] = { (float)c3[i].v.x, (float)c3[i].v.y, (float)c3[i].v.z };
+		desk_gpu_set(g, c3[i].name, v, 3);
+	}
+	float tone[4] = { (float)wd->tone[0], (float)wd->tone[1], (float)wd->tone[2], (float)wd->tone[3] };
+	desk_gpu_set(g, "u_wood_tone", tone, 4);
+	float grain[4] = { (float)wd->fleck_w, (float)wd->fleck_p, (float)wd->pore, (float)wd->rate };
+	desk_gpu_set(g, "u_wood_grain", grain, 4);
+	float late[2] = { (float)wd->late, (float)wd->dust };
+	desk_gpu_set(g, "u_wood_late", late, 2);
+	desk_gpu_set_int(g, "u_stain", stain);
 }
 
 static void room_gpu_uniforms(struct desk_gpu *g, const struct room_ctx *ctx)
@@ -5415,6 +5983,2273 @@ static bool room_trace_gpu(struct room_ctx *ctx)
 }
 #endif
 
+/* ---- the room laid from pictures of its faces ----------------------
+ *
+ * The views and the films of the moves are traced, and on a machine with
+ * no GPU that is minutes: the bookcase took seventeen at Low on one of
+ * 2010. Most of what is in them is flat -- the boards and the back of the
+ * bookcase, its sides, the binders' spines, the wall, the top of the desk
+ * -- and a flat face can be traced once, as a picture of itself, and laid
+ * through any camera after that, a sample at a time, for the price of a
+ * plane and a lookup. The pictures are made ahead (desk-gputest
+ * --faces-bake) and ship with the desk, a pack a view; the room's own
+ * lamp, which moves with the width of the desk, is taken out of them and
+ * put back for the room of this screen (rf_light). Whatever no face covers
+ * -- the things on the desk and the board, the console, the post box --
+ * is traced, as it always was. */
+
+#define RF_LEVELS 10
+enum { RF_REST, RF_LAMP, RF_REST0, RF_LAMP0, RF_PICS };
+#define RF_MAX 256
+#define RF_TPU_MAX 72.0   /* texels to the unit, at most */
+#define RF_DESK_SPLIT (-2.0)   /* where the desk's top is cut in two, in z */
+
+struct rface {
+	vec3 o, u, v, n;   /* a corner, the edges from it, and outward */
+	double out, in;    /* how far off its plane its surface may stand */
+	int tw[RF_LEVELS], th[RF_LEVELS], lv;
+	/* Its pictures (RF_REST ...), a level each, 8 bits a channel: a, how
+	 * much of the texel the face is there in, and r g b to a 2.2 power of
+	 * linear light times scale, not multiplied by a. Lit by everything but
+	 * the room's lamp; what the lamp adds, at LIT_KEY_IRRADIANCE and in
+	 * nothing's shadow; and the same two as seen from where the move
+	 * starts, for a face seen from there too -- the sheen on it is not
+	 * where it is from the end. */
+	uint32_t *pic[RF_PICS][RF_LEVELS];
+	float scale[RF_PICS];
+	/* the finest level each picture has: the lamp's half the size of the
+	 * rest, which carries the grain; the start of the move's a quarter,
+	 * being seen only in the move's film */
+	int base[RF_PICS];
+	double tpu_max;          /* texels to the unit, at most */
+	double fine;             /* and as many more as the cameras need, times */
+	double lfine;            /* its light worked out as finely as the room's
+	                          * is, times (rf_light, rf_fix) */
+	bool two;                /* pictured from the start of the move too */
+	/* A face whose surroundings change with the shape of the room -- the
+	 * wall a narrower case leaves bare, the desk the console and the post
+	 * box stand on at other places, the lamp's sheen on it seen from
+	 * elsewhere -- is put right for this room: on fw by fh points, what
+	 * this room's light makes of it over what its pictures and the lamp
+	 * worked out for it do, smoothly, from the end of the move and from
+	 * its start. */
+	bool live;
+	bool relief;             /* things stand up off it (g_rf_relief) */
+	double tall;             /* and what stands further off it is traced */
+	/* and how far, at each texel of the first level, between hmin and
+	 * hmax off the face: what a ray is followed down through as it is laid
+	 * (rf_hit_relief), so that a raised plate is seen where it stands */
+	float *height;
+	float hmin, hmax;
+	int group;               /* what moves it (RF_G_...), and where that had */
+	double pose;             /* it when it was put where it is */
+	double turn;             /* how far it is turned about x through at: the
+	                          * post box's door, swung on its hinge */
+	bool cut;                /* nothing of it past the desk's far edge (the
+	                          * console stowed, the back of the post box) */
+	bool own_ok;             /* its picture's owners are this view's */
+	float *fix[2];
+	int fw, fh;
+	vec3 lamp;               /* where the room's lamp hung when it was pictured */
+	unsigned char *own;      /* whose each texel is, at the first level */
+	const char *what;
+	bool trace;              /* no picture: what is behind it is traced */
+	bool clear;              /* nor anything: what is behind it is not in
+	                          * the sheet (the desk's top over the back of
+	                          * the drawer, in the drawer's) */
+	vec3 at;                 /* where the thing it is part of stands */
+	int nth;                 /* in a pack: which face of its name it is */
+	/* the room's lamp on it (rf_lamp), on lw by lh points from corner to
+	 * corner of it: worked out once for the room of this shape */
+	float *light;
+	int lw, lh;
+	/* how many of those points each is from one at a place a view or a
+	 * move to it shows (rf_mark_views): only the near are worked out in
+	 * full. NULL, all of them. */
+	unsigned char *seen;
+	/* and the lamp and the putting right as they are with what moves all
+	 * the way in, where the room's light changes as it comes out (the
+	 * console's shadow on the desk): mixed by how far out it is */
+	float *light_in, *fix_in[2];
+	const struct rface *src; /* the picture is that face's, src->at - at off */
+};
+
+struct rface_set {
+	struct rface f[RF_MAX];
+	int n;
+	int moves;         /* the faces have their light with what moves in too:
+	                    * the layer whose thing moves (4 the console, 5 the
+	                    * post box's door), or 0 */
+	vec3 eye0, eye1;   /* where the move starts and ends: the pictures with
+	                    * the sheen as seen from each */
+	char names[RF_MAX][16];   /* a pack's faces' names, which what points at */
+};
+
+enum { RF_PX = 1, RF_NX = 2, RF_PY = 4, RF_NY = 8, RF_PZ = 16, RF_NZ = 32 };
+
+/* where the thing the faces being added are part of stands: what moves
+ * with it when the room changes shape; how finely they need picturing at
+ * most; and whether from the start of the move too */
+static vec3 g_rf_at;
+static double g_rf_tpu = RF_TPU_MAX;
+/* how much finer than the cameras need the faces being added are pictured:
+ * the wire round a tent's ridge is two texels thick at the cameras' own */
+static double g_rf_fine = 1.0;
+/* and their light, how much more coarsely than the room's (the floor round
+ * the desk, a long way down, seen only past the drawer) */
+static double g_rf_lfine = 1.0;
+static bool g_rf_two, g_rf_live, g_rf_cut, g_rf_clear;
+/* whether things stand up off the faces being added: what stands more
+ * than RF_TALL off one is traced, and round it as far as it could be seen
+ * across the face from the side (RF_TALL_REACH times its height) */
+static bool g_rf_relief;
+/* what moves the faces being added: the console's slide, the post box's
+ * door */
+enum { RF_G_NONE, RF_G_CONSOLE, RF_G_DOOR };
+#define RF_DOOR_SWING 1.78   /* as map_post swings it, all the way open */
+static int g_rf_group;
+#define RF_TALL 0.18
+#define RF_TALL_REACH 1.30   /* times how tall it is */
+/* how tall, for the faces being added: the console's controls stand off
+ * its faces up to half a unit, and are laid -- what of them is seen from
+ * the side is met as a wall (RF_WALL) and traced */
+static double g_rf_tall = RF_TALL;
+/* A height field met where it is steeper than this is met at a wall of it
+ * (rf_hit_relief): what another face shows no further than RF_WALL_GAP
+ * behind it is what is there, and if none does, it is traced. */
+#define RF_WALL 1.5
+#define RF_WALL_GAP 0.10
+#define RF_OWN_TALL 255
+/* the finest level of the lamp's picture: half the size of the rest's,
+ * but for a face whose grain the lamp is what shows (the desk's top) */
+static int g_rf_lamp_base = 1;
+
+static void rf_add(struct rface_set *s, const char *what, vec3 o, vec3 u, vec3 v,
+	double out, double in)
+{
+	if (s->n >= RF_MAX) {
+		return;
+	}
+	struct rface *f = &s->f[s->n++];
+	memset(f, 0, sizeof *f);
+	f->o = o;
+	f->u = u;
+	f->v = v;
+	f->n = vnorm(vcross(u, v));
+	f->out = out;
+	f->in = in;
+	f->what = what;
+	f->at = g_rf_at;
+	f->tpu_max = g_rf_tpu;
+	f->fine = g_rf_fine;
+	f->lfine = g_rf_lfine;
+	f->two = g_rf_two;
+	f->live = g_rf_live;
+	f->relief = g_rf_relief;
+	f->tall = g_rf_tall;
+	f->group = g_rf_group;
+	f->cut = g_rf_cut;
+	f->clear = g_rf_clear;
+	f->pose = g_rf_group == RF_G_CONSOLE ? cc_dz(g_cc_out, g_rm_aspect) : 0.0;
+	f->turn = g_rf_group == RF_G_DOOR ? clampf(g_pb_open, 0.0, 1.0) * RF_DOOR_SWING : 0.0;
+	f->lamp = ROOM_LAMP_POS;
+	f->base[RF_LAMP] = g_rf_lamp_base;
+	f->base[RF_REST0] = f->base[RF_LAMP0] = 2;
+}
+
+/* The faces of a box that are in `sides`, turned by `turn` about the z
+ * axis through `pivot` -- the way the binders lean (rot_z, as map_shelf
+ * turns them the other way to stand them up). */
+static void rf_box(struct rface_set *s, const char *what, vec3 c, vec3 e, unsigned sides,
+	vec3 pivot, double turn, double out, double in)
+{
+	const struct {
+		unsigned bit;
+		vec3 o, u, v;
+	} F[6] = {
+		{ RF_PZ, { -e.x, -e.y, e.z }, { 2 * e.x, 0, 0 }, { 0, 2 * e.y, 0 } },
+		{ RF_NZ, { e.x, -e.y, -e.z }, { -2 * e.x, 0, 0 }, { 0, 2 * e.y, 0 } },
+		{ RF_PY, { -e.x, e.y, e.z }, { 2 * e.x, 0, 0 }, { 0, 0, -2 * e.z } },
+		{ RF_NY, { -e.x, -e.y, -e.z }, { 2 * e.x, 0, 0 }, { 0, 0, 2 * e.z } },
+		{ RF_PX, { e.x, -e.y, e.z }, { 0, 0, -2 * e.z }, { 0, 2 * e.y, 0 } },
+		{ RF_NX, { -e.x, -e.y, -e.z }, { 0, 0, 2 * e.z }, { 0, 2 * e.y, 0 } },
+	};
+	for (int i = 0; i < 6; i++) {
+		if (!(sides & F[i].bit)) {
+			continue;
+		}
+		vec3 o = vadd(c, F[i].o), u = F[i].u, v = F[i].v;
+		if (turn != 0.0) {
+			o = vadd(pivot, rot_z(vsub(o, pivot), turn));
+			u = rot_z(u, turn);
+			v = rot_z(v, turn);
+		}
+		rf_add(s, what, o, u, v, out, in);
+	}
+}
+
+/* The bookcase's view, face by face: what map_shelf and map_room put in
+ * layer 3, as far as it is flat. The things on the desk and the board, the
+ * console and the post box are faces of their own (rf_gadgets, rf_console,
+ * rf_post). */
+static void rf_room(struct rface_set *s, int layer)
+{
+	const double hx = g_rm_sh_hx;
+	const double wall_z = RM_SH_ZB - 0.50;
+	const vec3 o0 = v3(0, 0, 0);
+
+	/* the wall and the floor the case stands against, which move back and
+	 * forth with it with the shape of the screen -- the wall stands there
+	 * in every view but the desk's own, case or no case */
+	const double wh = RM_SH_CORN_Y + 12.0 - RM_FLOOR;
+	g_rf_at = v3(0, 0, RM_SH_ZF);
+	g_rf_tpu = 8.0;   /* paint and boards a long way off: smooth light */
+	g_rf_two = false;
+	g_rf_live = true;
+	/* behind the case and over it, and the floor in front of it -- and
+	 * in the views with no case, where it would be: bare, and pictured in
+	 * those views' own packs */
+	bool bare = layer != 3;
+	rf_add(s, bare ? "wall-bare" : "wall", v3(-hx, RM_FLOOR, wall_z), v3(2.0 * hx, 0, 0),
+		v3(0, wh, 0), 0.05, 0.05);
+	rf_add(s, "floor", v3(-hx - 16.0, RM_FLOOR, RM_ZN + 24.0), v3(2.0 * (hx + 16.0), 0, 0),
+		v3(0, 0, -(RM_ZN + 24.0 - RM_SH_ZF)), 0.05, 0.05);
+	if (bare) {
+		rf_add(s, "floor-bare", v3(-hx, RM_FLOOR, RM_SH_ZF), v3(2.0 * hx, 0, 0),
+			v3(0, 0, -(RM_SH_ZF - wall_z)), 0.05, 0.05);
+	}
+	rf_box(s, bare ? "skirting-bare" : "skirting", v3(0, RM_FLOOR + 1.10, wall_z + 0.32),
+		v3(hx, 1.10, 0.32), RF_PZ | RF_PY, o0, 0.0, 0.05, 0.05);
+	/* and either side of it, each with its side: pictured beside the
+	 * widest case, what a narrower one leaves bare was under it */
+	for (int sgn = -1; sgn <= 1; sgn += 2) {
+		double x0 = sgn < 0 ? -hx - 16.0 : hx;
+		g_rf_at = v3(sgn * hx, 0, RM_SH_ZF);
+		rf_add(s, "wall-side", v3(x0, RM_FLOOR, wall_z), v3(16.0, 0, 0), v3(0, wh, 0),
+			0.05, 0.05);
+		rf_add(s, "floor-side", v3(x0, RM_FLOOR, RM_SH_ZF), v3(16.0, 0, 0),
+			v3(0, 0, -(RM_SH_ZF - wall_z)), 0.05, 0.05);
+		rf_box(s, "skirting-side", v3(x0 + 8.0, RM_FLOOR + 1.10, wall_z + 0.32),
+			v3(8.0, 1.10, 0.32), RF_PZ | RF_PY, o0, 0.0, 0.05, 0.05);
+	}
+	g_rf_tpu = RF_TPU_MAX;
+	g_rf_live = false;
+}
+
+/* the bookcase itself */
+static void rf_case(struct rface_set *s)
+{
+	const double zc = (RM_SH_ZF + RM_SH_ZB) * 0.5, zh = (RM_SH_ZF - RM_SH_ZB) * 0.5;
+	const double hx = g_rm_sh_hx;
+	const vec3 o0 = v3(0, 0, 0);
+
+	g_rf_at = v3(0, 0, RM_SH_ZF);
+	rf_box(s, "plinth", v3(0.0, (RM_SH_PLINTH + RM_FLOOR) * 0.5, zc - RM_SH_PLINTH_Z),
+		v3(hx - 0.30, (RM_SH_PLINTH - RM_FLOOR) * 0.5, zh - RM_SH_PLINTH_Z),
+		RF_PZ, o0, 0.0, 0.05, 0.05);
+	for (int sgn = 0; sgn < 2; sgn++) {
+		double sx = (sgn ? 1.0 : -1.0) * (hx - RM_SH_SIDE * 0.5);
+		g_rf_at = v3(sx, 0, RM_SH_ZF);
+		rf_box(s, "side", v3(sx, (RM_SH_TOP + RM_SH_PLINTH) * 0.5, zc),
+			v3(RM_SH_SIDE * 0.5, (RM_SH_TOP - RM_SH_PLINTH) * 0.5, zh),
+			RF_PZ | (sgn ? RF_NX : RF_PX), o0, 0.0, 0.05, 0.05);
+	}
+	g_rf_at = v3(0, 0, RM_SH_ZF);
+	rf_box(s, "stile", v3(0.0, (RM_SH_TOP + RM_SH_PLINTH) * 0.5, zc),
+		v3(RM_SH_SIDE * 0.5, (RM_SH_TOP - RM_SH_PLINTH) * 0.5, zh - 0.30),
+		RF_PZ | RF_PX | RF_NX, o0, 0.0, 0.05, 0.05);
+	rf_box(s, "back", v3(0.0, (RM_SH_TOP + RM_SH_PLINTH) * 0.5, RM_SH_ZB + RM_SH_BACKT * 0.5),
+		v3(hx - RM_SH_SIDE, (RM_SH_TOP - RM_SH_PLINTH) * 0.5, RM_SH_BACKT * 0.5),
+		RF_PZ, o0, 0.0, 0.05, 0.05);
+	const double board_top[4] = {
+		RM_SH_PLINTH, RM_SH_BAY_B, RM_SH_BAY_T + RM_SH_BOARD, RM_SH_TOP,
+	};
+	for (int i = 0; i < 4; i++) {
+		rf_box(s, "board", v3(0.0, board_top[i] - RM_SH_BOARD * 0.5, zc + 0.12),
+			v3(hx - RM_SH_SIDE, RM_SH_BOARD * 0.5, zh - 0.12),
+			RF_PZ | RF_PY | RF_NY, o0, 0.0, 0.05, 0.05);
+	}
+	rf_box(s, "cornice", v3(0.0, (RM_SH_CORN_Y + RM_SH_TOP) * 0.5, zc + RM_SH_CORN_P * 0.5),
+		v3(hx + RM_SH_CORN_P, (RM_SH_CORN_Y - RM_SH_TOP) * 0.5, zh + RM_SH_CORN_P * 0.5),
+		RF_PZ | RF_PY | RF_NY, o0, 0.0, 0.10, 0.25);
+	for (int i = 0; i < 2; i++) {
+		rf_box(s, "lamp", v3(i ? 8.2 : -8.2, SHELF_LAMP_Y + 0.30, RM_SH_ZF - 0.15),
+			v3(2.30, 0.26, 0.40), RF_PZ | RF_PX | RF_NX, o0, 0.0, 0.10, 0.30);
+	}
+
+	for (int i = 0; i < SHELF_ROW; i++) {
+		const struct shelf_binder *b = &SHELF_BINDERS[i];
+		g_rf_at = v3(b->x, RM_BN_FOOT, RM_BN_ZC);
+		rf_box(s, "binder", v3(b->x, RM_BN_FOOT + b->h * 0.5, RM_BN_ZC),
+			v3(b->hw + 0.055, b->h * 0.5, RM_BN_DEPTH * 0.5),
+			RF_PZ | RF_PY | RF_PX | RF_NX, v3(b->x, RM_BN_FOOT, RM_BN_ZC), b->lean,
+			0.10, 0.40);
+	}
+	g_rf_at = v3(RM_BK_X, RM_BN_FOOT, RM_BK_ZC);
+	rf_box(s, "book", v3(RM_BK_X, RM_BN_FOOT + RM_BK_H * 0.5, RM_BK_ZC + 0.06),
+		v3(RM_BK_HW, RM_BK_H * 0.5, RM_BK_D * 0.5 + 0.06),
+		RF_PZ | RF_PY | RF_PX | RF_NX, o0, 0.0, 0.15, 0.40);
+	double x0 = RM_BK_X0 + 2.0 * RM_BK_HW + 0.15;
+	double run = hx - RM_SH_SIDE - x0;
+	if (run > 2.0) {
+		for (int i = 0; i < 3; i++) {
+			double t = (i + 0.7) / 3.4;
+			double bx = x0 + run * t, ht = 6.6 + room_seed(i, 1) * 2.4;
+			double lean = 0.16 + 0.10 * room_seed(i, 2);
+			vec3 foot = v3(bx, RM_BN_FOOT, RM_BN_ZC + 0.40);
+			g_rf_at = foot;
+			rf_box(s, "fallen", vadd(foot, v3(0, ht * 0.5, 0)),
+				v3(0.62, ht * 0.5, RM_BN_DEPTH * 0.44),
+				RF_PZ | RF_PY | RF_PX | RF_NX, foot, lean, 0.10, 0.30);
+		}
+	}
+
+}
+
+/* The desk's top, from the start of the move as well as from the view: in
+ * two, at a line across it that stays put whatever the shape of the room,
+ * so that the half a view looks down on can be pictured finely and the
+ * near half, seen only in the move, coarsely. */
+static void rf_desk(struct rface_set *s)
+{
+	g_rf_at = v3(0, 0, 0);
+	g_rf_two = true;
+	g_rf_live = true;
+	g_rf_lamp_base = 0;
+	rf_add(s, "desk", v3(-RM_HX, 0.0, RF_DESK_SPLIT), v3(2.0 * RM_HX, 0, 0),
+		v3(0, 0, RM_ZF - RF_DESK_SPLIT), 0.05, 0.10);
+	rf_add(s, "desk-near", v3(-RM_HX, 0.0, RM_ZN), v3(2.0 * RM_HX, 0, 0),
+		v3(0, 0, RF_DESK_SPLIT - RM_ZN), 0.05, 0.10);
+	g_rf_two = false;
+	g_rf_live = false;
+	g_rf_lamp_base = 1;
+}
+
+/* The faces of a box that are in `sides`, turned by `turn` about the x
+ * axis through `pivot` (rot_x) -- the post box's cap and its door. */
+static void rf_box_rx(struct rface_set *s, const char *what, vec3 c, vec3 e, unsigned sides,
+	vec3 pivot, double turn, double out, double in)
+{
+	int from = s->n;
+	rf_box(s, what, c, e, sides, pivot, 0.0, out, in);
+	for (int i = from; i < s->n; i++) {
+		struct rface *f = &s->f[i];
+		f->o = vadd(pivot, rot_x(vsub(f->o, pivot), turn));
+		f->u = rot_x(f->u, turn);
+		f->v = rot_x(f->v, turn);
+		f->n = rot_x(f->n, turn);
+	}
+}
+
+/* The post box, face by face, its door where g_pb_open has it: the foot,
+ * the body round the mouth, inside it the floor, the walls and the liner
+ * the letters stand against, the cap, and the door -- what stands off the
+ * door's face, the slot's brass and its hood and the keyhole, followed
+ * down its heights (rf_hit_relief). */
+static void rf_post(struct rface_set *s)
+{
+	const double cx = RM_PB_CX, cz = RM_PB_CZ;
+	const double y0 = RM_PB_PLINTH, y1 = RM_PB_SHOULDER;
+	const double my0 = y0 + 0.14, my1 = y1 - 0.26;
+	const vec3 o0 = v3(0, 0, 0);
+
+	g_rf_at = v3(cx, 0, cz);
+	g_rf_cut = true;
+	/* every face of it followed down its heights: the lacquer's rounded
+	 * edges, laid on the face's plane, met each other's in a crease */
+	g_rf_relief = true;
+	rf_box(s, "pb-foot", v3(cx, RM_PB_PLINTH * 0.5, cz),
+		v3(RM_PB_HX + 0.16, RM_PB_PLINTH * 0.5, RM_PB_HZ + 0.16),
+		RF_PZ | RF_PY | RF_PX | RF_NX, o0, 0.0, 0.10, 0.20);
+	rf_box(s, "pb-body", v3(cx, (y0 + y1) * 0.5, cz), v3(RM_PB_HX, (y1 - y0) * 0.5, RM_PB_HZ),
+		RF_PZ | RF_PX | RF_NX, o0, 0.0, 0.10, 0.25);
+	/* inside: the floor, the two walls, and the liner at the back */
+	double ihx = RM_PB_HX - 0.26, izc = cz + 0.08, ihz = RM_PB_HZ - 0.18;
+	rf_add(s, "pb-floor", v3(cx - ihx, my0, izc + ihz), v3(2.0 * ihx, 0, 0),
+		v3(0, 0, -2.0 * ihz), 0.10, 0.20);
+	/* (facing in: the left one +x, the right one -x) */
+	rf_add(s, "pb-wall", v3(cx - ihx, my0, izc + ihz), v3(0, 0, -2.0 * ihz),
+		v3(0, my1 - my0, 0), 0.10, 0.20);
+	rf_add(s, "pb-wall", v3(cx + ihx, my0, izc - ihz), v3(0, 0, 2.0 * ihz),
+		v3(0, my1 - my0, 0), 0.10, 0.20);
+	rf_box(s, "pb-liner", v3(cx, (my0 + my1) * 0.5, cz - RM_PB_HZ + 0.30),
+		v3(RM_PB_HX - 0.30, (my1 - my0) * 0.5 - 0.04, 0.05), RF_PZ, o0, 0.0, 0.08, 0.15);
+	/* the cap, tilted so the weather runs off the front of it */
+	vec3 cc = v3(cx, RM_PB_SHOULDER + RM_PB_CAP_T * 0.5, cz);
+	rf_box_rx(s, "pb-cap", cc, v3(RM_PB_HX + 0.14, RM_PB_CAP_T * 0.5, RM_PB_HZ + 0.14),
+		RF_PZ | RF_PY | RF_PX | RF_NX, cc, RM_PB_TILT, 0.10, 0.25);
+	/* the door, on its hinge along the bottom of the mouth */
+	vec3 hinge = v3(cx, y0 + 0.16, cz + RM_PB_HZ);
+	double dh = my1 + 0.16 - hinge.y;
+	double turn = clampf(g_pb_open, 0.0, 1.0) * RF_DOOR_SWING;
+	g_rf_at = hinge;
+	g_rf_group = RF_G_DOOR;
+	rf_box_rx(s, "pb-door", vadd(hinge, v3(0, dh * 0.5, 0)), v3(RM_PB_HX - 0.06, dh * 0.5, 0.10),
+		RF_PZ, hinge, turn, 0.45, 0.25);
+	rf_box_rx(s, "pb-door-in", vadd(hinge, v3(0, dh * 0.5, 0)), v3(RM_PB_HX - 0.06, dh * 0.5, 0.10),
+		RF_NZ | RF_PY | RF_PX | RF_NX, hinge, turn, 0.10, 0.20);
+	g_rf_relief = false;
+	g_rf_group = RF_G_NONE;
+	g_rf_cut = false;
+}
+
+/* The things on the desk and on the bookcase's board, face by face, as
+ * room_gadgets makes them: the clock along the back of the desk, in every
+ * view but the desk's own (there it is a picture laid over the sheet), and
+ * in the bookcase's the three on its board, each on its stepped stand --
+ * the leather clock, a rounded block leaning back, and the calendar and
+ * the memo pad, tents. The rounding of the leather, the well the dial is
+ * set in, the pages and the wire round the ridge are followed down their
+ * heights (rf_hit_relief). Through a tent's open ends the inside of its
+ * back board shows, and the stand under it. */
+static void rf_gadgets(struct rface_set *s, int layer)
+{
+	const vec3 o0 = v3(0, 0, 0);
+	g_rf_relief = true;
+	/* small, and full of edges a texel's blur takes the line off */
+	g_rf_fine = 2.0;
+	for (int i = 0; i < DESK_GADGET_COUNT; i++) {
+		const struct room_gadget *g = &ROOM_GADGETS[i];
+		bool up = gadget_upright(g);
+		if ((up && layer != 3) || (i == DESK_GADGET_CLOCK && layer == 1)) {
+			continue;
+		}
+		double gz = gadget_z(g), base = g->foot + g->plinth;
+		if (!up) {
+			/* a box, the well of its glass let into the top */
+			g_rf_at = v3(g->x, 0, gz);
+			g_rf_two = true;
+			rf_box(s, "gd-tray", v3(g->x, g->h * 0.5, gz), v3(g->hx, g->h * 0.5, g->hz),
+				RF_PY | RF_PZ | RF_PX | RF_NX, o0, 0.0, 0.05, 0.30);
+			g_rf_two = false;
+			continue;
+		}
+		bool tent = g->kind == GADGET_TENT;
+		g_rf_at = v3(g->x, g->foot, gz);
+		/* the stand, both its steps */
+		double sd = tent ? cal_depth(g) * 0.5 : g->hz;
+		rf_box(s, "gd-stand", v3(g->x, g->foot + g->plinth * 0.51, tent ? gz - sd : gz),
+			v3(g->hx + 0.34, g->plinth * 0.51, sd + 0.46), RF_PZ | RF_PY | RF_PX | RF_NX,
+			o0, 0.0, 0.06, 0.34);
+		if (!tent) {
+			/* the block: its face as deep as the leather is rounded off
+			 * round it, its top and its sides no deeper than the well the
+			 * dial is in starts -- what is under that rim, looked down at,
+			 * is not there */
+			vec3 b = v3(g->x, base, gz), c = vadd(b, v3(0, g->h * 0.5, 0));
+			vec3 e = v3(g->hx, g->h * 0.5, g->hz);
+			rf_box_rx(s, "gd-block", c, e, RF_PZ, b, -g->tilt, 0.05, g->hz);
+			rf_box_rx(s, "gd-block", c, e, RF_PY | RF_PX | RF_NX, b, -g->tilt, 0.05,
+				g->inset - 0.04);
+			continue;
+		}
+		/* the front board from the face of its pages, off which the wire
+		 * round the ridge stands no further than RF_TALL */
+		double H = g->h, hx = g->hx + 0.01;
+		vec3 o = gadget_to_world(g, -hx, -0.01, CAL_PZ);
+		rf_add(s, "gd-tent", o, vsub(gadget_to_world(g, hx, -0.01, CAL_PZ), o),
+			vsub(gadget_to_world(g, -hx, H + 0.12, CAL_PZ), o), 0.20, 0.24);
+		/* the inside of the back board, hung from the ridge */
+		vec3 ridge = gadget_to_world(g, 0.0, H, -2.0 * CAL_T);
+		double lb = (ridge.y - base) / cos(CAL_TB);
+		g_rf_relief = false;
+		rf_add(s, "gd-tent-back", vadd(ridge, rot_x(v3(-hx, -lb, 0.0), CAL_TB)),
+			v3(2.0 * hx, 0, 0), rot_x(v3(0, lb, 0), CAL_TB), 0.05, 0.05);
+		/* the open ends, where the boards' edges are (the ridge, looked
+		 * along from the bookcase's height, is the front board's face's) */
+		double y1 = base + (H + 0.12) * cos(g->tilt) + 0.30 * sin(g->tilt);
+		double z1 = gz + 0.15, z0 = gz - cal_depth(g) - 0.15;
+		rf_box(s, "gd-tent-end", v3(g->x, (base + y1) * 0.5, (z0 + z1) * 0.5),
+			v3(hx, (y1 - base) * 0.5, (z1 - z0) * 0.5), RF_PX | RF_NX, o0, 0.0, 0.04, 0.14);
+		g_rf_relief = true;
+	}
+	g_rf_relief = false;
+	g_rf_fine = 1.0;
+}
+
+/* The bookcase's view: the room, the case, the desk. */
+static void rf_shelf(struct rface_set *s)
+{
+	rf_room(s, 3);
+	rf_case(s);
+	rf_desk(s);
+}
+
+/* The console, face by face, where the slide has it (g_cc_out): what
+ * map_console makes as far as it is flat -- its two faces, its plinth and
+ * ledge, the walnut cheeks and the top of the body between them. What
+ * stands up off the faces, the knob and the lamps and the buttons, is in
+ * their height fields; what of it is seen from the side is traced. */
+static void rf_console(struct rface_set *s)
+{
+	struct cc_face panel, tower;
+	cc_faces(&panel, &tower);
+	const double dz = cc_dz(g_cc_out, g_rm_aspect);
+	const vec3 slide = v3(0, 0, dz);
+	const double cx = (RM_CC_X0 + RM_CC_X1) * 0.5, chx = (RM_CC_X1 - RM_CC_X0) * 0.5;
+	const double inner = chx - RM_CC_CHEEK;
+	const vec3 o0 = v3(0, 0, 0);
+
+	g_rf_at = v3(cx, 0, dz);
+	g_rf_group = RF_G_CONSOLE;
+	g_rf_cut = true;
+	g_rf_relief = true;
+	const struct cc_face *F[2] = { &panel, &tower };
+	static const char *const NAME[2] = { "cc-panel", "cc-tower" };
+	g_rf_lamp_base = 0;   /* the glint of the lamp in each lens */
+	g_rf_lfine = 3.0;     /* and the knob's shadow across its skirt */
+	g_rf_two = true;      /* the brass's sheen as the move starts */
+	for (int i = 0; i < 2; i++) {
+		/* The tower's knob stands 0.31 off it, and is laid. The panel's
+		 * buttons and lamps stand no more than 0.30 off it and are laid
+		 * too; the lid, 0.37 off it, is traced, because the console's
+		 * sheet without it is laid from these same faces, and what is
+		 * under a laid lid is nowhere in them. */
+		g_rf_tall = i ? 0.60 : 0.30;
+		/* the tower's a little past its top and bottom edges: the tube's
+		 * bezel stands out over both */
+		double over = i ? 0.22 : 0.0;
+		vec3 c = vadd(vadd(F[i]->o, vmul(F[i]->an, 0.17)), slide);
+		vec3 o = vsub(vsub(c, vmul(F[i]->ax, inner)), vmul(F[i]->as, F[i]->half + over));
+		rf_add(s, NAME[i], o, vmul(F[i]->ax, 2.0 * inner),
+			vmul(F[i]->as, 2.0 * (F[i]->half + over)), 0.60, 0.25);
+	}
+	g_rf_tall = RF_TALL;
+	g_rf_lamp_base = 1;
+	g_rf_lfine = 1.0;
+	g_rf_two = false;
+	/* and the tower's top edge, the thickness of it, which its face meets
+	 * from the side */
+	rf_add(s, "cc-tower-top", vadd(vsub(vsub(vadd(tower.o, vmul(tower.as, tower.half)),
+		vmul(tower.an, 0.17)), vmul(tower.ax, inner)), slide), vmul(tower.an, 0.34),
+		vmul(tower.ax, 2.0 * inner), 0.10, 0.10);
+	/* (and the rest of it, the walnut's rounded edges, as well) */
+
+	/* the top of the body behind the tower, between the cheeks */
+	rf_box(s, "cc-body", vadd(v3(cx, (RM_CC_PLINTH + RM_CC_TY1 * 0.72) * 0.5,
+		(RM_CC_BODY_Z0 + RM_CC_ZB) * 0.5), slide),
+		v3(inner, (RM_CC_TY1 * 0.72 - RM_CC_PLINTH) * 0.5, (RM_CC_BODY_Z0 - RM_CC_ZB) * 0.5),
+		RF_PY, o0, 0.0, 0.10, 0.20);
+	/* the plinth, and the ledge the nameplate is on */
+	double plz0 = RM_CC_PLINTH_Z0, plz1 = RM_CC_ZB + 0.30;
+	rf_box(s, "cc-plinth", vadd(v3(cx, RM_CC_PLINTH * 0.5, (plz0 + plz1) * 0.5), slide),
+		v3(chx - 0.10, RM_CC_PLINTH * 0.5, (plz0 - plz1) * 0.5),
+		RF_PZ | RF_PY | RF_PX | RF_NX, o0, 0.0, 0.10, 0.20);
+	double lx0 = RM_CC_PLATE_X0 + 0.10, lx1 = RM_CC_LEDGE_X1;
+	double lz0 = RM_CC_PZ0 + RM_CC_LEDGE, lz1 = RM_CC_PLINTH_Z0 - 0.20;
+	rf_box(s, "cc-ledge", vadd(v3((lx0 + lx1) * 0.5, RM_CC_PLINTH * 0.5, (lz0 + lz1) * 0.5),
+		slide), v3((lx1 - lx0) * 0.5, RM_CC_PLINTH * 0.5, (lz0 - lz1) * 0.5),
+		RF_PZ | RF_PY | RF_PX | RF_NX, o0, 0.0, 0.10, 0.20);
+	/* the cheeks: tall at the back, low at the front, both sides of each
+	 * (the inner one stands up over the faces) */
+	for (int sgn = 0; sgn < 2; sgn++) {
+		double sx = sgn ? RM_CC_X1 - RM_CC_CHEEK * 0.5 : RM_CC_X0 + RM_CC_CHEEK * 0.5;
+		rf_box(s, "cc-cheek", vadd(v3(sx, (RM_CC_PLINTH + RM_CC_TY1) * 0.5,
+			(RM_CC_PZ0 + RM_CC_ZB) * 0.5), slide),
+			v3(RM_CC_CHEEK * 0.5, (RM_CC_TY1 - RM_CC_PLINTH) * 0.5, (RM_CC_PZ0 - RM_CC_ZB) * 0.5),
+			RF_PX | RF_NX, o0, 0.0, 0.10, 0.25);
+		rf_box(s, "cc-cheek-lo", vadd(v3(sx, (RM_CC_PLINTH + RM_CC_PY1) * 0.5,
+			(RM_CC_PZ0 + RM_CC_PZ1) * 0.5), slide),
+			v3(RM_CC_CHEEK * 0.5, (RM_CC_PY1 - RM_CC_PLINTH) * 0.5, (RM_CC_PZ0 - RM_CC_PZ1) * 0.5),
+			RF_PY | RF_PZ, o0, 0.0, 0.10, 0.25);
+		rf_box(s, "cc-cheek-hi", vadd(v3(sx, (RM_CC_PY1 + RM_CC_TY1) * 0.5,
+			(RM_CC_PZ1 + RM_CC_ZB) * 0.5), slide),
+			v3(RM_CC_CHEEK * 0.5, (RM_CC_TY1 - RM_CC_PY1) * 0.5, (RM_CC_PZ1 - RM_CC_ZB) * 0.5),
+			RF_PY | RF_PZ, o0, 0.0, 0.10, 0.25);
+	}
+	g_rf_relief = false;
+	g_rf_group = RF_G_NONE;
+	g_rf_cut = false;
+}
+
+/* Each face that moves, where what moves it has it now: the console's,
+ * along the slide; the post box's door, on its hinge. Its pictures and its
+ * light go with it. */
+static void rf_pose(struct rface_set *s)
+{
+	double dz = cc_dz(g_cc_out, g_rm_aspect);
+	double turn = clampf(g_pb_open, 0.0, 1.0) * RF_DOOR_SWING;
+	for (int i = 0; i < s->n; i++) {
+		struct rface *f = &s->f[i];
+		if (f->group == RF_G_DOOR && f->turn != turn) {
+			/* swung on the hinge, which is its at */
+			double d = turn - f->turn;
+			f->o = vadd(f->at, rot_x(vsub(f->o, f->at), d));
+			f->u = rot_x(f->u, d);
+			f->v = rot_x(f->v, d);
+			f->n = rot_x(f->n, d);
+			f->turn = turn;
+			continue;
+		}
+		if (f->group != RF_G_CONSOLE || f->pose == dz) {
+			continue;
+		}
+		vec3 d = v3(0, 0, dz - f->pose);
+		f->o = vadd(f->o, d);
+		f->at = vadd(f->at, d);
+		f->pose = dz;
+	}
+}
+
+/* The desk's own view, from straight above. In its sheet (layer 1) the
+ * top, its rounded edges and corners faces of their own that go in and out
+ * with the edge or corner they are, the floor round the desk, and the wall
+ * and its skirting past the far corners. In the drawer's (2) the drawer
+ * all the way out -- its felt, the insides of its sides and of its front
+ * and the tops of them -- with the desk's top over the back of it and,
+ * under everything, the floor clear: in that sheet nothing else is drawn.
+ * Its brass pull, a sliver in front, is traced. */
+static void rf_plan(struct rface_set *s, int layer)
+{
+	const double hx = RM_HX, zf = RM_ZF, wall_z = RM_WALL_Z, e = 0.25;
+	const vec3 o0 = v3(0, 0, 0);
+	g_rf_two = false;
+	if (layer == 2) {
+		g_rf_at = o0;
+		g_rf_clear = true;
+		rf_add(s, "pl-desk-clear", v3(-hx, 0.0, RM_ZN), v3(2.0 * hx, 0, 0),
+			v3(0, 0, -(RM_ZN - zf)), 0.0, 0.0);
+		rf_add(s, "pl-under", v3(-80.0, RM_DR_BOT - 0.50, 60.0), v3(160.0, 0, 0),
+			v3(0, 0, -160.0), 0.0, 0.0);
+		g_rf_clear = false;
+		/* the drawer, out */
+		const double pull = RM_DR_PULL, top = RM_DR_TOP;
+		const double felt = RM_DR_BOT + 0.44, ix = RM_DR_HX - 0.42 - 0.22;
+		const double zb = RM_DR_BACK + pull, zi = RM_DR_FACE - 0.52 + pull;
+		const double zo = RM_DR_FACE + pull;
+		rf_add(s, "dr-felt", v3(-ix, felt, zi), v3(2.0 * ix, 0, 0), v3(0, 0, -(zi - zb)),
+			0.05, 0.10);
+		rf_add(s, "dr-side", v3(-ix, felt, zi), v3(0, 0, -(zi - zb)), v3(0, top - felt, 0),
+			0.05, 0.10);
+		rf_add(s, "dr-side", v3(ix, felt, zb), v3(0, 0, zi - zb), v3(0, top - felt, 0),
+			0.05, 0.10);
+		rf_add(s, "dr-side-top", v3(-ix - 0.44, top, zi), v3(0.44, 0, 0), v3(0, 0, -(zi - zb)),
+			0.05, 0.12);
+		rf_add(s, "dr-side-top", v3(ix, top, zi), v3(0.44, 0, 0), v3(0, 0, -(zi - zb)),
+			0.05, 0.12);
+		rf_add(s, "dr-front", v3(ix, felt, zi), v3(-2.0 * ix, 0, 0), v3(0, top - felt, 0),
+			0.05, 0.10);
+		rf_add(s, "dr-front-top", v3(-RM_DR_HX, top, zo), v3(2.0 * RM_DR_HX, 0, 0),
+			v3(0, 0, -(zo - zi)), 0.05, 0.14);
+		int from = s->n;
+		rf_box(s, "dr-pull", v3(0, (RM_DR_TOP + RM_DR_BOT) * 0.5 - 0.08, zo + 0.30),
+			v3(2.10, 0.55, 0.40), RF_PX | RF_NX | RF_PY | RF_NY | RF_PZ | RF_NZ, o0, 0.0,
+			0.0, 0.0);
+		for (int i = from; i < s->n; i++) {
+			s->f[i].trace = true;
+		}
+		return;
+	}
+	g_rf_live = true;
+	/* the top, less its edges, finely: it is what fills the screen */
+	g_rf_at = o0;
+	g_rf_lamp_base = 0;
+	g_rf_tpu = 40.0;
+	rf_add(s, "pl-desk", v3(-hx + e, 0.0, RM_ZN - e), v3(2.0 * (hx - e), 0, 0),
+		v3(0, 0, -(RM_ZN - zf - 2.0 * e)), 0.05, 0.20);
+	/* the edges, along the near and far ones and up the two sides, and
+	 * the corners, each where its edge or corner is */
+	g_rf_at = v3(0, 0, RM_ZN);
+	rf_add(s, "pl-edge-near", v3(-hx + e, 0.0, RM_ZN), v3(2.0 * (hx - e), 0, 0),
+		v3(0, 0, -e), 0.05, 0.20);
+	g_rf_at = v3(0, 0, zf);
+	rf_add(s, "pl-edge-far", v3(-hx + e, 0.0, zf + e), v3(2.0 * (hx - e), 0, 0),
+		v3(0, 0, -e), 0.05, 0.20);
+	for (int sgn = -1; sgn <= 1; sgn += 2) {
+		double x0 = sgn < 0 ? -hx : hx - e;
+		g_rf_at = v3(sgn * hx, 0, 0);
+		rf_add(s, "pl-edge-side", v3(x0, 0.0, RM_ZN - e), v3(e, 0, 0),
+			v3(0, 0, -(RM_ZN - zf - 2.0 * e)), 0.05, 0.20);
+		g_rf_at = v3(sgn * hx, 0, RM_ZN);
+		rf_add(s, "pl-corner-near", v3(x0, 0.0, RM_ZN), v3(e, 0, 0), v3(0, 0, -e), 0.05, 0.20);
+		g_rf_at = v3(sgn * hx, 0, zf);
+		rf_add(s, "pl-corner-far", v3(x0, 0.0, zf + e), v3(e, 0, 0), v3(0, 0, -e), 0.05, 0.20);
+	}
+	g_rf_lamp_base = 1;
+	/* the floor and the wall, a long way down and seen past the desk only
+	 * once the drawer is out */
+	g_rf_tpu = 10.0;
+	g_rf_lfine = 0.6;
+	g_rf_at = o0;
+	rf_add(s, "pl-floor", v3(-48.0, RM_FLOOR, 24.0), v3(96.0, 0, 0),
+		v3(0, 0, -(24.0 - wall_z)), 0.05, 0.05);
+	g_rf_at = v3(0, 0, wall_z);
+	rf_add(s, "pl-wall", v3(-48.0, RM_FLOOR, wall_z), v3(96.0, 0, 0), v3(0, -RM_FLOOR - 1.0, 0),
+		0.05, 0.05);
+	rf_box(s, "pl-skirting", v3(0, RM_FLOOR + 1.10, wall_z + 0.32), v3(48.0, 1.10, 0.32),
+		RF_PZ | RF_PY, o0, 0.0, 0.05, 0.05);
+	g_rf_tpu = RF_TPU_MAX;
+	g_rf_lfine = 1.0;
+	g_rf_live = false;
+}
+
+/* What layer is laid from, as the globals have the room. */
+static void rf_layer(struct rface_set *s, int layer)
+{
+	if (layer <= 2) {
+		rf_plan(s, layer);
+		return;
+	}
+	/* the console and the post box stand on the desk in every view, each
+	 * as its own view has it when you are not looking at it: stowed, shut */
+	double cc = g_cc_out, pb = g_pb_open;
+	if (layer != 4) {
+		g_cc_out = 0.0;
+	}
+	if (layer != 5) {
+		g_pb_open = 0.0;
+	}
+	if (layer == 3) {
+		rf_shelf(s);
+	} else {
+		rf_room(s, layer);
+		rf_desk(s);
+	}
+	rf_console(s);
+	rf_post(s);
+	rf_gadgets(s, layer);
+	g_cc_out = cc;
+	g_pb_open = pb;
+}
+
+/* Run row(arg, y) for every y below rows, on this machine's cores. */
+struct rf_job {
+	void (*row)(void *arg, int y);
+	void *arg;
+	int rows;
+	_Atomic int next;
+};
+
+static void *rf_worker(void *p)
+{
+	struct rf_job *j = p;
+	for (;;) {
+		int y = atomic_fetch_add(&j->next, 1);
+		if (y >= j->rows) {
+			break;
+		}
+		j->row(j->arg, y);
+	}
+	return NULL;
+}
+
+static void rf_run(void (*row)(void *, int), void *arg, int rows)
+{
+	struct rf_job j = { row, arg, rows, 0 };
+	int n = bake_threads();
+	pthread_t th[8];
+	int started = 0;
+	for (int i = 0; i + 1 < n; i++) {
+		if (pthread_create(&th[started], NULL, rf_worker, &j) == 0) {
+			started++;
+		}
+	}
+	rf_worker(&j);
+	for (int i = 0; i < started; i++) {
+		pthread_join(th[i], NULL);
+	}
+}
+
+/* 8 bits to linear light, before the scale */
+static float g_rf_lin[256];
+
+static void rf_lin_init(void)
+{
+	if (g_rf_lin[255] == 0.0f) {
+		for (int i = 0; i < 256; i++) {
+			g_rf_lin[i] = (float)pow(i / 255.0, 2.2);
+		}
+	}
+}
+
+/* linear, premultiplied (r g b a) to a texel, at scale */
+static uint32_t rf_enc(const float *p, double scale)
+{
+	if (p[3] <= 1e-6f) {
+		return 0;
+	}
+	double a = clampf(p[3], 0.0, 1.0);
+	uint32_t px = (uint32_t)(a * 255.0 + 0.5) << 24;
+	for (int c = 0; c < 3; c++) {
+		double v = pow(clampf(p[c] / p[3] * scale, 0.0, 1.0), 1.0 / 2.2);
+		px |= (uint32_t)(v * 255.0 + 0.5) << (16 - 8 * c);
+	}
+	return px;
+}
+
+/* a texel to linear, premultiplied, before the scale */
+static void rf_dec(uint32_t px, float *o)
+{
+	float a = (float)(px >> 24) / 255.0f;
+	o[0] = g_rf_lin[(px >> 16) & 255] * a;
+	o[1] = g_rf_lin[(px >> 8) & 255] * a;
+	o[2] = g_rf_lin[px & 255] * a;
+	o[3] = a;
+}
+
+/* The smaller pictures of a face, each a quarter of the one before. */
+static uint32_t *rf_half(const uint32_t *s, int pw, int ph, int w, int h)
+{
+	uint32_t *d = malloc((size_t)w * h * sizeof(uint32_t));
+	if (!d) {
+		return NULL;
+	}
+	for (int y = 0; y < h; y++) {
+		for (int x = 0; x < w; x++) {
+			int x0 = 2 * x, y0 = 2 * y;
+			int x1 = x0 + 1 < pw ? x0 + 1 : x0, y1 = y0 + 1 < ph ? y0 + 1 : y0;
+			float sum[4] = { 0, 0, 0, 0 }, q[4];
+			const uint32_t k[4] = {
+				s[(size_t)y0 * pw + x0], s[(size_t)y0 * pw + x1],
+				s[(size_t)y1 * pw + x0], s[(size_t)y1 * pw + x1],
+			};
+			for (int i = 0; i < 4; i++) {
+				rf_dec(k[i], q);
+				for (int c = 0; c < 4; c++) {
+					sum[c] += q[c] * 0.25f;
+				}
+			}
+			d[(size_t)y * w + x] = rf_enc(sum, 1.0);
+		}
+	}
+	return d;
+}
+
+/* The sizes of a face's levels, from its first. */
+static void rf_dims(struct rface *f)
+{
+	int lv = 1;
+	while (lv < RF_LEVELS && (f->tw[lv - 1] > 1 || f->th[lv - 1] > 1)) {
+		f->tw[lv] = (f->tw[lv - 1] + 1) / 2;
+		f->th[lv] = (f->th[lv - 1] + 1) / 2;
+		lv++;
+	}
+	f->lv = lv;
+}
+
+/* whether a face has picture k */
+static bool rf_has(const struct rface *f, int k)
+{
+	return f->base[k] < RF_LEVELS && f->pic[k][f->base[k]];
+}
+
+/* Each picture's levels below the one it starts at. */
+static void rf_mips(struct rface *f)
+{
+	rf_dims(f);
+	int lv = f->lv;
+	for (int k = 0; k < RF_PICS; k++) {
+		int b = f->base[k];
+		if (b >= lv || !f->pic[k][b]) {
+			continue;
+		}
+		for (int l = b + 1; l < lv; l++) {
+			f->pic[k][l] = rf_half(f->pic[k][l - 1], f->tw[l - 1], f->th[l - 1],
+				f->tw[l], f->th[l]);
+			if (!f->pic[k][l]) {
+				f->lv = lv = l;
+				break;
+			}
+		}
+	}
+}
+
+static void relit_forget(const struct rface_set *s);
+
+static void rf_free(struct rface_set *s)
+{
+	relit_forget(s);
+	for (int i = 0; i < s->n; i++) {
+		for (int k = 0; k < RF_PICS; k++) {
+			for (int l = 0; l < RF_LEVELS; l++) {
+				free(s->f[i].pic[k][l]);
+			}
+		}
+		free(s->f[i].own);
+		free(s->f[i].height);
+		free(s->f[i].light);
+		free(s->f[i].fix[0]);
+		free(s->f[i].fix[1]);
+		free(s->f[i].light_in);
+		free(s->f[i].fix_in[0]);
+		free(s->f[i].fix_in[1]);
+		free(s->f[i].seen);
+	}
+}
+
+/* A face's picture at (a, b) of it, at level l, between the four nearest
+ * texels; premultiplied. */
+static void rf_fetch_from(const struct rface *f, int pic, int l, double a, double b,
+	float out[4])
+{
+	int w = f->tw[l], h = f->th[l];
+	double x = a * w - 0.5, y = b * h - 0.5;
+	int x0 = (int)floor(x), y0 = (int)floor(y);
+	double fx = x - x0, fy = y - y0;
+	int x1 = x0 + 1, y1 = y0 + 1;
+	x0 = x0 < 0 ? 0 : x0 >= w ? w - 1 : x0;
+	x1 = x1 < 0 ? 0 : x1 >= w ? w - 1 : x1;
+	y0 = y0 < 0 ? 0 : y0 >= h ? h - 1 : y0;
+	y1 = y1 < 0 ? 0 : y1 >= h ? h - 1 : y1;
+	const uint32_t *t = f->pic[pic][l];
+	float p00[4], p10[4], p01[4], p11[4];
+	rf_dec(t[(size_t)y0 * w + x0], p00);
+	rf_dec(t[(size_t)y0 * w + x1], p10);
+	rf_dec(t[(size_t)y1 * w + x0], p01);
+	rf_dec(t[(size_t)y1 * w + x1], p11);
+	/* every level is at the picture's scale */
+	float k = 1.0f / f->scale[pic];
+	for (int c = 0; c < 4; c++) {
+		double top = p00[c] + (p10[c] - p00[c]) * fx;
+		double bot = p01[c] + (p11[c] - p01[c]) * fx;
+		out[c] = (float)(top + (bot - top) * fy) * (c < 3 ? k : 1.0f);
+	}
+}
+
+struct rf_lay_arg {
+	const struct rface_set *s;
+	struct room_ctx *ctx;
+	float *z;
+	unsigned char *need;
+	int (*box)[4];     /* each face's samples, x0 y0 x1 y1 */
+	unsigned char *traced;   /* a row's worth each: the nearest is traced */
+	double along;            /* how far the camera is from eye0 to eye1 */
+	double out;              /* how far out what moves is (s->moves) */
+	/* or, nothing lit, at each sample what won it: its face and one, and
+	 * where on it (rf_mark_views) */
+	float *mark;
+	/* only the samples set here laid, the others left as they are; and
+	 * which face won each, its index and one -- 0: none, or traced. Either
+	 * may be NULL (rf_sparse) */
+	const unsigned char *only;
+	unsigned short *won_by;
+	/* a sample stands for its whole pixel: laid in the middle of it, as
+	 * its picture is filtered; off the middle, a grain as fine as the
+	 * desk's came out of a sample a pixel speckled */
+	bool whole;
+};
+
+/* Where the ray through (u, v) meets a face's plane: (a, b) on it and how
+ * far along the ray; false when it does not, or from behind. */
+static bool rf_hit(const struct rface *f, const struct room_cam *c, double u, double v,
+	double *a, double *b, double *t)
+{
+	vec3 rd = vadd(c->ww, vadd(vmul(c->uu, (u - 0.5) * c->fov_x),
+		vmul(c->vv, (0.5 - v) * c->fov_y)));
+	double den = vdot(rd, f->n);
+	if (den > -1e-9) {
+		return false;
+	}
+	*t = vdot(vsub(f->o, c->eye), f->n) / den;
+	if (*t <= 0.0) {
+		return false;
+	}
+	vec3 d = vsub(vadd(c->eye, vmul(rd, *t)), f->o);
+	*a = vdot(d, f->u) / vdot(f->u, f->u);
+	*b = vdot(d, f->v) / vdot(f->v, f->v);
+	return true;
+}
+
+/* how many samples each face could not find in its picture (the trial) */
+static _Atomic long g_rf_missed[RF_MAX];
+
+/* (a, b) on f, as (a, b) on the face its picture is of: the same place on
+ * the same thing, which in that room stood elsewhere */
+static void rf_move(const struct rface *f, double *a, double *b)
+{
+	const struct rface *t = f->src;
+	vec3 p = vadd(f->o, vadd(vmul(f->u, *a), vmul(f->v, *b)));
+	vec3 d;
+	if (f->turn != t->turn) {
+		/* into the thing's own frame, and out again as it stood */
+		vec3 l = rot_x(vsub(p, f->at), -f->turn);
+		d = vsub(vadd(t->at, rot_x(l, t->turn)), t->o);
+	} else {
+		d = vsub(vadd(p, vsub(t->at, f->at)), t->o);
+	}
+	*a = vdot(d, t->u) / vdot(t->u, t->u);
+	*b = vdot(d, t->v) / vdot(t->v, t->v);
+}
+
+/* A face's picture (pic: tex or key) at (a, b), lod texels to a sample:
+ * between the two nearest levels. */
+static void rf_sample(const struct rface *f, int pic, double a, double b, double lod,
+	float px[4])
+{
+	int base = f->base[pic] < f->lv ? f->base[pic] : f->lv - 1;
+	if (lod <= base || f->lv == 1) {
+		rf_fetch_from(f, pic, base, a, b, px);
+		return;
+	}
+	int l0 = (int)floor(lod);
+	double fr = lod - l0;
+	if (l0 >= f->lv - 1) {
+		rf_fetch_from(f, pic, f->lv - 1, a, b, px);
+		return;
+	}
+	float q[4];
+	rf_fetch_from(f, pic, l0, a, b, px);
+	rf_fetch_from(f, pic, l0 + 1, a, b, q);
+	for (int k = 0; k < 4; k++) {
+		px[k] += (float)((q[k] - px[k]) * fr);
+	}
+}
+
+/* How much of the room's lamp reaches p, on a face facing n, as a part of
+ * LIT_KEY_IRRADIANCE: its pool, and whatever stands in the way. */
+static double rf_lamp(vec3 p, vec3 n)
+{
+	struct key_light kl = key_at(p, ROOM_KIND);
+	double l = kl.irr / LIT_KEY_IRRADIANCE;
+	if (l > 1e-4 && vdot(n, kl.dir) > 0.0) {
+		l *= scene_shadow(vadd(p, vmul(n, 0.040)), kl.dir, ROOM_KIND, kl.ang);
+	}
+	return l;
+}
+
+/* Where along the normal through w the face's own surface is: marched in
+ * from just outside it. A start inside something else is a place that
+ * something stands on, which nothing will ever see. */
+static bool rf_surface(const struct rface *f, vec3 w, vec3 *hp, int *id)
+{
+	vec3 p = vadd(w, vmul(f->n, f->out));
+	hit3 h0 = scene_map(p, ROOM_KIND);
+	if (h0.d < 0.0 && h0.id > 0) {
+		return false;
+	}
+	double t = 0.0, tmax = f->out + f->in;
+	for (int i = 0; i < 96 && t <= tmax; i++) {
+		vec3 q = vsub(p, vmul(f->n, t));
+		hit3 h = scene_map(q, ROOM_KIND);
+		if (h.d < 0.0015 && h.id > 0) {
+			*hp = q;
+			*id = h.id;
+			return true;
+		}
+		t += fmax(h.d, 0.0008);
+	}
+	return false;
+}
+
+static double rf_light_at(const struct rface *f, double a, double b);
+
+/* Light points no further than this from one at a place that is seen are
+ * worked out in full (rf_mark_views): the four round a sample, and those
+ * the put right's points need, which are a third further apart. */
+#define RF_SEEN_LIGHT 4
+#define RF_SEEN_FIX 3
+
+/* whether f's light point nearest (a, b) is within reach of a seen one */
+static bool rf_seen_near(const struct rface *f, double a, double b, int reach)
+{
+	if (!f->seen) {
+		return true;
+	}
+	int x = (int)lround(clampf(a, 0.0, 1.0) * (f->lw - 1));
+	int y = (int)lround(clampf(b, 0.0, 1.0) * (f->lh - 1));
+	return f->seen[(size_t)y * f->lw + x] <= reach;
+}
+
+/* f's put-right factor at (a, b) of it, from one of its grids */
+static void rf_fix_from(const struct rface *f, const float *g, double a, double b,
+	double out[3])
+{
+	double x = clampf(a, 0.0, 1.0) * (f->fw - 1), y = clampf(b, 0.0, 1.0) * (f->fh - 1);
+	int x0 = (int)x, y0 = (int)y;
+	int x1 = x0 + 1 < f->fw ? x0 + 1 : x0, y1 = y0 + 1 < f->fh ? y0 + 1 : y0;
+	double fx = x - x0, fy = y - y0;
+	for (int c = 0; c < 3; c++) {
+		double p00 = g[(y0 * f->fw + x0) * 3 + c], p10 = g[(y0 * f->fw + x1) * 3 + c];
+		double p01 = g[(y1 * f->fw + x0) * 3 + c], p11 = g[(y1 * f->fw + x1) * 3 + c];
+		double top = p00 + (p10 - p00) * fx, bot = p01 + (p11 - p01) * fx;
+		out[c] = top + (bot - top) * fy;
+	}
+}
+
+/* f's put-right factor at (a, b) of it, as seen from one end of the move */
+static void rf_fix_at(const struct rface *f, int e, double a, double b, double out[3])
+{
+	rf_fix_from(f, f->fix[e], a, b, out);
+}
+
+struct rf_fix_arg {
+	struct rface *f;
+	vec3 eye[2];
+	int eyes;
+	float *is[2], *was[2];   /* a point each: r g b and whether it counts */
+};
+
+static void rf_fix_row(void *p, int y)
+{
+	struct rf_fix_arg *A = p;
+	struct rface *f = A->f;
+	const struct rface *tf = f->src;
+	/* The picture at the very point the room is shaded at, not at the
+	 * spacing of the points: the grain is in both, and cancels only where
+	 * both are of the same place -- and so the desk as it was made, as it
+	 * is in the picture, whatever it is made of now */
+	const double lod = 0.0;
+	g_desk_as_made = true;
+	for (int x = 0; x < f->fw; x++) {
+		double a = (double)x / (f->fw - 1), b = (double)y / (f->fh - 1);
+		if (!rf_seen_near(f, a, b, RF_SEEN_FIX)) {
+			continue;   /* nobody sees near it: it weighs nothing */
+		}
+		vec3 w = vadd(f->o, vadd(vmul(f->u, a), vmul(f->v, b)));
+		vec3 hp;
+		int id;
+		bool there = rf_surface(f, w, &hp, &id);
+		vec3 n = there ? scene_normal(hp, ROOM_KIND) : f->n;
+		double ta = a, tb = b;
+		rf_move(f, &ta, &tb);
+		for (int e = 0; e < A->eyes; e++) {
+			float *o = A->is[e] + ((size_t)y * f->fw + x) * 4;
+			float *q = A->was[e] + ((size_t)y * f->fw + x) * 4;
+			o[0] = o[1] = o[2] = o[3] = 0.0f;
+			q[0] = q[1] = q[2] = q[3] = 0.0f;
+			if (!there || ta < 0.0 || ta > 1.0 || tb < 0.0 || tb > 1.0) {
+				continue;
+			}
+			/* what the pictures and the lamp worked out for this room
+			 * make of the place, and what this room's light does */
+			float px[4], kp[4];
+			rf_sample(tf, e ? RF_REST0 : RF_REST, ta, tb, lod, px);
+			rf_sample(tf, e ? RF_LAMP0 : RF_LAMP, ta, tb, lod, kp);
+			if (px[3] < 0.5f) {
+				continue;
+			}
+			double lamp = f->light ? rf_light_at(f, a, b) : 0.0;
+			double ik = kp[3] > 1e-6f ? lamp / kp[3] : 0.0;
+			vec3 rd = vnorm(vsub(hp, A->eye[e]));
+			vec3 now = shade_surface(hp, n, rd, ROOM_KIND, id, 1.0, 0);
+			double was[3] = { px[0] / px[3] + kp[0] * ik, px[1] / px[3] + kp[1] * ik,
+				px[2] / px[3] + kp[2] * ik };
+			double is[3] = { now.x, now.y, now.z };
+			for (int c = 0; c < 3; c++) {
+				o[c] = (float)is[c];
+				q[c] = (float)was[c];
+			}
+			o[3] = q[3] = 1.0f;
+		}
+	}
+	g_desk_as_made = false;
+}
+
+/* A box of 2r + 1 each way over w by h points of r g b and a weight, the
+ * weight too, in place; twice. */
+static void rf_soften(float *g, int w, int h, int r)
+{
+	float *t = malloc((size_t)w * h * 4 * sizeof(float));
+	if (!t || r < 1) {
+		free(t);
+		return;
+	}
+	for (int pass = 0; pass < 2; pass++) {
+		for (int y = 0; y < h; y++) {
+			for (int x = 0; x < w; x++) {
+				float sum[4] = { 0, 0, 0, 0 };
+				for (int k = -r; k <= r; k++) {
+					int xx = x + k < 0 ? 0 : x + k >= w ? w - 1 : x + k;
+					const float *p = g + ((size_t)y * w + xx) * 4;
+					for (int c = 0; c < 4; c++) {
+						sum[c] += p[c] * p[3];
+					}
+				}
+				float *o = t + ((size_t)y * w + x) * 4;
+				for (int c = 0; c < 3; c++) {
+					o[c] = sum[3] > 1e-6f ? sum[c] / sum[3] : 0.0f;
+				}
+				o[3] = sum[3] / (2 * r + 1);
+			}
+		}
+		for (int x = 0; x < w; x++) {
+			for (int y = 0; y < h; y++) {
+				float sum[4] = { 0, 0, 0, 0 };
+				for (int k = -r; k <= r; k++) {
+					int yy = y + k < 0 ? 0 : y + k >= h ? h - 1 : y + k;
+					const float *p = t + ((size_t)yy * w + x) * 4;
+					for (int c = 0; c < 4; c++) {
+						sum[c] += p[c] * p[3];
+					}
+				}
+				float *o = g + ((size_t)y * w + x) * 4;
+				for (int c = 0; c < 3; c++) {
+					o[c] = sum[3] > 1e-6f ? sum[c] / sum[3] : 0.0f;
+				}
+				o[3] = sum[3] / (2 * r + 1);
+			}
+		}
+	}
+	free(t);
+}
+
+/* The faces whose surroundings change with the room, put right for this
+ * one, tpu points to the unit. Returns how many points were worked out. */
+static long rf_fix(struct rface_set *s, double tpu)
+{
+	long n = 0;
+	for (int i = 0; i < s->n; i++) {
+		struct rface *f = &s->f[i];
+		if (!f->live || f->trace || !f->src) {
+			continue;
+		}
+		int eyes = rf_has(f->src, RF_REST0) ? 2 : 1;
+		double d = tpu * f->lfine;
+		f->fw = (int)ceil(vlen(f->u) * d) + 1;
+		f->fh = (int)ceil(vlen(f->v) * d) + 1;
+		f->fw = f->fw < 2 ? 2 : f->fw;
+		f->fh = f->fh < 2 ? 2 : f->fh;
+		bool ok = true;
+		for (int e = 0; e < eyes; e++) {
+			f->fix[e] = malloc((size_t)f->fw * f->fh * 3 * sizeof(float));
+			ok = ok && f->fix[e];
+		}
+		if (!ok) {
+			free(f->fix[0]);
+			free(f->fix[1]);
+			f->fix[0] = f->fix[1] = NULL;
+			continue;
+		}
+		size_t np = (size_t)f->fw * f->fh;
+		struct rf_fix_arg a = { f, { s->eye1, s->eye0 }, eyes, { NULL, NULL }, { NULL, NULL } };
+		for (int e = 0; e < eyes; e++) {
+			a.is[e] = calloc(np * 4, sizeof(float));
+			a.was[e] = calloc(np * 4, sizeof(float));
+			ok = ok && a.is[e] && a.was[e];
+		}
+		if (ok) {
+			rf_run(rf_fix_row, &a, f->fh);
+			/* Both softened over a unit or so before one is divided by the
+			 * other: the grain is in both, a point of it at a time in the
+			 * room's light and smoothed in a picture that starts coarse;
+			 * what is wanted is how the light differs. */
+			int r = (int)ceil(d * 0.6);
+			for (int e = 0; e < eyes; e++) {
+				rf_soften(a.is[e], f->fw, f->fh, r);
+				rf_soften(a.was[e], f->fw, f->fh, r);
+				for (size_t k = 0; k < np; k++) {
+					const float *o = a.is[e] + k * 4, *q = a.was[e] + k * 4;
+					for (int c = 0; c < 3; c++) {
+						f->fix[e][k * 3 + c] = o[3] > 1e-3f && q[3] > 1e-3f
+							? (float)clampf((o[c] / o[3] + 0.002) / (q[c] / q[3] + 0.002),
+								0.2, 5.0)
+							: 1.0f;
+					}
+				}
+			}
+		} else {
+			for (size_t k = 0; k < np * 3; k++) {
+				f->fix[0][k] = 1.0f;
+				if (f->fix[1]) {
+					f->fix[1][k] = 1.0f;
+				}
+			}
+		}
+		for (int e = 0; e < eyes; e++) {
+			free(a.is[e]);
+			free(a.was[e]);
+		}
+		for (int y = 0; y < f->fh; y++) {
+			for (int x = 0; x < f->fw; x++) {
+				n += eyes * rf_seen_near(f, (double)x / (f->fw - 1), (double)y / (f->fh - 1),
+					RF_SEEN_FIX);
+			}
+		}
+	}
+	return n;
+}
+
+/* The lamp on f at (a, b) of it, from the points either side: as it is
+ * now, or with what moves all the way in. */
+static double rf_light_from(const struct rface *f, const float *l, double a, double b)
+{
+	double x = clampf(a, 0.0, 1.0) * (f->lw - 1), y = clampf(b, 0.0, 1.0) * (f->lh - 1);
+	int x0 = (int)x, y0 = (int)y;
+	int x1 = x0 + 1 < f->lw ? x0 + 1 : x0, y1 = y0 + 1 < f->lh ? y0 + 1 : y0;
+	double fx = x - x0, fy = y - y0;
+	double top = l[y0 * f->lw + x0] + (l[y0 * f->lw + x1] - l[y0 * f->lw + x0]) * fx;
+	double bot = l[y1 * f->lw + x0] + (l[y1 * f->lw + x1] - l[y1 * f->lw + x0]) * fx;
+	return top + (bot - top) * fy;
+}
+
+static double rf_light_at(const struct rface *f, double a, double b)
+{
+	return rf_light_from(f, f->light, a, b);
+}
+
+static double rf_height_at(const struct rface *f, double a, double b);
+
+static void rf_light_row(void *p, int y)
+{
+	struct rface *f = p;
+	const struct rface *hf = f->src ? f->src : f;
+	for (int x = 0; x < f->lw; x++) {
+		double a = (double)x / (f->lw - 1), b = (double)y / (f->lh - 1);
+		vec3 w = vadd(f->o, vadd(vmul(f->u, a), vmul(f->v, b)));
+		if (f->seen && f->seen[y * f->lw + x] > RF_SEEN_LIGHT) {
+			/* nobody sees near it: the lamp's pool, nothing in the way */
+			f->light[y * f->lw + x] = (float)(key_at(w, ROOM_KIND).irr / LIT_KEY_IRRADIANCE);
+			continue;
+		}
+		if (hf->height) {
+			/* on what stands up off the face there, not under it */
+			double ta = a, tb = b;
+			if (f->src) {
+				rf_move(f, &ta, &tb);
+			}
+			w = vadd(w, vmul(f->n, rf_height_at(hf, ta, tb)));
+		}
+		double l = rf_lamp(w, f->n);
+		if (f->src && l > 0.0) {
+			/* The picture has the lamp at the slant it fell at in the room
+			 * it was pictured in, where it hung elsewhere: this room's
+			 * slant instead. */
+			vec3 then = vnorm(vsub(f->src->lamp, vadd(w, vsub(f->src->at, f->at))));
+			vec3 now = key_at(w, ROOM_KIND).dir;
+			double was = vdot(f->src->n, then), is = vdot(f->n, now);
+			l *= clampf(fmax(is, 0.0) / fmax(was, 0.05), 0.0, 4.0);
+		}
+		f->light[y * f->lw + x] = (float)l;
+	}
+}
+
+/* f's light points at tpu to the unit (times its own lfine): lw by lh */
+static void rf_light_size(struct rface *f, double tpu)
+{
+	double d = tpu * f->lfine;
+	f->lw = (int)ceil(vlen(f->u) * d) + 1;
+	f->lh = (int)ceil(vlen(f->v) * d) + 1;
+	f->lw = f->lw < 2 ? 2 : f->lw;
+	f->lh = f->lh < 2 ? 2 : f->lh;
+}
+
+/* The lamp on every face that is laid, tpu points to the unit, for the
+ * room as it is now. Returns how many points were worked out in full. */
+static long rf_light(struct rface_set *s, double tpu)
+{
+	long n = 0;
+	for (int i = 0; i < s->n; i++) {
+		struct rface *f = &s->f[i];
+		if (f->trace || (!f->lv && !f->src)) {
+			continue;
+		}
+		int lw = f->lw, lh = f->lh;
+		rf_light_size(f, tpu);
+		if (f->seen && (f->lw != lw || f->lh != lh)) {
+			free(f->seen);   /* marked on other points */
+			f->seen = NULL;
+		}
+		f->light = malloc((size_t)f->lw * f->lh * sizeof(float));
+		if (!f->light) {
+			continue;
+		}
+		rf_run(rf_light_row, f, f->lh);
+		for (int k = 0; k < f->lw * f->lh; k++) {
+			n += !f->seen || f->seen[k] <= RF_SEEN_LIGHT;
+		}
+	}
+	return n;
+}
+
+/* f's height field at (a, b) of its picture's face */
+static double rf_height_at(const struct rface *f, double a, double b)
+{
+	int w = f->tw[0], h = f->th[0];
+	double x = clampf(a, 0.0, 1.0) * w - 0.5, y = clampf(b, 0.0, 1.0) * h - 0.5;
+	int x0 = (int)floor(x), y0 = (int)floor(y);
+	double fx = x - x0, fy = y - y0;
+	int x1 = x0 + 1 >= w ? w - 1 : x0 + 1, y1 = y0 + 1 >= h ? h - 1 : y0 + 1;
+	x0 = x0 < 0 ? 0 : x0;
+	y0 = y0 < 0 ? 0 : y0;
+	const float *t = f->height;
+	double top = t[(size_t)y0 * w + x0] + (t[(size_t)y0 * w + x1] - t[(size_t)y0 * w + x0]) * fx;
+	double bot = t[(size_t)y1 * w + x0] + (t[(size_t)y1 * w + x1] - t[(size_t)y1 * w + x0]) * fx;
+	return top + (bot - top) * fy;
+}
+
+/* The ray through (u, v) followed down through f's height field, from the
+ * plane of its highest point to that of its lowest, a few steps and then
+ * between the two either side: where it meets it, (a, b) on f and how far
+ * along. False when it does not, or from behind. */
+static bool rf_hit_relief(const struct rface *f, const struct room_cam *c, double u, double v,
+	double *a, double *b, double *t, bool *wall)
+{
+	const struct rface *tf = f->src ? f->src : f;
+	vec3 rd = vadd(c->ww, vadd(vmul(c->uu, (u - 0.5) * c->fov_x),
+		vmul(c->vv, (0.5 - v) * c->fov_y)));
+	double den = vdot(rd, f->n);
+	if (den > -1e-9) {
+		return false;
+	}
+	/* from a hair above the highest point to a hair below the lowest: a
+	 * floor that is all at the lowest, followed down to exactly there, was
+	 * missed as often as met */
+	double base = vdot(vsub(f->o, c->eye), f->n);
+	double t0 = (base + tf->hmax + 0.002) / den, t1 = (base + tf->hmin - 0.002) / den;
+	if (t1 <= 0.0) {
+		return false;
+	}
+	t0 = fmax(t0, 1e-4);
+	/* a step for every 0.04 of the depth it goes down, at least ten: the
+	 * leather of the clock on the board is rounded off 0.7 deep */
+	const int N = 10 + (int)fmin((tf->hmax - tf->hmin) / 0.04, 30.0);
+	double pt = t0, pd = 0.0;
+	for (int i = 0; i <= N; i++) {
+		double tt = t0 + (t1 - t0) * i / N;
+		vec3 d = vsub(vadd(c->eye, vmul(rd, tt)), f->o);
+		double fa = vdot(d, f->u) / vdot(f->u, f->u), fb = vdot(d, f->v) / vdot(f->v, f->v);
+		double ta = fa, tb = fb;
+		if (f->src) {
+			rf_move(f, &ta, &tb);
+		}
+		double over = vdot(d, f->n) - rf_height_at(tf, ta, tb);
+		if (over <= 0.0) {
+			double th = i == 0 ? tt : pt + (tt - pt) * pd / fmax(pd - over, 1e-9);
+			vec3 e = vsub(vadd(c->eye, vmul(rd, th)), f->o);
+			*a = vdot(e, f->u) / vdot(f->u, f->u);
+			*b = vdot(e, f->v) / vdot(f->v, f->v);
+			*t = th;
+			/* how steep the field is where it was met: met from the side,
+			 * what stands up off the face is a wall of texels each the
+			 * colour of the top of it, and what is under an overhang (the
+			 * dial under the rim of its well, looked down at) is not there */
+			double ha = *a, hb = *b;
+			if (f->src) {
+				rf_move(f, &ha, &hb);
+			}
+			double da = 1.0 / tf->tw[0], db = 1.0 / tf->th[0];
+			double ga = (rf_height_at(tf, ha + da, hb) - rf_height_at(tf, ha - da, hb))
+				/ (2.0 * da * vlen(tf->u));
+			double gb = (rf_height_at(tf, ha, hb + db) - rf_height_at(tf, ha, hb - db))
+				/ (2.0 * db * vlen(tf->v));
+			*wall = ga * ga + gb * gb > RF_WALL * RF_WALL;
+			return true;
+		}
+		pt = tt;
+		pd = over;
+	}
+	return false;
+}
+
+/* whether something stands up off f: its heights are marched (rf_hit_relief) */
+static bool rf_relief(const struct rface *f)
+{
+	const struct rface *hf = f->src ? f->src : f;
+	return hf->height && hf->hmax - hf->hmin > 0.004;
+}
+
+struct rf_won {
+	const struct rface *f, *tf;
+	double fa, fb;     /* where on f */
+	double a, b, lod;
+	vec3 p;
+	float px[4];
+};
+
+/* ---- the desk laid from its faces, made of another wood ----
+ *
+ * The faces' pictures are of the desk as it was made, walnut: lit, with the
+ * grain in them. Laid for a desk of another wood (desk_set_wood), what each
+ * sample shows of the walnut is taken out and the other put in. What a
+ * surface sends back is the light that falls on it times its colour, and
+ * what its lacquer gives back, which is the light's colour whatever the
+ * wood under it (shade_surface): with the walnut's colour known where the
+ * sample is, the two are told apart across its three channels, and put
+ * together again with the other's. */
+
+/* The desk's own material a face shows, by its name: MID_DESK_TOP; -1 for
+ * the drawer's, which is found where each sample is; 0 for none. */
+static int rf_desk_mid(const char *what)
+{
+	if (!what) {
+		return 0;
+	}
+	if (!strcmp(what, "desk") || !strcmp(what, "desk-near") || !strcmp(what, "pl-desk")
+		|| !strncmp(what, "pl-edge", 7) || !strncmp(what, "pl-corner", 9)) {
+		return MID_DESK_TOP;
+	}
+	if (!strncmp(what, "dr-", 3) && strcmp(what, "dr-felt") && strcmp(what, "dr-pull")) {
+		return -1;
+	}
+	return 0;
+}
+
+/* The colour of a part of the desk at p, its face turned to n: as it was
+ * made (walnut, no stain), or as it is now. As icon_material and
+ * shade_surface have it, on a flat face. */
+static vec3 desk_albedo_at(vec3 p, vec3 n, int mid, bool as_made)
+{
+	struct mtl m = { .albedo = { 0.5, 0.5, 0.5 }, .rough = 0.45, .edge = 1.0, .coat_rough = 0.08 };
+	const struct wood *made = &WOOD_WALNUT;
+	switch (mid) {
+	case MID_DESK_TOP:
+		if (as_made) {
+			timber_at(made, p, p.x, p.z, &m, 5.4, 1.00);
+		} else {
+			desk_wood_at(p, p.x, p.z, &m, 5.4, 1.00);
+		}
+		desk_stains(p, &m);
+		break;
+	case MID_DRAWER_FACE:
+		if (as_made) {
+			timber_at(made, p, p.x, p.y * 2.6, &m, 0.0, 1.10);
+		} else {
+			desk_wood_at(p, p.x, p.y * 2.6, &m, 0.0, 1.10);
+		}
+		break;
+	case MID_DRAWER_WOOD: {
+		bool vert = fabs(p.x) > RM_DR_HX - 1.0;
+		if (as_made) {
+			timber_at(made, p, vert ? p.z : p.x, vert ? p.y * 3.0 : p.z, &m, 0.0, 0.60);
+		} else {
+			desk_wood_at(p, vert ? p.z : p.x, vert ? p.y * 3.0 : p.z, &m, 0.0, 0.60);
+		}
+		m.albedo = vmul(m.albedo, 0.78);
+		break;
+	}
+	default:
+		return m.albedo;
+	}
+	/* the dust that settles on what faces up (shade_surface, on the flat) */
+	double up = clampf(n.y, 0.0, 1.0);
+	m.albedo = vmix(m.albedo, v3(0.42, 0.40, 0.37), m.dust * up * up * 0.42 * 0.16);
+	return m.albedo;
+}
+
+/* c, a channel at a time, as l (the light's colour) times (d a + s): how
+ * much of it is the surface's colour a, and how much the light's. */
+static void lit_split(const double c[3], const double l[3], const double a[3], double *d, double *s)
+{
+	double yv[3], ma = (a[0] + a[1] + a[2]) / 3.0, my = 0.0;
+	for (int i = 0; i < 3; i++) {
+		yv[i] = l[i] > 1e-6 ? c[i] / l[i] : 0.0;
+		my += yv[i] / 3.0;
+	}
+	double sxy = 0.0, sxx = 0.0, ay = 0.0, aa = 0.0;
+	for (int i = 0; i < 3; i++) {
+		sxy += (a[i] - ma) * (yv[i] - my);
+		sxx += (a[i] - ma) * (a[i] - ma);
+		ay += a[i] * yv[i];
+		aa += a[i] * a[i];
+	}
+	double dd = sxx > 1e-9 ? sxy / sxx : (aa > 1e-12 ? ay / aa : 0.0);
+	double ss = my - dd * ma;
+	if (ss < 0.0) {
+		ss = 0.0;
+		dd = aa > 1e-12 ? ay / aa : 0.0;
+	}
+	if (dd < 0.0) {
+		dd = 0.0;
+		ss = my;
+	}
+	*d = dd;
+	*s = ss;
+}
+
+/* The light on the desk as it was made, a cell at a time: what falls on
+ * each part of it from the room and from the lamp, and what its lacquer
+ * gives back of each, worked out from the face's pictures against the
+ * walnut's own colour there -- both taken over all of the cell, since the
+ * light changes slowly over a desk and the grain does not: a sample's
+ * colour taken against the walnut's at one point of it read a dark band
+ * of the grain as a deal more light (and a desk of another wood came out
+ * a fifth too bright). Made once for each picture, whatever wood the desk
+ * is to be. */
+#define RELIT_CELLS 4.0   /* cells to the unit */
+#define RELIT_SUB 4       /* and points a side of each, where it is looked at */
+struct relit_map {
+	const struct rface *f;   /* the face whose pictures these are of */
+	float *m;                /* 4 a cell: the room's d and s, the lamp's; d < 0, none */
+	int w, h;
+};
+static struct relit_map g_relit[32];
+static int g_nrelit;
+static pthread_mutex_t g_relit_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* The desk's own material at p, on a face showing mid (rf_desk_mid): the
+ * drawer's, which of it is there. 0, none. */
+static int desk_mid_at(vec3 p, int mid)
+{
+	if (mid >= 0) {
+		return mid;
+	}
+	int id = scene_map(p, ROOM_KIND).id;
+	return id == MID_DRAWER_FACE || id == MID_DRAWER_WOOD ? id : 0;
+}
+
+static struct relit_map relit_make(const struct rface *f, int mid)
+{
+	struct relit_map rm = { f, NULL, 0, 0 };
+	double ul = vlen(f->u), vl = vlen(f->v);
+	rm.w = (int)fmax(1.0, ceil(ul * RELIT_CELLS));
+	rm.h = (int)fmax(1.0, ceil(vl * RELIT_CELLS));
+	rm.m = malloc(sizeof(float) * 4 * (size_t)rm.w * (size_t)rm.h);
+	if (!rm.m) {
+		return rm;
+	}
+	/* the pictures looked at as finely as the points are apart */
+	double tpu = f->tw[0] / fmax(ul, 1e-6);
+	double lod = log2(fmax(tpu / (RELIT_CELLS * RELIT_SUB), 1.0));
+	for (int j = 0; j < rm.h; j++) {
+		for (int i = 0; i < rm.w; i++) {
+			double cr[3] = { 0 }, ck[3] = { 0 }, ca[3] = { 0 };
+			int n = 0;
+			vec3 mid_p = v3(0, 0, 0);
+			for (int q = 0; q < RELIT_SUB * RELIT_SUB; q++) {
+				double a = (i + (q % RELIT_SUB + 0.5) / RELIT_SUB) / rm.w;
+				double b = (j + (q / RELIT_SUB + 0.5) / RELIT_SUB) / rm.h;
+				vec3 p = vadd(f->o, vadd(vmul(f->u, a), vmul(f->v, b)));
+				int m = desk_mid_at(p, mid);
+				if (!m || (f->height && rf_height_at(f, a, b) > 0.004)) {
+					continue;   /* not the desk's own wood here, or something lies on it */
+				}
+				float px[4], kx[4];
+				rf_sample(f, RF_REST, a, b, lod, px);
+				rf_sample(f, RF_LAMP, a, b, lod, kx);
+				if (px[3] < 0.5f || kx[3] < 1e-6f) {
+					continue;
+				}
+				vec3 al = desk_albedo_at(p, f->n, m, true);
+				for (int k = 0; k < 3; k++) {
+					cr[k] += px[k] / px[3];
+					ck[k] += kx[k] / kx[3];
+				}
+				ca[0] += al.x;
+				ca[1] += al.y;
+				ca[2] += al.z;
+				mid_p = vadd(mid_p, p);
+				n++;
+			}
+			float *o = rm.m + 4 * ((size_t)j * rm.w + i);
+			if (n == 0) {
+				o[0] = o[1] = o[2] = o[3] = -1.0f;
+				continue;
+			}
+			for (int k = 0; k < 3; k++) {
+				cr[k] /= n;
+				ck[k] /= n;
+				ca[k] /= n;
+			}
+			mid_p = vmul(mid_p, 1.0 / n);
+			vec3 amb = vadd(sh_irradiance(f->n), shelf_lamp_at(mid_p, f->n));
+			const double la[3] = { amb.x, amb.y, amb.z };
+			const double lk[3] = { LIT_KEY_COL.x, LIT_KEY_COL.y, LIT_KEY_COL.z };
+			double d, sp;
+			lit_split(cr, la, ca, &d, &sp);
+			o[0] = (float)d;
+			o[1] = (float)sp;
+			lit_split(ck, lk, ca, &d, &sp);
+			o[2] = (float)d;
+			o[3] = (float)sp;
+		}
+	}
+	return rm;
+}
+
+/* The cells of a set's faces, gone with them: another set may come where
+ * they were. */
+static void relit_forget(const struct rface_set *s)
+{
+	pthread_mutex_lock(&g_relit_lock);
+	for (int i = 0; i < g_nrelit;) {
+		if (g_relit[i].f >= s->f && g_relit[i].f < s->f + RF_MAX) {
+			free(g_relit[i].m);
+			g_relit[i] = g_relit[--g_nrelit];
+		} else {
+			i++;
+		}
+	}
+	pthread_mutex_unlock(&g_relit_lock);
+}
+
+/* The cells of face f's pictures, made the first time they are wanted. */
+static const struct relit_map *relit_of(const struct rface *f, int mid)
+{
+	pthread_mutex_lock(&g_relit_lock);
+	for (int i = 0; i < g_nrelit; i++) {
+		if (g_relit[i].f == f) {
+			pthread_mutex_unlock(&g_relit_lock);
+			return g_relit[i].m ? &g_relit[i] : NULL;
+		}
+	}
+	const struct relit_map *out = NULL;
+	if (g_nrelit < (int)(sizeof g_relit / sizeof g_relit[0])) {
+		g_relit[g_nrelit] = relit_make(f, mid);
+		out = g_relit[g_nrelit].m ? &g_relit[g_nrelit] : NULL;
+		g_nrelit++;
+	}
+	pthread_mutex_unlock(&g_relit_lock);
+	return out;
+}
+
+/* The light at a, b on the face: the four cells round it, those that have
+ * any. False if none of them does. */
+static bool relit_at(const struct relit_map *rm, double a, double b, double out[4])
+{
+	double x = a * rm->w - 0.5, y = b * rm->h - 0.5;
+	int x0 = (int)floor(x), y0 = (int)floor(y);
+	double fx = x - x0, fy = y - y0, wsum = 0.0;
+	out[0] = out[1] = out[2] = out[3] = 0.0;
+	for (int k = 0; k < 4; k++) {
+		int cx = x0 + (k & 1), cy = y0 + (k >> 1);
+		cx = cx < 0 ? 0 : cx >= rm->w ? rm->w - 1 : cx;
+		cy = cy < 0 ? 0 : cy >= rm->h ? rm->h - 1 : cy;
+		const float *c = rm->m + 4 * ((size_t)cy * rm->w + cx);
+		if (c[0] < 0.0f) {
+			continue;
+		}
+		double wt = ((k & 1) ? fx : 1.0 - fx) * ((k >> 1) ? fy : 1.0 - fy) + 1e-6;
+		for (int q = 0; q < 4; q++) {
+			out[q] += c[q] * wt;
+		}
+		wsum += wt;
+	}
+	if (wsum <= 0.0) {
+		return false;
+	}
+	for (int q = 0; q < 4; q++) {
+		out[q] /= wsum;
+	}
+	return true;
+}
+
+/* A sample of the desk at p, at a, b on its picture's face, as the desk is
+ * now: the light of the cells round it on the colour of the wood it is now
+ * made of, there. False if the cells say nothing of it. */
+static bool desk_relight(const struct rface *pf, double a, double b, vec3 p, vec3 n, int mid,
+	double rest[3], double key[3])
+{
+	const struct relit_map *rm = relit_of(pf, rf_desk_mid(pf->what));
+	double l4[4];
+	if (!rm || !relit_at(rm, a, b, l4)) {
+		return false;
+	}
+	vec3 a1 = desk_albedo_at(p, n, mid, false);
+	vec3 amb = vadd(sh_irradiance(n), shelf_lamp_at(p, n));
+	const double now[3] = { a1.x, a1.y, a1.z };
+	const double la[3] = { amb.x, amb.y, amb.z };
+	const double lk[3] = { LIT_KEY_COL.x, LIT_KEY_COL.y, LIT_KEY_COL.z };
+	for (int i = 0; i < 3; i++) {
+		rest[i] = la[i] * (l4[0] * now[i] + l4[1]);
+		key[i] = lk[i] * (l4[2] * now[i] + l4[3]);
+	}
+	return true;
+}
+
+static void rf_lay_row(void *p, int y)
+{
+	struct rf_lay_arg *A = p;
+	struct room_ctx *ctx = A->ctx;
+	const struct room_cam *c = &ctx->cam;
+	int hw = ctx->hw, hh = ctx->hh;
+	const unsigned char *only = A->only ? A->only + (size_t)y * hw : NULL;
+	/* a desk not as it was made: its samples relit (desk_relight) */
+	bool other_desk = bake_look() != 0;
+	/* the console's sheet with its lid up (room_bare_make) */
+	bool lid_up = ctx->layer == 4 && g_cc_lid > 1.5;
+	if (only && !memchr(only, 1, (size_t)hw)) {
+		return;
+	}
+	float *z = A->z + (size_t)y * hw;
+	unsigned char *traced = A->traced + (size_t)y * hw;
+	struct rf_won *won = calloc((size_t)hw, sizeof *won);
+	float *zw = malloc((size_t)hw * sizeof *zw);   /* the nearest wall met */
+	if (!won || !zw) {
+		free(won);
+		free(zw);
+		for (int x = 0; x < hw; x++) {
+			if (!only || only[x]) {
+				A->need[(size_t)y * hw + x] = 1;
+			}
+		}
+		return;
+	}
+	for (int x = 0; x < hw; x++) {
+		z[x] = zw[x] = INFINITY;
+		traced[x] = 0;
+	}
+	for (int i = 0; i < A->s->n; i++) {
+		const struct rface *f = &A->s->f[i];
+		const int *bx = A->box[i];
+		if ((!f->lv && !f->trace && !f->src && !f->clear) || y < bx[1] || y > bx[3]) {
+			continue;
+		}
+		bool relief = rf_relief(f);
+		for (int x = bx[0]; x <= bx[2]; x++) {
+			if (only && !only[x]) {
+				continue;
+			}
+			int s = (y * hw + x) & 3;
+			double u = (x + (A->whole ? 0.5 : SS_OFF[s][0])) / hw;
+			double v = (y + (A->whole ? 0.5 : SS_OFF[s][1])) / hh;
+			double a, b, t;
+			bool wall = false;
+			bool hit = relief ? rf_hit_relief(f, c, u, v, &a, &b, &t, &wall)
+				: rf_hit(f, c, u, v, &a, &b, &t);
+			if (!hit || a < 0.0 || a > 1.0 || b < 0.0 || b > 1.0 || t >= z[x]) {
+				continue;
+			}
+			if (f->cut && vadd(f->o, vadd(vmul(f->u, a), vmul(f->v, b))).z < RM_ZF + 0.02) {
+				/* past the desk's far edge: it is not there (map_console,
+				 * map_post), and what is behind it shows */
+				continue;
+			}
+			if (wall) {
+				zw[x] = fminf(zw[x], (float)t);
+				continue;
+			}
+			if (f->trace || f->clear) {
+				z[x] = (float)t;
+				traced[x] = f->trace;
+				won[x].f = NULL;
+				continue;
+			}
+			vec3 at = vadd(f->o, vadd(vmul(f->u, a), vmul(f->v, b)));
+			double fa = a, fb = b;
+			/* how many texels a sample spans, from where the next sample
+			 * along and the next one down fall on the face's plane, and
+			 * this one: met there too, not up on the relief, which a
+			 * slanting look moves dozens of texels along -- the brass ring
+			 * round the tube came out blurred */
+			double ax, bx2, ay, by, pa = a, pb = b, tt;
+			double lod = 0.0;
+			bool near = (!relief || rf_hit(f, c, u, v, &pa, &pb, &tt))
+				&& rf_hit(f, c, u + 1.0 / hw, v, &ax, &bx2, &tt)
+				&& rf_hit(f, c, u, v + 1.0 / hh, &ay, &by, &tt);
+			/* the picture, which may be another room's face of the same
+			 * thing, standing somewhere else */
+			const struct rface *tf = f;
+			if (f->src) {
+				tf = f->src;
+				rf_move(f, &a, &b);
+				rf_move(f, &pa, &pb);
+				rf_move(f, &ax, &bx2);
+				rf_move(f, &ay, &by);
+				if (a < 0.0 || a > 1.0 || b < 0.0 || b > 1.0 || !tf->lv) {
+					z[x] = (float)t;
+					traced[x] = 1;
+					atomic_fetch_add(&g_rf_missed[i], 1);
+					continue;
+				}
+			}
+			if (near) {
+				double lx = hypot((ax - pa) * tf->tw[0], (bx2 - pb) * tf->th[0]);
+				double ly = hypot((ay - pa) * tf->tw[0], (by - pb) * tf->th[0]);
+				lod = log2(fmax(fmax(lx, ly), 1e-6));
+			}
+			float px[4];
+			rf_sample(tf, RF_REST, a, b, lod, px);
+			if (px[3] < 0.5f) {
+				continue;
+			}
+			{
+				int tx = (int)(a * tf->tw[0]), ty = (int)(b * tf->th[0]);
+				tx = tx >= tf->tw[0] ? tf->tw[0] - 1 : tx;
+				ty = ty >= tf->th[0] ? tf->th[0] - 1 : ty;
+				if (tf->own[(size_t)ty * tf->tw[0] + tx] == RF_OWN_TALL) {
+					/* something stands up off it here: traced */
+					z[x] = (float)t;
+					traced[x] = 1;
+					continue;
+				}
+			}
+			z[x] = (float)t;
+			traced[x] = 0;
+			won[x] = (struct rf_won){ f, tf, fa, fb, a, b, lod, at,
+				{ px[0], px[1], px[2], px[3] } };
+		}
+	}
+	/* and lit, once each, by what won */
+	for (int x = 0; x < hw; x++) {
+		if (only && !only[x]) {
+			continue;
+		}
+		size_t k = (size_t)y * hw + x;
+		bool need = !isfinite(z[x]) || traced[x] || zw[x] + RF_WALL_GAP < z[x];
+		if (!need && lid_up) {
+			/* the Control Panel's lid, up on its hinge, in front of what was laid */
+			int s = (y * hw + x) & 3;
+			need = cc_lid_ray(c, (x + (A->whole ? 0.5 : SS_OFF[s][0])) / hw,
+				(y + (A->whole ? 0.5 : SS_OFF[s][1])) / hh) < z[x];
+		}
+		A->need[k] = need;
+		if (A->won_by) {
+			A->won_by[k] = need || !won[x].f ? 0 : (unsigned short)(won[x].f - A->s->f + 1);
+		}
+		if (A->mark) {
+			float *m = A->mark + k * 3;
+			m[0] = need || !won[x].f ? 0.0f : (float)(won[x].f - A->s->f + 1);
+			m[1] = (float)won[x].fa;
+			m[2] = (float)won[x].fb;
+			continue;
+		}
+		float *o = ctx->hi + k * 4;
+		if (need || !won[x].f) {
+			/* to be traced, or clear */
+			o[0] = o[1] = o[2] = o[3] = 0.0f;
+			ctx->idhi[k] = 0;
+			continue;
+		}
+		const struct rf_won *w = &won[x];
+		float key[4];
+		rf_sample(w->tf, RF_LAMP, w->a, w->b, w->lod, key);
+		double lamp = w->f->light ? rf_light_at(w->f, w->fa, w->fb) : rf_lamp(w->p, w->f->n);
+		if (w->f->light_in && A->out < 1.0) {
+			double in = rf_light_from(w->f, w->f->light_in, w->fa, w->fb);
+			lamp = in + (lamp - in) * A->out;
+		}
+		double ia = 1.0 / w->px[3], ik = key[3] > 1e-6f ? 1.0 / key[3] : 0.0;
+		double col[3], fix[3] = { 1.0, 1.0, 1.0 };
+		if (w->f->fix[0]) {
+			rf_fix_at(w->f, 0, w->fa, w->fb, fix);
+			if (w->f->fix_in[0] && A->out < 1.0) {
+				double in[3];
+				rf_fix_from(w->f, w->f->fix_in[0], w->fa, w->fb, in);
+				for (int q = 0; q < 3; q++) {
+					fix[q] = in[q] + (fix[q] - in[q]) * A->out;
+				}
+			}
+		}
+		double rest[3], keyv[3];
+		for (int q = 0; q < 3; q++) {
+			rest[q] = w->px[q] * ia;
+			keyv[q] = key[q] * ik;
+		}
+		int mid = other_desk ? rf_desk_mid(w->f->what) : 0;
+		if (mid && w->tf->height && rf_height_at(w->tf, w->a, w->b) > 0.004) {
+			mid = 0;   /* something lying on it there, not the desk */
+		}
+		if (mid < 0) {
+			/* the drawer's: which of it this is, where it is */
+			mid = desk_mid_at(w->p, mid);
+		}
+		if (mid && !desk_relight(w->tf, w->a, w->b, w->p, w->f->n, mid, rest, keyv)) {
+			mid = 0;
+		}
+		for (int q = 0; q < 3; q++) {
+			col[q] = (rest[q] + keyv[q] * lamp) * fix[q];
+		}
+		if (rf_has(w->tf, RF_REST0) && A->along < 1.0) {
+			/* nearer the start of the move: the sheen as seen from there */
+			float px0[4], key0[4];
+			rf_sample(w->tf, RF_REST0, w->a, w->b, w->lod, px0);
+			rf_sample(w->tf, RF_LAMP0, w->a, w->b, w->lod, key0);
+			double ia0 = px0[3] > 1e-6f ? 1.0 / px0[3] : 0.0;
+			double ik0 = key0[3] > 1e-6f ? 1.0 / key0[3] : 0.0;
+			double fix0[3] = { 1.0, 1.0, 1.0 };
+			if (w->f->fix[1]) {
+				rf_fix_at(w->f, 1, w->fa, w->fb, fix0);
+				if (w->f->fix_in[1] && A->out < 1.0) {
+					double in[3];
+					rf_fix_from(w->f, w->f->fix_in[1], w->fa, w->fb, in);
+					for (int q = 0; q < 3; q++) {
+						fix0[q] = in[q] + (fix0[q] - in[q]) * A->out;
+					}
+				}
+			}
+			double rest0[3], keyv0[3];
+			for (int q = 0; q < 3; q++) {
+				rest0[q] = px0[q] * ia0;
+				keyv0[q] = key0[q] * ik0;
+			}
+			if (mid) {
+				/* (the lamp seen from where the move starts: its own pictures' light) */
+				desk_relight(w->tf, w->a, w->b, w->p, w->f->n, mid, rest0, keyv0);
+			}
+			for (int q = 0; q < 3; q++) {
+				double c0 = (rest0[q] + keyv0[q] * lamp) * fix0[q];
+				col[q] = c0 + (col[q] - c0) * A->along;
+			}
+		}
+		o[0] = (float)col[0];
+		o[1] = (float)col[1];
+		o[2] = (float)col[2];
+		o[3] = 1.0f;
+		const struct rface *tf = w->tf;
+		int tx = (int)(w->a * tf->tw[0]), ty = (int)(w->b * tf->th[0]);
+		tx = tx >= tf->tw[0] ? tf->tw[0] - 1 : tx;
+		ty = ty >= tf->th[0] ? tf->th[0] - 1 : ty;
+		ctx->idhi[k] = w->f->src && !w->f->own_ok ? 0 : tf->own[(size_t)ty * tf->tw[0] + tx];
+	}
+	free(won);
+	free(zw);
+}
+
+/* Lay every face through ctx's camera into its samples; what none of them
+ * covers is marked in need, for the tracer. With mark, nothing is lit:
+ * what won each sample goes there instead. With only, only the samples it
+ * sets are laid; with won_by, which face won each goes there too. whole:
+ * a sample a pixel. */
+static void rf_lay_into(const struct rface_set *s, struct room_ctx *ctx, unsigned char *need,
+	float *mark, const unsigned char *only, unsigned short *won_by, bool whole)
+{
+	int hw = ctx->hw, hh = ctx->hh;
+	float *z = malloc((size_t)hw * hh * sizeof(float));
+	unsigned char *traced = malloc((size_t)hw * hh);
+	int (*box)[4] = calloc((size_t)s->n, sizeof *box);
+	if (!z || !box || !traced) {
+		free(z);
+		free(box);
+		free(traced);
+		memset(need, 1, (size_t)hw * hh);
+		return;
+	}
+	for (int i = 0; i < s->n; i++) {
+		const struct rface *f = &s->f[i];
+		const struct rface *hf = f->src ? f->src : f;
+		double up = hf->height ? hf->hmax : 0.0, down = hf->height ? hf->hmin : 0.0;
+		double x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+		bool all = true;
+		for (int k = 0; k < 8; k++) {
+			vec3 w = vadd(f->o, vadd(vmul(f->u, k & 1), vmul(f->v, (k >> 1) & 1)));
+			w = vadd(w, vmul(f->n, (k >> 2) ? up : down));
+			double pu, pv;
+			if (!room_project(&ctx->cam, w, &pu, &pv)) {
+				all = false;
+				break;
+			}
+			x0 = fmin(x0, pu * hw);
+			x1 = fmax(x1, pu * hw);
+			y0 = fmin(y0, pv * hh);
+			y1 = fmax(y1, pv * hh);
+		}
+		if (!all) {
+			x0 = y0 = 0;
+			x1 = hw;
+			y1 = hh;
+		}
+		box[i][0] = (int)fmax(0.0, floor(x0) - 1);
+		box[i][1] = (int)fmax(0.0, floor(y0) - 1);
+		box[i][2] = (int)fmin(hw - 1.0, ceil(x1) + 1);
+		box[i][3] = (int)fmin(hh - 1.0, ceil(y1) + 1);
+	}
+	vec3 d = vsub(s->eye1, s->eye0);
+	double dd = vdot(d, d);
+	double along = dd > 1e-9 ? clampf(vdot(vsub(ctx->cam.eye, s->eye0), d) / dd, 0.0, 1.0)
+		: 1.0;
+	if (getenv("DESK_FACES_ALONG")) {
+		along = atof(getenv("DESK_FACES_ALONG"));
+	}
+	if (getenv("DESK_FACES_DEBUG") && !mark) {
+		printf("    along %.3f\n", along);
+	}
+	struct rf_lay_arg a = { s, ctx, z, need, box, traced, along,
+		s->moves == 4 ? clampf(g_cc_out, 0.0, 1.0)
+		: s->moves == 5 ? clampf(g_pb_open, 0.0, 1.0) : 1.0, mark, only, won_by, whole };
+	rf_run(rf_lay_row, &a, hh);
+	free(z);
+	free(box);
+	free(traced);
+}
+
+static void rf_lay(const struct rface_set *s, struct room_ctx *ctx, unsigned char *need)
+{
+	rf_lay_into(s, ctx, need, NULL, NULL, NULL, ICON_SS == 1);
+}
+
+/* ---- the faces as they are shipped ----
+ *
+ * One file a view: "DSKFACE4", how many faces, and for each a record --
+ * what it is and which of those it is, where it and the room's lamp were
+ * in the room it was pictured in, how far it was turned on a hinge, its
+ * size, the level each picture starts at and the scale of each, how far
+ * what stands off it goes -- and after the records, each face's pictures
+ * as PNGs (cairo's, so multiplied by their alpha), its owners as an A8 PNG
+ * and its heights as another, a length of 0 for one it has not.
+ * Native byte order: it is made on the machine it is built on. */
+
+struct rf_rec {
+	char what[16];
+	int32_t nth, tw, th;
+	uint8_t base[RF_PICS];
+	double o[3], u[3], v[3], n[3], at[3];
+	float scale[RF_PICS];
+	uint32_t len[RF_PICS + 2];   /* the pictures, the owners, the heights */
+	double lamp[3];
+	float hmin, hmax;
+	float turn, spare;
+};
+
+struct rf_src {
+	const unsigned char *at;
+	size_t left;
+};
+
+static cairo_status_t rf_src_read(void *closure, unsigned char *data, unsigned int len)
+{
+	struct rf_src *r = closure;
+	if (len > r->left) {
+		return CAIRO_STATUS_READ_ERROR;
+	}
+	memcpy(data, r->at, len);
+	r->at += len;
+	r->left -= len;
+	return CAIRO_STATUS_SUCCESS;
+}
+
+/* which of the faces called what this one is, in the order they come */
+static int rf_nth(const struct rface_set *s, int i)
+{
+	int k = 0;
+	for (int j = 0; j < i; j++) {
+		k += !strcmp(s->f[j].what, s->f[i].what);
+	}
+	return k;
+}
+
+/* A pack back into faces, their smaller pictures made; NULL when it is not
+ * one. */
+static struct rface_set *rf_read(const unsigned char *data, size_t len)
+{
+	int32_t n;
+	if (len < 12 || memcmp(data, "DSKFACE4", 8)) {
+		return NULL;
+	}
+	memcpy(&n, data + 8, sizeof n);
+	size_t recs = 12 + (size_t)n * sizeof(struct rf_rec);
+	if (n < 0 || n > RF_MAX || recs > len) {
+		return NULL;
+	}
+	struct rface_set *s = calloc(1, sizeof *s);
+	if (!s) {
+		return NULL;
+	}
+	rf_lin_init();
+	size_t off = recs;
+	bool ok = true;
+	for (int i = 0; ok && i < n; i++) {
+		struct rf_rec r;
+		memcpy(&r, data + 12 + (size_t)i * sizeof r, sizeof r);
+		struct rface *f = &s->f[s->n++];
+		memcpy(s->names[i], r.what, sizeof s->names[i]);
+		s->names[i][15] = 0;
+		f->what = s->names[i];
+		f->nth = r.nth;
+		f->o = v3(r.o[0], r.o[1], r.o[2]);
+		f->u = v3(r.u[0], r.u[1], r.u[2]);
+		f->v = v3(r.v[0], r.v[1], r.v[2]);
+		f->n = v3(r.n[0], r.n[1], r.n[2]);
+		f->at = v3(r.at[0], r.at[1], r.at[2]);
+		f->lamp = v3(r.lamp[0], r.lamp[1], r.lamp[2]);
+		f->hmin = r.hmin;
+		f->hmax = r.hmax;
+		f->turn = r.turn;
+		f->tw[0] = r.tw;
+		f->th[0] = r.th;
+		rf_dims(f);
+		for (int k = 0; ok && k <= RF_PICS + 1; k++) {
+			if (!r.len[k]) {
+				continue;
+			}
+			int bl = k < RF_PICS ? r.base[k] : 0;
+			if (bl >= f->lv) {
+				ok = false;
+				break;
+			}
+			int pw = f->tw[bl], ph = f->th[bl];
+			if (off + r.len[k] > len) {
+				ok = false;
+				break;
+			}
+			struct rf_src src = { data + off, r.len[k] };
+			off += r.len[k];
+			cairo_surface_t *img = cairo_image_surface_create_from_png_stream(rf_src_read, &src);
+			if (cairo_surface_status(img) != CAIRO_STATUS_SUCCESS
+				|| cairo_image_surface_get_width(img) != pw
+				|| cairo_image_surface_get_height(img) != ph) {
+				cairo_surface_destroy(img);
+				ok = false;
+				break;
+			}
+			cairo_surface_flush(img);
+			const unsigned char *d = cairo_image_surface_get_data(img);
+			int st = cairo_image_surface_get_stride(img);
+			size_t m = (size_t)pw * ph;
+			if (k < RF_PICS) {
+				f->scale[k] = r.scale[k];
+				f->base[k] = bl;
+				uint32_t *t = f->pic[k][bl] = malloc(m * sizeof(uint32_t));
+				for (int y = 0; t && y < ph; y++) {
+					const uint32_t *row = (const uint32_t *)(d + (size_t)y * st);
+					for (int x = 0; x < pw; x++) {
+						uint32_t p = row[x], a = p >> 24, q = a << 24;
+						for (int c = 0; c < 24 && a; c += 8) {
+							uint32_t v = (((p >> c) & 255) * 255 + a / 2) / a;
+							q |= (v > 255 ? 255 : v) << c;
+						}
+						t[(size_t)y * pw + x] = q;
+					}
+				}
+				ok = t != NULL;
+			} else if (k == RF_PICS + 1) {
+				bool a8 = cairo_image_surface_get_format(img) == CAIRO_FORMAT_A8;
+				f->height = malloc(m * sizeof(float));
+				for (int y = 0; f->height && y < ph; y++) {
+					const unsigned char *row = d + (size_t)y * st;
+					for (int x = 0; x < pw; x++) {
+						int q = a8 ? row[x] : (int)(((const uint32_t *)row)[x] & 255);
+						f->height[(size_t)y * pw + x] = f->hmin + (f->hmax - f->hmin) * q / 255.0f;
+					}
+				}
+				ok = f->height != NULL;
+			} else {
+				/* written as A8, which comes back as grey in RGB24 */
+				bool a8 = cairo_image_surface_get_format(img) == CAIRO_FORMAT_A8;
+				f->own = malloc(m);
+				for (int y = 0; f->own && y < ph; y++) {
+					const unsigned char *row = d + (size_t)y * st;
+					for (int x = 0; x < pw; x++) {
+						f->own[(size_t)y * pw + x] = a8 ? row[x]
+							: (unsigned char)(((const uint32_t *)row)[x] & 255);
+					}
+				}
+				ok = f->own != NULL;
+			}
+			cairo_surface_destroy(img);
+		}
+		if (ok && (!rf_has(f, RF_REST) || !rf_has(f, RF_LAMP) || !f->own)) {
+			ok = false;
+		}
+		if (ok) {
+			rf_mips(f);
+		}
+	}
+	if (!ok) {
+		rf_free(s);
+		free(s);
+		return NULL;
+	}
+	return s;
+}
+
+/* Each face of s that is laid, to its picture in the packs (any of which
+ * may be NULL), the first that has it: the face of the same name that came
+ * as many times before it. One none has is traced. */
+static void rf_link(struct rface_set *s, const struct rface_set *const *packs, int npacks)
+{
+	for (int i = 0; i < s->n; i++) {
+		struct rface *f = &s->f[i];
+		if (f->trace || f->clear) {
+			continue;
+		}
+		int k = rf_nth(s, i);
+		f->src = NULL;
+		for (int p = 0; p < npacks && !f->src; p++) {
+			const struct rface_set *q = packs[p];
+			for (int j = 0; q && j < q->n && !f->src; j++) {
+				if (q->f[j].nth == k && !strcmp(q->f[j].what, f->what)) {
+					f->src = &q->f[j];
+					/* what can be picked is the view's own pack's to say */
+					f->own_ok = p == 0;
+				}
+			}
+		}
+		if (!f->src) {
+			f->trace = true;
+		}
+	}
+}
+
 /* Supersamples to a sheet: coverage, the vote for who owns each pixel, the
  * glow, and the tonemap. */
 static cairo_surface_t *room_resolve(const float *hi, const unsigned char *idhi,
@@ -5513,6 +8348,9 @@ static cairo_surface_t *room_resolve(const float *hi, const unsigned char *idhi,
 static bool g_room_last_gpu;
 static bool g_room_force_cpu;
 
+static bool rf_compose(int layer, struct room_ctx *ctx);
+static bool g_room_last_faces;
+
 /* One sheet. layer 1 is the room with the drawer taken out, layer 2 the
  * drawer alone on transparent ground. ids may be NULL. */
 static void surface_tent(cairo_surface_t *s);
@@ -5554,10 +8392,15 @@ static cairo_surface_t *room_bake(int layer, int w, int h, const struct room_cam
 
 	g_room_layer = layer;
 	g_room_last_gpu = false;
+	/* laid from its faces where there are any and it would be the CPU
+	 * tracing it, and only the rest traced */
+	g_room_last_faces = rf_compose(layer, &ctx);
 #ifdef DESK_HAVE_GPU
-	g_room_last_gpu = !g_room_force_cpu && room_trace_gpu(&ctx);
+	if (!g_room_last_faces) {
+		g_room_last_gpu = !g_room_force_cpu && room_trace_gpu(&ctx);
+	}
 #endif
-	if (!g_room_last_gpu) {
+	if (!g_room_last_gpu && !g_room_last_faces) {
 		room_trace_cpu(&ctx);
 	}
 	if (room_stopping()) {
@@ -5569,9 +8412,10 @@ static cairo_surface_t *room_bake(int layer, int w, int h, const struct room_cam
 	cairo_surface_t *img = room_resolve(hi, idhi, w, h, ids);
 	free(hi);
 	free(idhi);
-	if (ICON_SS == 1 && g_bq.tag == 'f' && !atomic_load(&g_previewing)) {
+	if (ICON_SS == 1 && g_bq.tag == 'f' && !atomic_load(&g_previewing) && !g_room_last_faces) {
 		/* a sample a pixel: the grain of the wood beats against it; a
-		 * tent over the neighbours takes the beat out */
+		 * tent over the neighbours takes the beat out (laid from faces,
+		 * the grain is out of pictures that are already smooth) */
 		surface_tent(img);
 	}
 	return img;
@@ -5702,6 +8546,22 @@ static void room_cam_lerp(double aspect, double t, int which, struct room_cam *c
 	c->z1 = plan.z1;
 }
 
+/* What moves, as it stands at u of the move to a view. The set comes out
+ * ahead of the camera rather than with it. It has to be clear of the
+ * desk's back edge before the camera has tilted far enough to see along
+ * that edge, and it is better theatre besides: the machine arrives, and
+ * then you are looking at it. The post box's door comes down as you
+ * arrive, not before. */
+static void room_film_pose(int which, double u)
+{
+	if (which == DESK_VIEW_CONSOLE) {
+		g_cc_out = smoothstepf(0.02, 0.46, u);
+	}
+	if (which == DESK_VIEW_POST) {
+		g_pb_open = smoothstepf(0.42, 0.96, u);
+	}
+}
+
 static cairo_surface_t *room_bake_film(int w, int h, int which)
 {
 	if (ROOM_TILT_DIV <= 0) {
@@ -5728,19 +8588,8 @@ static cairo_surface_t *room_bake_film(int w, int h, int which)
 		 * the sheet it hands over to. The drawer is shut throughout: you
 		 * push it in before you look away from the desk. */
 		g_room_open = 0.0;
-		/* The set comes out ahead of the camera rather than with it. It has
-		 * to be clear of the desk's back edge before the camera has tilted
-		 * far enough to see along that edge, and it is better theatre
-		 * besides: the machine arrives, and then you are looking at it. */
-		double u = ROOM_TILT_U0 + (ROOM_TILT_U1 - ROOM_TILT_U0)
-			* (double)i / (double)(ROOM_TILT_FRAMES - 1);
-		if (which == DESK_VIEW_CONSOLE) {
-			g_cc_out = smoothstepf(0.02, 0.46, u);
-		}
-		if (which == DESK_VIEW_POST) {
-			/* the door comes down as you arrive, not before */
-			g_pb_open = smoothstepf(0.42, 0.96, u);
-		}
+		room_film_pose(which, ROOM_TILT_U0 + (ROOM_TILT_U1 - ROOM_TILT_U0)
+			* (double)i / (double)(ROOM_TILT_FRAMES - 1));
 		int layer = (which == DESK_VIEW_CONSOLE) ? 4
 			: (which == DESK_VIEW_POST) ? 5 : 3;
 		cairo_surface_t *f = room_bake(layer, fw, fh, &cam, NULL);
@@ -5751,6 +8600,774 @@ static cairo_surface_t *room_bake_film(int w, int h, int which)
 	cairo_destroy(cr);
 	cairo_surface_flush(strip);
 	return strip;
+}
+
+/* ---- the views laid from faces, where the room is traced on the CPU ---- */
+
+/* Each view's pack of faces, read when it is first wanted and let go when
+ * the room is made (rf_release); and the faces of the room of this shape,
+ * linked to it and lit. Only the thread making the room touches them.
+ * Indexed by layer: 1 the desk (and 2 its drawer, from the same pack), 3
+ * the bookcase, 4 the console, 5 the post box. */
+#define RF_LAYERS 6
+static struct rface_set *g_rf_pack[RF_LAYERS];
+static struct rface_set *g_rf_room[RF_LAYERS];
+static double g_rf_room_aspect[RF_LAYERS], g_rf_room_hx[RF_LAYERS];
+static _Atomic int g_rf_off = -1;    /* DESK_ROOM_FACES=off */
+static bool g_rf_bad[RF_LAYERS];   /* a pack that would not read */
+
+/* A view's packs, a desk width each: the console's brass shows the lamp,
+ * which moves out and up with a wider desk, so it is pictured for three
+ * widths (half widths 16, 21.3 and 28.4 -- screens of 1440, 1920 and 2560
+ * points) and the nearest is laid. The bookcase's has the desk, the wall
+ * and the floor every view lays, put right for each. Files of DEsk's data
+ * (rf_pack_load), not built in: four programs link the drawing, and each
+ * carried all thirty megabytes of them. */
+#define RF_WIDTHS 3
+#define RF_VIEW_DESK (-1)   /* the desk's own view, straight down */
+static const struct {
+	const char *what;
+	int which;
+	struct {
+		const char *file;
+		double hx;
+	} at[RF_WIDTHS];
+} RF_PACK[RF_LAYERS] = {
+	[1] = { "the desk's", RF_VIEW_DESK, { { "plan-faces.bin", 0.0 } } },
+	[2] = { "the drawer's", RF_VIEW_DESK, { { "plan-faces.bin", 0.0 } } },
+	[3] = { "the bookcase's", DESK_VIEW_SHELF, { { "shelf-faces.bin", 0.0 } } },
+	[4] = { "the console's", DESK_VIEW_CONSOLE, {
+		{ "console-faces-16.bin", 16.0 },
+		{ "console-faces-21.bin", 21.33 },
+		{ "console-faces-28.bin", 28.44 } } },
+	[5] = { "the post box's", DESK_VIEW_POST, {
+		{ "post-faces-16.bin", 16.0 },
+		{ "post-faces-21.bin", 21.33 },
+		{ "post-faces-28.bin", 28.44 } } },
+};
+static int g_rf_pack_at[RF_LAYERS];   /* which of a view's packs is read */
+
+/* Where DEsk's pictures of a kind -- "room", the views' faces; "clock",
+ * "post", "console", the things on the desk; "camera" -- are looked for,
+ * in order: with DEsk's data beside the prefix its binary is in
+ * (bin/../share/desk/<kind>); else, run from where it was built, the
+ * source's art/<kind> over the build folder -- before any DEsk installed
+ * on the machine, whose may be older; else the data of the prefix it was
+ * built for. DESK_ART_DIR=<a source's art>: there only (a build made
+ * outside the source). How many there are. */
+#define RF_DIR_LEN 1100
+static int desk_art_dirs(const char *kind, char dirs[3][RF_DIR_LEN])
+{
+	const char *env = getenv("DESK_ART_DIR");
+	if (env && *env) {
+		snprintf(dirs[0], RF_DIR_LEN, "%.1000s/%s", env, kind);
+		return 1;
+	}
+	char exe[1024] = "";
+	ssize_t k = readlink("/proc/self/exe", exe, sizeof exe - 1);
+	exe[k > 0 ? k : 0] = '\0';
+	char *slash = strrchr(exe, '/');
+	if (slash) {
+		*slash = '\0';
+	}
+	int nd = 0;
+	if (exe[0]) {
+		snprintf(dirs[nd++], RF_DIR_LEN, "%s/../share/desk/%s", exe, kind);
+		snprintf(dirs[nd++], RF_DIR_LEN, "%s/../art/%s", exe, kind);
+	}
+#ifdef DESK_DATADIR
+	snprintf(dirs[nd++], RF_DIR_LEN, "%s/desk/%s", DESK_DATADIR, kind);
+#endif
+	return nd;
+}
+
+/* The first of those that has file, into path; false, and path the
+ * first place looked, when none has. */
+bool desk_art_find(const char *kind, const char *file, char *path, size_t n)
+{
+	char dirs[3][RF_DIR_LEN];
+	int nd = desk_art_dirs(kind, dirs);
+	for (int i = 0; i < nd; i++) {
+		if ((size_t)snprintf(path, n, "%s/%s", dirs[i], file) < n && access(path, R_OK) == 0) {
+			return true;
+		}
+	}
+	snprintf(path, n, "%s/%s", nd ? dirs[0] : ".", file);
+	return false;
+}
+
+/* Where the packs are looked for: DESK_ROOM_FACES_DIR if that is set, else
+ * where the room's pictures are (desk_art_dirs). */
+static int rf_pack_dirs(char dirs[3][RF_DIR_LEN])
+{
+	const char *env = getenv("DESK_ROOM_FACES_DIR");
+	if (env && *env) {
+		snprintf(dirs[0], RF_DIR_LEN, "%s", env);
+		return 1;
+	}
+	return desk_art_dirs("room", dirs);
+}
+
+/* A pack's file, all of it, into memory (*len bytes; free it), and where it
+ * was in where (rf_pack_dirs). NULL when it is not there. */
+static unsigned char *rf_pack_load(const char *file, size_t *len, char *where, size_t n)
+{
+	char dirs[3][RF_DIR_LEN];
+	int nd = rf_pack_dirs(dirs);
+	for (int i = 0; i < nd; i++) {
+		FILE *f = (size_t)snprintf(where, n, "%s/%s", dirs[i], file) < n ? fopen(where, "rbe")
+			: NULL;
+		if (!f) {
+			continue;
+		}
+		unsigned char *buf = NULL;
+		long size = 0;
+		if (fseek(f, 0, SEEK_END) == 0 && (size = ftell(f)) > 0 && fseek(f, 0, SEEK_SET) == 0
+			&& (buf = malloc((size_t)size)) && fread(buf, 1, (size_t)size, f) != (size_t)size) {
+			free(buf);
+			buf = NULL;
+		}
+		fclose(f);
+		if (buf) {
+			*len = (size_t)size;
+			return buf;
+		}
+	}
+	snprintf(where, n, "%s", nd ? dirs[0] : "");
+	return NULL;
+}
+
+/* Whether the packs the desk and the bookcase are laid from are there:
+ * looked for once, from any thread (room_level_cap). */
+static _Atomic int g_rf_there = -1;
+static bool rf_packs_there(void)
+{
+	int there = atomic_load(&g_rf_there);
+	if (there < 0) {
+		static const char *const FILE_OF[2] = { "plan-faces.bin", "shelf-faces.bin" };
+		char dirs[3][RF_DIR_LEN], path[RF_DIR_LEN + 32];
+		int nd = rf_pack_dirs(dirs);
+		there = 1;
+		for (int k = 0; k < 2; k++) {
+			bool found = false;
+			for (int i = 0; i < nd && !found; i++) {
+				found = (size_t)snprintf(path, sizeof path, "%s/%s", dirs[i], FILE_OF[k])
+					< sizeof path && access(path, R_OK) == 0;
+			}
+			there = there && found;
+		}
+		atomic_store(&g_rf_there, there);
+	}
+	return there;
+}
+
+static bool room_traces_on_cpu(void);
+
+/* whether faces are not to be laid at all (DESK_ROOM_FACES=off); asked
+ * from the compositor's thread too (room_level_cap) */
+static bool rf_switched_off(void)
+{
+	int off = atomic_load(&g_rf_off);
+	if (off < 0) {
+		const char *e = getenv("DESK_ROOM_FACES");
+		off = e && !strcmp(e, "off");
+		atomic_store(&g_rf_off, off);
+	}
+	return off;
+}
+
+static bool rf_wanted(void)
+{
+	return !rf_switched_off() && room_traces_on_cpu();
+}
+
+/* the camera of a view */
+static void rf_view_cam(int which, double aspect, struct room_cam *c)
+{
+	if (which == RF_VIEW_DESK) {
+		room_cam_build(aspect, c);
+		return;
+	}
+	/* the bookcase's sizes the case, and the wall stands behind where it
+	 * would be in every view */
+	room_cam_shelf(aspect, c);
+	if (which == DESK_VIEW_CONSOLE) {
+		room_cam_console(aspect, c);
+	} else if (which == DESK_VIEW_POST) {
+		room_cam_post(aspect, c);
+	}
+}
+
+/* How far each of w by h points is from a 0 among them, in points along,
+ * down or corner to corner, up to 255: in place, forward and back. */
+static void rf_reach(unsigned char *d, int w, int h)
+{
+	for (int y = 0; y < h; y++) {
+		for (int x = 0; x < w; x++) {
+			int v = d[y * w + x];
+			if (x > 0 && d[y * w + x - 1] + 1 < v) {
+				v = d[y * w + x - 1] + 1;
+			}
+			for (int k = -1; y > 0 && k <= 1; k++) {
+				if (x + k >= 0 && x + k < w && d[(y - 1) * w + x + k] + 1 < v) {
+					v = d[(y - 1) * w + x + k] + 1;
+				}
+			}
+			d[y * w + x] = (unsigned char)v;
+		}
+	}
+	for (int y = h - 1; y >= 0; y--) {
+		for (int x = w - 1; x >= 0; x--) {
+			int v = d[y * w + x];
+			if (x < w - 1 && d[y * w + x + 1] + 1 < v) {
+				v = d[y * w + x + 1] + 1;
+			}
+			for (int k = -1; y < h - 1 && k <= 1; k++) {
+				if (x + k >= 0 && x + k < w && d[(y + 1) * w + x + k] + 1 < v) {
+					v = d[(y + 1) * w + x + k] + 1;
+				}
+			}
+			d[y * w + x] = (unsigned char)v;
+		}
+	}
+}
+
+/* Which of each face's light points (tpu to the unit, as rf_light has
+ * them) a view and the move to it will look near: the faces laid small
+ * through the view's camera and each frame of the move's, with what moves
+ * where it is then, and the place each sample finds marked on the face
+ * that wins it; then how far every other point is from a marked one
+ * (f->seen). What none of them shows -- most of the floor, the wall behind
+ * the camera, the desk under the console -- is lit by the lamp's pool
+ * alone, without the shadow that is most of the cost. */
+#define RF_MARK_W 320   /* samples across, for the view; half for a frame */
+static void rf_mark_views(struct rface_set *s, int layer, double tpu)
+{
+	double aspect = g_rm_aspect;
+	int which = RF_PACK[layer].which;
+	struct room_cam cams[1 + ROOM_TILT_FRAMES];
+	double along[1 + ROOM_TILT_FRAMES];
+	int ncam = 1;
+	rf_view_cam(which, aspect, &cams[0]);
+	for (int i = 0; which != RF_VIEW_DESK && ROOM_TILT_DIV > 0 && i < ROOM_TILT_FRAMES; i++) {
+		along[ncam] = ROOM_TILT_U0 + (ROOM_TILT_U1 - ROOM_TILT_U0) * i / (ROOM_TILT_FRAMES - 1);
+		room_cam_lerp(aspect, along[ncam], which, &cams[ncam]);
+		ncam++;
+	}
+	for (int i = 0; i < s->n; i++) {
+		struct rface *f = &s->f[i];
+		free(f->seen);
+		f->seen = NULL;
+		if (f->trace || (!f->lv && !f->src)) {
+			continue;
+		}
+		rf_light_size(f, tpu);
+		f->seen = malloc((size_t)f->lw * f->lh);
+		if (f->seen) {
+			memset(f->seen, 255, (size_t)f->lw * f->lh);
+		}
+	}
+	int mw = RF_MARK_W, mh = (int)lround(RF_MARK_W / aspect);
+	float *mark = malloc((size_t)mw * mh * 3 * sizeof(float));
+	unsigned char *need = malloc((size_t)mw * mh);
+	double cc = g_cc_out, pb = g_pb_open;
+	for (int c = 0; mark && need && c < ncam; c++) {
+		int w = c ? mw / 2 : mw, h = c ? mh / 2 : mh;
+		if (c == 0) {
+			g_cc_out = layer == 4 ? 1.0 : 0.0;
+			g_pb_open = layer == 5 ? 1.0 : 0.0;
+		} else {
+			room_film_pose(which, along[c]);
+		}
+		rf_pose(s);
+		struct room_ctx ctx = { 0 };
+		ctx.hw = w;
+		ctx.hh = h;
+		ctx.cam = cams[c];
+		rf_lay_into(s, &ctx, need, mark, NULL, NULL, false);
+		for (int k = 0; k < w * h; k++) {
+			int i = (int)mark[k * 3] - 1;
+			struct rface *f = i >= 0 && i < s->n ? &s->f[i] : NULL;
+			if (f && f->seen) {
+				int x = (int)lround(clampf(mark[k * 3 + 1], 0.0, 1.0) * (f->lw - 1));
+				int y = (int)lround(clampf(mark[k * 3 + 2], 0.0, 1.0) * (f->lh - 1));
+				f->seen[(size_t)y * f->lw + x] = 0;
+			}
+		}
+	}
+	g_cc_out = cc;
+	g_pb_open = pb;
+	rf_pose(s);
+	for (int i = 0; i < s->n; i++) {
+		struct rface *f = &s->f[i];
+		if (f->seen && (!mark || !need)) {
+			free(f->seen);   /* nothing marked: all of it */
+			f->seen = NULL;
+		}
+		if (f->seen) {
+			rf_reach(f->seen, f->lw, f->lh);
+		}
+	}
+	free(mark);
+	free(need);
+}
+
+/* The room's light on a view's faces, linked to their pack: the lamp, and
+ * the faces whose surroundings change put right; for the console's, with
+ * it stowed as well as out, mixed as it comes out (its shadow on the desk
+ * goes with it) -- near what the view and the move to it show. How many
+ * points of each were worked out, into n and m. */
+static void rf_room_light(struct rface_set *s, int layer, long *n, long *m)
+{
+	rf_mark_views(s, layer, 4.0);
+	if (layer == 4 || layer == 5) {
+		/* the console comes out, the post box's door comes down */
+		double *what = layer == 4 ? &g_cc_out : &g_pb_open;
+		double keep = *what;
+		*what = 0.0;
+		rf_pose(s);
+		*n += rf_light(s, 4.0);
+		*m += rf_fix(s, 3.0);
+		for (int i = 0; i < s->n; i++) {
+			struct rface *f = &s->f[i];
+			f->light_in = f->light;
+			f->fix_in[0] = f->fix[0];
+			f->fix_in[1] = f->fix[1];
+			f->light = f->fix[0] = f->fix[1] = NULL;
+		}
+		*what = 1.0;
+		rf_pose(s);
+		s->moves = layer;
+		*n += rf_light(s, 4.0);
+		*m += rf_fix(s, 3.0);
+		*what = keep;
+		rf_pose(s);
+	} else {
+		*n += rf_light(s, 4.0);
+		*m += rf_fix(s, 3.0);
+	}
+	for (int i = 0; i < s->n; i++) {
+		free(s->f[i].seen);
+		s->f[i].seen = NULL;
+	}
+}
+
+/* A view's pack, read the first time; NULL when it has none, it is not
+ * there or it would not read (and from then on). */
+static struct rface_set *rf_pack_get(int layer)
+{
+	if (layer == 2) {
+		layer = 1;   /* the drawer's faces are in the desk's pack */
+	}
+	if (layer < 0 || layer >= RF_LAYERS || !RF_PACK[layer].at[0].file || g_rf_bad[layer]) {
+		return NULL;
+	}
+	/* the one pictured for the nearest desk */
+	int at = 0;
+	for (int i = 1; i < RF_WIDTHS && RF_PACK[layer].at[i].file; i++) {
+		if (fabs(RF_PACK[layer].at[i].hx - g_rm_hx) < fabs(RF_PACK[layer].at[at].hx - g_rm_hx)) {
+			at = i;
+		}
+	}
+	if (g_rf_pack[layer] && g_rf_pack_at[layer] != at) {
+		if (g_rf_room[layer]) {
+			rf_free(g_rf_room[layer]);
+			free(g_rf_room[layer]);
+			g_rf_room[layer] = NULL;
+		}
+		rf_free(g_rf_pack[layer]);
+		free(g_rf_pack[layer]);
+		g_rf_pack[layer] = NULL;
+	}
+	if (!g_rf_pack[layer]) {
+		double t0 = room_now();
+		g_rf_pack_at[layer] = at;
+		char where[1200];
+		size_t len = 0;
+		unsigned char *data = rf_pack_load(RF_PACK[layer].at[at].file, &len, where, sizeof where);
+		if (!data) {
+			room_log("%s faces are not there (%s, looked for first in %s): it is traced",
+				RF_PACK[layer].what, RF_PACK[layer].at[at].file, where);
+			g_rf_bad[layer] = true;
+			return NULL;
+		}
+		g_rf_pack[layer] = rf_read(data, len);
+		free(data);
+		if (!g_rf_pack[layer] || !g_rf_pack[layer]->n) {
+			if (g_rf_pack[layer]) {
+				rf_free(g_rf_pack[layer]);
+				free(g_rf_pack[layer]);
+				g_rf_pack[layer] = NULL;
+			} else {
+				room_log("%s faces would not read (%s): it is traced", RF_PACK[layer].what,
+					where);
+			}
+			g_rf_bad[layer] = true;
+			return NULL;
+		}
+		room_log("%s faces read in %.2f s", RF_PACK[layer].what, room_now() - t0);
+	}
+	return g_rf_pack[layer];
+}
+
+/* A view's faces in the room as the globals have it, linked and lit, and
+ * what moves put where it is now; NULL when they are not to be laid. */
+static struct rface_set *rf_room_get(int layer)
+{
+	if (layer < 0 || layer >= RF_LAYERS || !RF_PACK[layer].at[0].file || g_rf_bad[layer]
+		|| !rf_wanted()) {
+		return NULL;
+	}
+	if (!rf_pack_get(layer)) {
+		return NULL;
+	}
+	double aspect = g_rm_aspect, hx = g_rm_hx;
+	struct rface_set *s = g_rf_room[layer];
+	if (!s || g_rf_room_aspect[layer] != aspect || g_rf_room_hx[layer] != hx) {
+		if (s) {
+			rf_free(s);
+			free(s);
+			g_rf_room[layer] = NULL;
+		}
+		s = calloc(1, sizeof *s);
+		if (!s) {
+			return NULL;
+		}
+		double t0 = room_now();
+		/* where the move to it starts and where it ends, for the sheen; the
+		 * view's camera last, which is what sizes the bookcase */
+		struct room_cam from, to;
+		int which = RF_PACK[layer].which;
+		if (which != RF_VIEW_DESK) {
+			room_cam_lerp(aspect, ROOM_TILT_U0, which, &from);
+		}
+		/* the bookcase's camera sizes the case, and the wall stands behind
+		 * where it would be in every view */
+		rf_view_cam(which, aspect, &to);
+		if (which == RF_VIEW_DESK) {
+			from = to;   /* it does not move */
+		}
+		rf_layer(s, layer);
+		/* The desk is the same desk in every view: the bookcase's pack has
+		 * it, from the start of every move and from up at the bookcase,
+		 * and put right for this view's eye like any live face. The
+		 * console and the post box are their own packs', for the width of
+		 * desk nearest this one. The desk's own view is its own pack's. */
+		const struct rface_set *packs[3] = { rf_pack_get(layer), NULL, NULL };
+		int np = 1;
+		for (int l = 3; l <= 5 && layer >= 3; l++) {
+			if (l != layer) {
+				packs[np++] = rf_pack_get(l);
+			}
+		}
+		rf_link(s, packs, np);
+		s->eye0 = from.eye;
+		s->eye1 = to.eye;
+		long n = 0, m = 0;
+		rf_room_light(s, layer, &n, &m);
+		room_log("%s faces for a room %.2f to 1, desk %.1f wide: lit at %ld points, "
+			"put right at %ld, in %.2f s", RF_PACK[layer].what, aspect, 2.0 * hx, n, m,
+			room_now() - t0);
+		g_rf_room[layer] = s;
+		g_rf_room_aspect[layer] = aspect;
+		g_rf_room_hx[layer] = hx;
+	}
+	rf_pose(s);
+	return s;
+}
+
+/* A sheet laid from faces needs its four samples a pixel only where one
+ * thing meets another. Inside a face it does not: its pictures are
+ * filtered to the pixel already (rf_sample's level), and one sample in the
+ * middle is what four would come to. Where faces meet, or what is laid
+ * meets what is traced, a sample a pixel is a stair. So the sheet is laid
+ * at a sample a pixel first, and what no face covers traced -- at the
+ * first of each pixel's own samples, which it keeps; a pixel at an edge
+ * is laid again at all its samples, and the rest have their one copied
+ * into all of theirs. need: the samples left to trace. False, nothing
+ * done, where it is a sample a pixel anyway, or there was not the memory
+ * for it (DESK_FACES_FULL=1: every sample laid, as it was).
+ *
+ * A trace is a hundred times a lay (on a machine of 2010 the console's
+ * sides took a fifth of a millisecond a sample), so only an edge that
+ * shows is traced again: one where the two differ on screen by more than
+ * RF_EDGE levels. And at Low (edge_traced) only on the pixel's diagonal:
+ * of its four, two traced, where four are laid. */
+#define RF_EDGE 8
+
+struct rf_sparse_arg {
+	const struct room_ctx *c;     /* the sheet at a sample a pixel */
+	const unsigned char *need;    /* which of its samples were traced */
+	const unsigned short *won;    /* and which face won each */
+	unsigned char *seen;          /* each pixel as it is on screen, RGBA */
+	bool flat[RF_MAX + 1];        /* by face and one: it stands up nowhere */
+};
+
+/* a row of the sheet at a sample a pixel about as room_resolve puts it on
+ * the screen (the square root for the screen's 2.2, and no glow) */
+static void rf_seen_row(void *p, int y)
+{
+	struct rf_sparse_arg *A = p;
+	for (int x = 0; x < A->c->hw; x++) {
+		size_t i = (size_t)y * A->c->hw + x;
+		const float *s = A->c->hi + i * 4;
+		unsigned char *o = A->seen + i * 4;
+		double a = clampf(s[3], 0.0, 1.0);
+		for (int q = 0; q < 3; q++) {
+			double v = s[3] > 1e-6f
+				? sqrt(aces_ch(fmax(s[q] * ICON_EXPOSURE / s[3], 0.0))) : 0.0;
+			o[q] = (unsigned char)(clampf(v, 0.0, 1.0) * a * 255.0 + 0.5);
+		}
+		o[3] = (unsigned char)(a * 255.0 + 0.5);
+	}
+}
+
+/* Whether pixels i and j of the sheet at a sample a pixel meet at an edge:
+ * where they belong to different things, always; laid from different
+ * faces, always too (a lay is cheap); of the one flat face, never, however
+ * they differ -- the grain of the desk is as sharp as its picture, and
+ * half the desk was laid again for it. Otherwise, a face with relief or
+ * what is traced, where they differ on screen. */
+static bool rf_differ(const struct rf_sparse_arg *A, size_t i, size_t j)
+{
+	const unsigned short *won = A->won;
+	if (A->c->idhi[i] != A->c->idhi[j]) {
+		return true;
+	}
+	if (!A->need[i] && !A->need[j]) {
+		if (won[i] != won[j]) {
+			return true;
+		}
+		if (won[i] && A->flat[won[i]]) {
+			return false;
+		}
+	}
+	for (int q = 0; q < 4; q++) {
+		if (abs(A->seen[i * 4 + q] - A->seen[j * 4 + q]) > RF_EDGE) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool rf_sparse(const struct rface_set *s, struct room_ctx *ctx, unsigned char *need)
+{
+	int ss = ICON_SS;
+	if (ss < 2 || getenv("DESK_FACES_FULL")) {
+		return false;
+	}
+	int w = ctx->hw / ss, h = ctx->hh / ss;
+	size_t n = (size_t)w * h, nn = (size_t)ctx->hw * ctx->hh;
+	struct room_ctx c1;
+	memset(&c1, 0, sizeof c1);
+	c1.hi = calloc(n * 4, sizeof(float));
+	c1.idhi = calloc(n, 1);
+	c1.hw = w;
+	c1.hh = h;
+	c1.layer = ctx->layer;
+	c1.cam = ctx->cam;
+	unsigned char *need1 = malloc(n), *seen = malloc(n * 4), *edge = calloc(n, 1);
+	unsigned char *only = malloc(nn);
+	unsigned short *won = calloc(n, sizeof *won);
+	bool ok = c1.hi && c1.idhi && need1 && seen && edge && only && won;
+	if (ok) {
+		rf_lay_into(s, &c1, need1, NULL, NULL, won, true);
+		/* what no face covers, traced at each pixel's first sample */
+		memset(need, 0, nn);
+		for (int y = 0; y < h; y++) {
+			for (int x = 0; x < w; x++) {
+				need[(size_t)y * ss * ctx->hw + (size_t)x * ss] = need1[(size_t)y * w + x];
+			}
+		}
+		ctx->need = need;
+		atomic_fetch_add(&g_bake_goal, (long)ctx->hh);
+		room_trace_cpu(ctx);
+		ctx->need = NULL;
+		for (int y = 0; y < h; y++) {
+			for (int x = 0; x < w; x++) {
+				size_t i = (size_t)y * w + x, k = (size_t)y * ss * ctx->hw + (size_t)x * ss;
+				if (need1[i]) {
+					memcpy(c1.hi + i * 4, ctx->hi + k * 4, 4 * sizeof(float));
+					c1.idhi[i] = ctx->idhi[k];
+				}
+			}
+		}
+		memset(need, 0, nn);
+		struct rf_sparse_arg a = { &c1, need1, won, seen, { false } };
+		for (int k = 0; k < s->n; k++) {
+			a.flat[k + 1] = !rf_relief(&s->f[k]);
+		}
+		rf_run(rf_seen_row, &a, h);
+		/* each pixel against the one to its right and the three below */
+		static const int DX[4] = { 1, -1, 0, 1 }, DY[4] = { 0, 1, 1, 1 };
+		for (int y = 0; y < h; y++) {
+			for (int x = 0; x < w; x++) {
+				size_t i = (size_t)y * w + x;
+				for (int d = 0; d < 4; d++) {
+					int qx = x + DX[d], qy = y + DY[d];
+					if (qx < 0 || qx >= w || qy >= h) {
+						continue;
+					}
+					size_t j = (size_t)qy * w + qx;
+					if (rf_differ(&a, i, j)) {
+						edge[i] = edge[j] = 1;
+					}
+				}
+			}
+		}
+		size_t edges = 0;
+		for (int y = 0; y < h; y++) {
+			for (int x = 0; x < w; x++) {
+				size_t i = (size_t)y * w + x;
+				edges += edge[i];
+				for (int sy = 0; sy < ss; sy++) {
+					size_t k = (size_t)(y * ss + sy) * ctx->hw + (size_t)x * ss;
+					for (int sx = 0; sx < ss; sx++, k++) {
+						/* the first of a traced one's samples is traced */
+						only[k] = edge[i] && !(need1[i] && sy == 0 && sx == 0);
+						if (!edge[i]) {
+							memcpy(ctx->hi + k * 4, c1.hi + i * 4, 4 * sizeof(float));
+							ctx->idhi[k] = c1.idhi[i];
+						}
+					}
+				}
+			}
+		}
+		/* what the lay leaves is to trace */
+		rf_lay_into(s, ctx, need, NULL, only, NULL, false);
+		bool debug = getenv("DESK_FACES_DEBUG") != NULL;
+		size_t t1 = 0, t2 = 0;
+		for (size_t i = 0; debug && i < n; i++) {
+			t1 += need1[i];
+		}
+		for (size_t i = 0; debug && i < nn; i++) {
+			t2 += need[i] != 0;
+		}
+		/* At a level that traces two of an edge's four (edge_traced), the
+		 * samples of a pixel off its diagonal that no face covers take
+		 * the one on the diagonal in their row, once that is traced: the
+		 * pixel is the two on its diagonal, as a GPU's two samples are */
+		size_t taken = 0;
+		if (ss == 2 && g_bq.edge_traced == 2) {
+			memset(only, 0, nn);
+			for (int y = 0; y < h; y++) {
+				for (int x = 0; x < w; x++) {
+					size_t k = (size_t)y * 2 * ctx->hw + (size_t)x * 2;
+					size_t off[2] = { k + 1, k + ctx->hw };
+					for (int o = 0; o < 2; o++) {
+						if (need[off[o]]) {
+							need[off[o]] = 0;
+							only[off[o]] = 1;
+							taken++;
+						}
+					}
+				}
+			}
+		}
+		if (taken) {
+			ctx->need = need;
+			atomic_fetch_add(&g_bake_goal, (long)ctx->hh);
+			room_trace_cpu(ctx);
+			ctx->need = NULL;
+			memset(need, 0, nn);
+			for (int y = 0; y < h; y++) {
+				for (int x = 0; x < w; x++) {
+					size_t k = (size_t)y * 2 * ctx->hw + (size_t)x * 2;
+					size_t to[2] = { k + 1, k + ctx->hw }, from[2] = { k, k + ctx->hw + 1 };
+					for (int o = 0; o < 2; o++) {
+						if (only[to[o]]) {
+							memcpy(ctx->hi + to[o] * 4, ctx->hi + from[o] * 4,
+								4 * sizeof(float));
+							ctx->idhi[to[o]] = ctx->idhi[from[o]];
+						}
+					}
+				}
+			}
+		}
+		if (debug) {
+			printf("    %d samples a pixel at %.1f %% of the pixels; %zu traced at one, "
+				"%zu more to trace, %zu of them taken from the diagonal\n", ss * ss,
+				100.0 * edges / n, t1, t2, taken);
+		}
+	}
+	free(c1.hi);
+	free(c1.idhi);
+	free(need1);
+	free(seen);
+	free(edge);
+	free(only);
+	free(won);
+	return ok;
+}
+
+/* the faces into ctx: what is left to trace goes in need */
+static void rf_lay_sheet(const struct rface_set *s, struct room_ctx *ctx, unsigned char *need)
+{
+	if (!rf_sparse(s, ctx, need)) {
+		rf_lay(s, ctx, need);
+	}
+}
+
+/* A sheet of layer into ctx from the faces, and what they do not cover
+ * traced; false, nothing done, when it is not to be laid. */
+static bool rf_compose(int layer, struct room_ctx *ctx)
+{
+	struct rface_set *s = rf_room_get(layer);
+	if (!s) {
+		return false;
+	}
+	unsigned char *need = malloc((size_t)ctx->hw * ctx->hh);
+	if (!need) {
+		return false;
+	}
+	rf_lay_sheet(s, ctx, need);
+	ctx->need = need;
+	room_trace_cpu(ctx);
+	ctx->need = NULL;
+	free(need);
+	return true;
+}
+
+/* Whether the desk's sheets will be laid from faces: then they are up as
+ * soon as a first look at them would have been, and there is none. */
+static bool rf_desk_laid(void)
+{
+	return rf_wanted() && rf_pack_get(1) != NULL;
+}
+
+/* The desk's pack and faces let go: its sheets are made, and nothing after
+ * them lays from it. */
+static void rf_release_desk(void)
+{
+	for (int i = 1; i <= 2; i++) {
+		if (g_rf_room[i]) {
+			rf_free(g_rf_room[i]);
+			free(g_rf_room[i]);
+			g_rf_room[i] = NULL;
+		}
+	}
+	if (g_rf_pack[1]) {
+		rf_free(g_rf_pack[1]);
+		free(g_rf_pack[1]);
+		g_rf_pack[1] = NULL;
+	}
+}
+
+/* The packs and the room's faces let go: the room is made. */
+static void rf_release(void)
+{
+	for (int i = 0; i < RF_LAYERS; i++) {
+		if (g_rf_room[i]) {
+			rf_free(g_rf_room[i]);
+			free(g_rf_room[i]);
+			g_rf_room[i] = NULL;
+		}
+		if (g_rf_pack[i]) {
+			rf_free(g_rf_pack[i]);
+			free(g_rf_pack[i]);
+			g_rf_pack[i] = NULL;
+		}
+	}
 }
 
 /* The desk itself: the two sheets the plan view is made of, and nothing
@@ -5819,7 +9436,7 @@ static void rest_part(int w, int h, int view)
 /* What traced the sheet room_bake made last, for the log. */
 static const char *room_by(void)
 {
-	return g_room_last_gpu ? "the GPU" : "the CPU";
+	return g_room_last_gpu ? "the GPU" : g_room_last_faces ? "faces and the CPU" : "the CPU";
 }
 
 /* The three places you can look that are not the desk: their sheets, which
@@ -5999,6 +9616,24 @@ double desk_px_per_pt(int screen_w)
 	return g_ui_scale * (wpt < fit && wpt > 0.0 ? wpt / fit : 1.0);
 }
 
+/* The widest a room is made at level q: ROOM_Q's -- but at 2D, Low and
+ * Medium as wide as the machine allows. On a machine tracing on its
+ * processor the room is laid from its faces (rf_compose), and a sample a
+ * pixel at the screen's own width is less work than Low's four at two
+ * thirds of it; 640 stretched to the screen was the softest desk of any
+ * level, and Low's 960 next. Four samples are taken only where they show
+ * (rf_sparse). A GPU traces it that wide in a moment. With the faces
+ * switched off, or not there to lay, it is traced at ROOM_Q's, as it was.
+ * (What else is traced at the level's size, the door and the weather,
+ * stays at ROOM_Q's: desk_ambient_size.) */
+static int room_level_cap(int q)
+{
+	if (q <= DESK_GFX_MEDIUM && !rf_switched_off() && rf_packs_there()) {
+		return 0;
+	}
+	return ROOM_Q[q].cap;
+}
+
 /* The shape of room for a screen: the size to trace it at, and how wide
  * the desk is (hq: its half width in half units). */
 static void room_canon_at(int screen_w, int screen_h, int machine, int *cw, int *ch, int *hq);
@@ -6038,11 +9673,11 @@ static void room_canon_at(int screen_w, int screen_h, int machine, int *cw, int 
 	static const int RUNG[] = { 320, 480, 640, 800, 960, 1120, 1280, ROOM_CANON_W,
 		1600, 1760, ROOM_WIDE_W, 2240, 2560, 3200, 3840 };
 	int cap = machine;
-	const struct room_q *q = &ROOM_Q[desk_gfx_level()];
+	int lc = room_level_cap((int)desk_gfx_level());
 	if (!g_room_cap_forced) {
-		if (q->cap > 0) {
-			cap = cap < q->cap ? cap : q->cap;
-		} else if (q->cap < 0 && cap >= ROOM_WIDE_W) {
+		if (lc > 0) {
+			cap = cap < lc ? cap : lc;
+		} else if (lc < 0 && cap >= ROOM_WIDE_W) {
 			cap = 2560;   /* a GPU traces it: as wide as a QHD screen */
 		}
 	}
@@ -6087,8 +9722,12 @@ static void room_free(struct room_render *rr)
 			cairo_surface_destroy(rr->film[i]);
 		}
 	}
+	if (rr->console_bare) {
+		cairo_surface_destroy(rr->console_bare);
+	}
 	free(rr->shelf_ids);
 	free(rr->console_ids);
+	free(rr->console_bare_ids);
 	free(rr->post_ids);
 	free(rr);
 }
@@ -6117,12 +9756,12 @@ struct room_meta {
 
 /* every baked sheet, and the sidecar that carries the metrics and the
  * three id buffers */
-enum { P_BG = 0, P_DR, P_SH, P_CC, P_PB, P_FM, P_FC, P_FP, P_N };
+enum { P_BG = 0, P_DR, P_SH, P_CC, P_PB, P_FM, P_FC, P_FP, P_CB, P_N };
 
 static bool room_cache_paths(int w, int h, int hq, int q, char path[P_N][768],
 	char meta[768])
 {
-	static const char *PART[] = { "bg", "dr", "sh", "cc", "pb", "fm", "fc", "fp" };
+	static const char *PART[] = { "bg", "dr", "sh", "cc", "pb", "fm", "fc", "fp", "cb" };
 	char dir[512];
 	if (!icon_cache_dir(dir, sizeof dir)) {
 		return false;
@@ -6314,6 +9953,8 @@ static void room_cache_store(struct room_render *rr, int w, int h, int hq, int q
 static struct room_render *g_room;
 static int g_room_w, g_room_h, g_room_hq;
 static int g_room_q = DESK_GFX_HIGH;   /* the level it was traced at */
+static unsigned g_room_look;            /* and what the desk was made of (desk_look) */
+static unsigned g_room_look_making;     /* what the one being traced is made of */
 static int g_room_warming;
 /* Which of the views of the room that is up are there to turn to (a bit
  * for each, 1 << DESK_VIEW_*): none while the desk is up and the bookcase,
@@ -6330,7 +9971,7 @@ static struct room_render *room_peek(int cw, int ch, int hq)
 {
 	pthread_mutex_lock(&g_room_lock);
 	struct room_render *rr = (g_room && g_room_w == cw && g_room_h == ch && g_room_hq == hq
-		&& g_room_q == (int)desk_gfx_level()) ? g_room : NULL;
+		&& g_room_q == (int)desk_gfx_level() && g_room_look == desk_look()) ? g_room : NULL;
 	pthread_mutex_unlock(&g_room_lock);
 	return rr;
 }
@@ -6340,8 +9981,8 @@ static struct room_render *room_peek_views(int cw, int ch, int hq, unsigned view
 {
 	pthread_mutex_lock(&g_room_lock);
 	struct room_render *rr = (g_room && g_room_w == cw && g_room_h == ch && g_room_hq == hq
-		&& g_room_q == (int)desk_gfx_level() && (g_room_views & views) == views)
-		? g_room : NULL;
+		&& g_room_q == (int)desk_gfx_level() && g_room_look == desk_look()
+		&& (g_room_views & views) == views) ? g_room : NULL;
 	pthread_mutex_unlock(&g_room_lock);
 	return rr;
 }
@@ -6369,6 +10010,7 @@ static void room_publish(struct room_render *rr, int cw, int ch, int hq, int q)
 	g_room_h = ch;
 	g_room_hq = hq;
 	g_room_q = q;
+	g_room_look = g_room_look_making;
 	g_room_views = 0;
 	if (old && old != rr) {
 		/* two publishes without a paint between them: the one already
@@ -6446,6 +10088,7 @@ static void room_film_put(struct room_render *rr, int which, cairo_surface_t *s)
  * sooner. Under g_room_lock. */
 struct room_ask {
 	int cw, ch, hq, q;
+	unsigned look;   /* what the desk is made of (desk_look) */
 };
 static struct room_ask g_room_asked, g_room_making;
 
@@ -6488,6 +10131,116 @@ static int room_cache_load_films(struct room_render *rr, int hq, int q)
 	return n;
 }
 
+/* The console's sheet with the lid up (rr->console_bare), and its ids: under the lock, as a
+ * film. */
+static bool room_bare_get(struct room_render *rr, cairo_surface_t **sheet, const unsigned char **ids)
+{
+	pthread_mutex_lock(&g_room_lock);
+	*sheet = rr->console_bare;
+	*ids = rr->console_bare_ids;
+	pthread_mutex_unlock(&g_room_lock);
+	return *sheet && *ids;
+}
+
+static void room_bare_put(struct room_render *rr, cairo_surface_t *sheet, unsigned char *ids)
+{
+	pthread_mutex_lock(&g_room_lock);
+	rr->console_bare = sheet;
+	rr->console_bare_ids = ids;
+	pthread_mutex_unlock(&g_room_lock);
+}
+
+/* where its ids are kept: beside its sheet, .ids for .png */
+static bool room_bare_ids_path(const char *png, char *out, size_t n)
+{
+	size_t len = strlen(png);
+	if (len < 4 || len + 1 > n) {
+		return false;
+	}
+	memcpy(out, png, len - 4);
+	memcpy(out + len - 4, ".ids", 5);
+	return true;
+}
+
+/* Off the disk, if it was kept for this room: true if it is in. */
+static bool room_bare_load(struct room_render *rr, int hq, int q)
+{
+	cairo_surface_t *have;
+	const unsigned char *have_ids;
+	if (room_bare_get(rr, &have, &have_ids)) {
+		return true;
+	}
+	char path[P_N][768], meta[768], ip[780];
+	if (!room_cache_paths(rr->w, rr->h, hq, q, path, meta) || access(path[P_CB], R_OK) != 0
+		|| !room_bare_ids_path(path[P_CB], ip, sizeof ip)) {
+		return false;
+	}
+	size_t n = (size_t)rr->w * rr->h;
+	unsigned char *ids = malloc(n);
+	FILE *f = ids ? fopen(ip, "rbe") : NULL;
+	bool ok = f && fread(ids, 1, n, f) == n && fgetc(f) == EOF;
+	if (f) {
+		fclose(f);
+	}
+	cairo_surface_t *s = ok ? cairo_image_surface_create_from_png(path[P_CB]) : NULL;
+	if (!ok || !room_png_ok(s, rr->w, rr->h)) {
+		if (s) {
+			cairo_surface_destroy(s);
+		}
+		free(ids);
+		return false;
+	}
+	room_bare_put(rr, s, ids);
+	return true;
+}
+
+/* Traced, if it was not there, and kept: the console out as its own view has it, the lid up
+ * on its hinge -- what is under it, the lid's underside, and the shadow it throws. */
+static void room_bare_make(struct room_render *rr, int hq, int q, bool keep)
+{
+	if (room_bare_load(rr, hq, q)) {
+		return;
+	}
+	int w = rr->w, h = rr->h;
+	size_t n = (size_t)w * h;
+	unsigned char *ids = calloc(n, 1);
+	if (!ids) {
+		return;
+	}
+	struct room_cam cam;
+	room_cam_console((double)w / (double)h, &cam);
+	double was_open = g_room_open;
+	g_room_open = 0.0;
+	g_cc_out = 1.0;
+	g_cc_lid = 2.0;
+	g_room_gentle = true;
+	cairo_surface_t *s = room_bake(4, w, h, &cam, ids);
+	g_room_gentle = false;
+	g_cc_lid = 1.0;
+	g_cc_out = 0.0;
+	g_room_open = was_open;
+	if (!s || room_stopping() || room_superseded()) {
+		if (s) {
+			cairo_surface_destroy(s);
+		}
+		free(ids);
+		return;
+	}
+	room_bare_put(rr, s, ids);
+	char path[P_N][768], meta[768], ip[780], part[800];
+	if (!keep || !room_cache_paths(w, h, hq, q, path, meta)
+		|| !room_bare_ids_path(path[P_CB], ip, sizeof ip)
+		|| (size_t)snprintf(part, sizeof part, "%s.part", ip) >= sizeof part) {
+		return;
+	}
+	FILE *f = fopen(part, "wbe");
+	bool ok = f && fwrite(ids, 1, n, f) == n;
+	ok = f && fclose(f) == 0 && ok;
+	if (!ok || rename(part, ip) != 0 || !room_png_store(s, path[P_CB])) {
+		unlink(part);
+	}
+}
+
 /* The films of the moves to the three views, once the views are up: each
  * goes into the room, and onto the disk, as it is done -- the bookcase's
  * first, the view most often turned to. Until a view's film is there the
@@ -6500,11 +10253,19 @@ static bool room_render_films(struct room_render *rr, int hq, int q, double took
 	for (int v = 0; v < DESK_VIEW_COUNT; v++) {
 		took[v] = 0.0;
 	}
-	if (rr->film_div <= 0) {
-		return true;
-	}
 	char path[P_N][768], meta[768];
 	bool keep = room_cache_paths(w, h, hq, q, path, meta);
+	/* the console with its lid up first, at every level: the lid swings at all of them */
+	room_bare_make(rr, hq, q, keep);
+	if (room_stopping() || room_superseded()) {
+		return false;
+	}
+	if (rr->film_div <= 0) {
+		/* the desk camera owns the aspect-derived geometry; put it back */
+		struct room_cam desk;
+		room_cam_build((double)w / (double)h, &desk);
+		return true;
+	}
 	bool whole = true;
 	for (int v = 0; v < DESK_VIEW_COUNT; v++) {
 		if (room_film_get(rr, v)) {
@@ -6673,6 +10434,8 @@ static const char *const ROOM_LEVEL_NAME[DESK_GFX_COUNT] = { "2D", "Low", "Mediu
 /* The room (cw, ch, hq) at level q, read back or traced; (wcw, wch, whq)
  * is the one it is instead if this turns out to be the first room on a
  * machine whose GPU can follow the screen (room_warm). */
+static void room_cases_ready(double aspect, double hx);
+
 static void room_build_now(int cw, int ch, int hq, int wcw, int wch, int whq, int q)
 {
 	pthread_mutex_lock(&g_render_lock);
@@ -6681,12 +10444,17 @@ static void room_build_now(int cw, int ch, int hq, int wcw, int wch, int whq, in
 		return;
 	}
 	pthread_mutex_lock(&g_room_lock);
-	g_room_making = (struct room_ask){ cw, ch, hq, q };
+	g_room_making = (struct room_ask){ cw, ch, hq, q, desk_look() };
+	g_room_look_making = g_room_making.look;
+	wood_bake_begin();
 	pthread_mutex_unlock(&g_room_lock);
 	/* the desk this room is of: everything traced or loaded from here on
 	 * is laid out on it; and at the level it was asked for */
 	g_rm_hx = hq * 0.5;
 	room_level_set(q, cw);
+	/* and the pictures of the things on it for a screen this shape over a
+	 * desk this wide, before there is a desk to put them on */
+	room_cases_ready((double)cw / (double)ch, hq * 0.5);
 	double read0 = room_now();
 	struct room_render *rr = room_cache_load_desk(cw, ch, hq, q);
 	bool traced = false;
@@ -6703,7 +10471,8 @@ static void room_build_now(int cw, int ch, int hq, int wcw, int wch, int whq, in
 		if (g && !desk_gpu_software(g)) {
 			room_wide_remember();
 			room_log("a GPU to trace with: the room %dx%d, not %dx%d", wcw, wch, cw, ch);
-			struct room_ask narrow = { cw, ch, hq, q }, wide = { wcw, wch, whq, q };
+			struct room_ask narrow = { cw, ch, hq, q, g_room_making.look },
+				wide = { wcw, wch, whq, q, g_room_making.look };
 			pthread_mutex_lock(&g_room_lock);
 			atomic_store_explicit(&g_room_cap, ROOM_WIDE_W, memory_order_relaxed);
 			/* the room the screen asked for is this one, at its new width */
@@ -6779,7 +10548,7 @@ static void room_build_now(int cw, int ch, int hq, int wcw, int wch, int whq, in
 	if (!rr) {
 		traced = true;
 		atomic_store_explicit(&g_room_afresh, 1, memory_order_relaxed);
-		if (room_traces_on_cpu()) {
+		if (room_traces_on_cpu() && !rf_desk_laid()) {
 			room_preview(cw, ch, hq, q);
 		}
 		/* The desk first, and on screen the moment it is traced. The three
@@ -6788,6 +10557,7 @@ static void room_build_now(int cw, int ch, int hq, int wcw, int wch, int whq, in
 		 * and a half of staring at a bare plank. */
 		double t0 = room_now();
 		rr = room_render_desk(cw, ch);
+		rf_release_desk();
 		if (room_stopping()) {
 			/* stopped part way (desk_room_stop): none of it goes up */
 			if (rr) {
@@ -6844,6 +10614,7 @@ static void room_build_now(int cw, int ch, int hq, int wcw, int wch, int whq, in
 	(void)traced;
 #endif
 	atomic_store_explicit(&g_room_afresh, 0, memory_order_relaxed);
+	rf_release();
 	pthread_mutex_lock(&g_room_lock);
 	g_room_warming = 0;
 	pthread_mutex_unlock(&g_room_lock);
@@ -6882,7 +10653,7 @@ static void room_warm(int screen_w, int screen_h, bool async)
 	 * under. */
 	pthread_mutex_lock(&g_room_lock);
 	room_canon(screen_w, screen_h, &cw, &ch, &hq);
-	g_room_asked = (struct room_ask){ cw, ch, hq, q };
+	g_room_asked = (struct room_ask){ cw, ch, hq, q, desk_look() };
 	pthread_mutex_unlock(&g_room_lock);
 	if (room_peek_whole(cw, ch, hq) || room_stopping()) {
 		return;
@@ -6891,7 +10662,7 @@ static void room_warm(int screen_w, int screen_h, bool async)
 	 * to follow the screen with (room_build_now) */
 	int wcw = cw, wch = ch, whq = hq;
 #ifdef DESK_HAVE_GPU
-	if (room_cap() < ROOM_WIDE_W && !g_room_cap_forced && ROOM_Q[q].cap <= 0) {
+	if (room_cap() < ROOM_WIDE_W && !g_room_cap_forced && room_level_cap(q) <= 0) {
 		room_canon_at(screen_w, screen_h, ROOM_WIDE_W, &wcw, &wch, &whq);
 	}
 #endif
@@ -7077,8 +10848,1195 @@ static cairo_surface_t *selftest_diff(cairo_surface_t *a, cairo_surface_t *b,
 	return d;
 }
 
+/* ---- the faces pictured, and tried against the trace ----------------
+ *
+ * desk-gputest --faces-bake makes a view's pack; --faces lays the view
+ * and the move to it from the faces, next to the same traced. */
+
+/* Where along the normal through w the face's own surface is: marched in
+ * from just outside it. A start inside something else is a texel that
+ * something stands on, which nothing will ever see. */
+static bool rf_find(const struct rface *f, vec3 w, vec3 *hp, int *id)
+{
+	vec3 p = vadd(w, vmul(f->n, f->out));
+	hit3 h0 = scene_map(p, ROOM_KIND);
+	if (h0.d < 0.0 && h0.id > 0) {
+		return false;
+	}
+	double t = 0.0, tmax = f->out + f->in;
+	for (int i = 0; i < 96 && t <= tmax; i++) {
+		vec3 q = vsub(p, vmul(f->n, t));
+		hit3 h = scene_map(q, ROOM_KIND);
+		if (h.d < 0.0015 && h.id > 0) {
+			*hp = q;
+			*id = h.id;
+			return true;
+		}
+		t += fmax(h.d, 0.0008);
+	}
+	return false;
+}
+
+/* How finely a face has to be pictured, and how much of it: as many texels
+ * to the unit along each edge as the cameras it is seen through put pixels
+ * there (and a fifth more), and only the part of it any of them sees. */
+static void rf_size(struct rface *f, const struct room_cam *cams, const int *camw, int ncam,
+	bool whole)
+{
+	double lu = vlen(f->u), lv = vlen(f->v);
+	vec3 du = vmul(f->u, 1.0 / lu), dv = vmul(f->v, 1.0 / lv);
+	double a0 = 1.0, a1 = 0.0, b0 = 1.0, b1 = 0.0, du_px = 0.0, dv_px = 0.0;
+	const int N = 48;
+	for (int j = 0; j <= N; j++) {
+		for (int i = 0; i <= N; i++) {
+			double a = (double)i / N, b = (double)j / N;
+			vec3 w = vadd(f->o, vadd(vmul(f->u, a), vmul(f->v, b)));
+			for (int c = 0; c < ncam; c++) {
+				double pu, pv, qu, qv, ru, rv;
+				if (vdot(vsub(w, cams[c].eye), f->n) >= 0.0
+					|| !room_project(&cams[c], w, &pu, &pv)
+					|| pu < -0.02 || pu > 1.02 || pv < -0.02 || pv > 1.02) {
+					continue;
+				}
+				a0 = fmin(a0, a);
+				a1 = fmax(a1, a);
+				b0 = fmin(b0, b);
+				b1 = fmax(b1, b);
+				double camh = camw[c] * cams[c].fov_y / cams[c].fov_x;
+				if (room_project(&cams[c], vadd(w, vmul(du, 0.01)), &qu, &qv)) {
+					du_px = fmax(du_px, hypot((qu - pu) * camw[c], (qv - pv) * camh) / 0.01);
+				}
+				if (room_project(&cams[c], vadd(w, vmul(dv, 0.01)), &ru, &rv)) {
+					dv_px = fmax(dv_px, hypot((ru - pu) * camw[c], (rv - pv) * camh) / 0.01);
+				}
+			}
+		}
+	}
+	if (a1 < a0 || b1 < b0) {
+		f->lv = 0;   /* nobody sees it */
+		return;
+	}
+	if (whole) {
+		a0 = b0 = 0.0;
+		a1 = b1 = 1.0;
+	}
+	/* a grid step either way, for what fell between the points looked at */
+	a0 = fmax(0.0, a0 - 1.0 / N);
+	a1 = fmin(1.0, a1 + 1.0 / N);
+	b0 = fmax(0.0, b0 - 1.0 / N);
+	b1 = fmin(1.0, b1 + 1.0 / N);
+	f->o = vadd(f->o, vadd(vmul(f->u, a0), vmul(f->v, b0)));
+	f->u = vmul(f->u, a1 - a0);
+	f->v = vmul(f->v, b1 - b0);
+	double tu = fmin(du_px * 1.2 * f->fine, f->tpu_max);
+	double tv = fmin(dv_px * 1.2 * f->fine, f->tpu_max);
+	f->tw[0] = (int)ceil(vlen(f->u) * fmax(tu, 1.0)) + 1;
+	f->th[0] = (int)ceil(vlen(f->v) * fmax(tv, 1.0)) + 1;
+	f->lv = 1;
+}
+
+struct rf_bake_arg {
+	struct rface *f;
+	vec3 eye;
+	float *tex, *key;   /* linear, premultiplied, the first level */
+	unsigned char *tall;   /* or NULL: what stands tall, a texel each */
+	float *height;         /* or NULL: how far off the face, a texel each */
+};
+
+static void rf_bake_row(void *p, int y)
+{
+	struct rf_bake_arg *a = p;
+	struct rface *f = a->f;
+	static const double J[4][2] = {
+		{ 0.25, 0.25 }, { 0.75, 0.25 }, { 0.25, 0.75 }, { 0.75, 0.75 },
+	};
+	int tw = f->tw[0], th = f->th[0];
+	for (int x = 0; x < tw; x++) {
+		double r = 0, g = 0, b = 0, cov = 0, kr = 0, kg = 0, kb = 0;
+		int own = 0;
+		bool owned = false, tall = false;
+		double hsum = 0.0;
+		for (int k = 0; k < 4; k++) {
+			double s = (x + J[k][0]) / tw, t = (y + J[k][1]) / th;
+			vec3 w = vadd(f->o, vadd(vmul(f->u, s), vmul(f->v, t)));
+			vec3 hp;
+			int id;
+			if (!rf_find(f, w, &hp, &id)) {
+				continue;
+			}
+			double hgt = vdot(vsub(hp, w), f->n);
+			hsum += hgt;
+			if (f->relief && hgt > f->tall) {
+				tall = true;
+			}
+			vec3 n = scene_normal(hp, ROOM_KIND);
+			vec3 rd = vnorm(vsub(hp, a->eye));
+			vec3 col = shade_surface(hp, n, rd, ROOM_KIND, id, 0.0, 0);
+			vec3 lit = shade_surface(hp, n, rd, ROOM_KIND, id, 1.0, 0);
+			r += col.x;
+			g += col.y;
+			b += col.z;
+			kr += lit.x - col.x;
+			kg += lit.y - col.y;
+			kb += lit.z - col.z;
+			cov += 1.0;
+			if (!owned) {
+				own = room_owner(hp, id);
+				owned = true;
+			}
+		}
+		float *o = a->tex + ((size_t)y * tw + x) * 4;
+		o[0] = (float)(r * 0.25);
+		o[1] = (float)(g * 0.25);
+		o[2] = (float)(b * 0.25);
+		o[3] = (float)(cov * 0.25);
+		float *k = a->key + ((size_t)y * tw + x) * 4;
+		k[0] = (float)(kr * 0.25);
+		k[1] = (float)(kg * 0.25);
+		k[2] = (float)(kb * 0.25);
+		k[3] = (float)(cov * 0.25);
+		f->own[(size_t)y * tw + x] = (unsigned char)own;
+		if (a->tall) {
+			a->tall[(size_t)y * tw + x] = tall;
+		}
+		if (a->height) {
+			a->height[(size_t)y * tw + x] = cov > 0.0 ? (float)(hsum / cov) : 0.0f;
+		}
+	}
+}
+
+/* What stands tall off a face, and round it as far as it could be seen
+ * across the face from the side, marked RF_OWN_TALL: traced, not laid. */
+static void rf_mark_tall(struct rface *f, const unsigned char *tall)
+{
+	int tw = f->tw[0], th = f->th[0];
+	for (int y = 0; y < th; y++) {
+		for (int x = 0; x < tw; x++) {
+			if (!tall[(size_t)y * tw + x]) {
+				continue;
+			}
+			double reach = RF_TALL_REACH * (f->height ? f->height[(size_t)y * tw + x] : f->tall);
+			int rx = (int)ceil(reach * tw / vlen(f->u));
+			int ry = (int)ceil(reach * th / vlen(f->v));
+			for (int yy = y - ry < 0 ? 0 : y - ry; yy <= y + ry && yy < th; yy++) {
+				for (int xx = x - rx < 0 ? 0 : x - rx; xx <= x + rx && xx < tw; xx++) {
+					double dx = (double)(xx - x) / (rx + 1e-9), dy = (double)(yy - y) / (ry + 1e-9);
+					if (dx * dx + dy * dy <= 1.0) {
+						f->own[(size_t)yy * tw + xx] = RF_OWN_TALL;
+					}
+				}
+			}
+		}
+	}
+}
+
+/* One of a face's pictures, from linear: the scale that fits its
+ * brightest texel, and the first level. */
+static uint32_t *rf_pack(const float *t, size_t n, float *scale)
+{
+	double top = 1e-6;
+	for (size_t i = 0; i < n; i++) {
+		if (t[i * 4 + 3] > 1e-6f) {
+			for (int c = 0; c < 3; c++) {
+				top = fmax(top, t[i * 4 + c] / t[i * 4 + 3]);
+			}
+		}
+	}
+	*scale = (float)(1.0 / top);
+	uint32_t *d = malloc(n * sizeof(uint32_t));
+	if (d) {
+		for (size_t i = 0; i < n; i++) {
+			d[i] = rf_enc(t + i * 4, *scale);
+		}
+	}
+	return d;
+}
+
+static bool rf_seen_from(const struct rface *f, const struct room_cam *c)
+{
+	for (int j = 0; j <= 8; j++) {
+		for (int i = 0; i <= 8; i++) {
+			vec3 w = vadd(f->o, vadd(vmul(f->u, i / 8.0), vmul(f->v, j / 8.0)));
+			double pu, pv;
+			if (vdot(vsub(w, c->eye), f->n) < 0.0 && room_project(c, w, &pu, &pv)
+				&& pu > -0.02 && pu < 1.02 && pv > -0.02 && pv < 1.02) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+/* Picture every face that the cameras see, lit as it is seen from eye --
+ * and a face that the first of them sees as well (with more than one, the
+ * start of the move), as it is seen from there too. */
+static long rf_bake(struct rface_set *s, const struct room_cam *cams, const int *camw,
+	int ncam, vec3 eye, bool whole)
+{
+	rf_lin_init();
+	s->eye1 = eye;
+	s->eye0 = ncam > 1 ? cams[1].eye : eye;
+	long texels = 0;
+	for (int i = 0; i < s->n; i++) {
+		struct rface *f = &s->f[i];
+		if (f->trace || f->clear) {
+			continue;
+		}
+		rf_size(f, cams, camw, ncam, whole);
+		if (!f->lv) {
+			continue;
+		}
+		size_t n = (size_t)f->tw[0] * f->th[0];
+		bool two = ncam > 1 && f->two && rf_seen_from(f, &cams[1]);
+		float *lin[RF_PICS] = { NULL, NULL, NULL, NULL };
+		bool ok = true;
+		for (int k = 0; k < (two ? RF_PICS : RF_REST0); k++) {
+			lin[k] = calloc(n * 4, sizeof(float));
+			ok = ok && lin[k];
+		}
+		f->own = calloc(n, 1);
+		unsigned char *tall = f->relief ? calloc(n, 1) : NULL;
+		f->height = f->relief ? calloc(n, sizeof(float)) : NULL;
+		if (ok && f->own) {
+			struct rf_bake_arg a = { f, eye, lin[RF_REST], lin[RF_LAMP], tall, f->height };
+			g_rf_flat = g_rf_unshadowed = true;
+			rf_run(rf_bake_row, &a, f->th[0]);
+			if (two) {
+				struct rf_bake_arg a0 = { f, s->eye0, lin[RF_REST0], lin[RF_LAMP0], NULL, NULL };
+				rf_run(rf_bake_row, &a0, f->th[0]);
+				texels += (long)n;
+			}
+			g_rf_flat = g_rf_unshadowed = false;
+			if (tall) {
+				rf_mark_tall(f, tall);
+			}
+			if (f->height) {
+				f->hmin = f->hmax = 0.0f;
+				for (size_t k = 0; k < n; k++) {
+					/* the tall are traced: the field stops at f->tall */
+					f->height[k] = fminf(f->height[k], (float)f->tall);
+					if (lin[RF_REST][k * 4 + 3] > 0.0f) {
+						f->hmin = fminf(f->hmin, f->height[k]);
+						f->hmax = fmaxf(f->hmax, f->height[k]);
+					}
+				}
+				/* Where nothing was found the face is open, as deep as it
+				 * goes: a ray followed down past the edge of a rounded block
+				 * goes on to what it meets beyond, and is not stopped at the
+				 * plane it was looked for from. */
+				for (size_t k = 0; k < n; k++) {
+					if (lin[RF_REST][k * 4 + 3] <= 0.0f) {
+						f->height[k] = f->hmin;
+					}
+				}
+			}
+			for (int k = 0; k < RF_PICS; k++) {
+				if (lin[k]) {
+					f->pic[k][0] = rf_pack(lin[k], n, &f->scale[k]);
+					ok = ok && f->pic[k][0];
+				}
+			}
+		}
+		for (int k = 0; k < RF_PICS; k++) {
+			free(lin[k]);
+		}
+		free(tall);
+		if (!ok || !f->own) {
+			for (int k = 0; k < RF_PICS; k++) {
+				free(f->pic[k][0]);
+				f->pic[k][0] = NULL;
+			}
+			free(f->own);
+			f->own = NULL;
+			f->lv = 0;
+			continue;
+		}
+		/* each picture from the level it starts at */
+		rf_dims(f);
+		for (int k = 0; k < RF_PICS; k++) {
+			if (!f->pic[k][0] || f->base[k] == 0) {
+				continue;
+			}
+			uint32_t *t = f->pic[k][0];
+			f->pic[k][0] = NULL;
+			for (int l = 1; l <= f->base[k] && t; l++) {
+				uint32_t *h = rf_half(t, f->tw[l - 1], f->th[l - 1], f->tw[l], f->th[l]);
+				free(t);
+				t = h;
+			}
+			f->pic[k][f->base[k]] = t;
+		}
+		rf_mips(f);
+		texels += (long)n;
+	}
+	return texels;
+}
+
+/* How far apart two sheets are once the grain is taken out of both -- a
+ * five by five box over each -- in pixels more than two levels apart, and
+ * the mean of the largest channel's difference. */
+static int rf_soft_diff(cairo_surface_t *a, cairo_surface_t *b, double *mean)
+{
+	int w = cairo_image_surface_get_width(a), h = cairo_image_surface_get_height(a);
+	cairo_surface_flush(a);
+	cairo_surface_flush(b);
+	const unsigned char *pa = cairo_image_surface_get_data(a);
+	const unsigned char *pb = cairo_image_surface_get_data(b);
+	int sa = cairo_image_surface_get_stride(a), sb = cairo_image_surface_get_stride(b);
+	int over = 0;
+	double sum = 0.0;
+	for (int y = 2; y < h - 2; y++) {
+		for (int x = 2; x < w - 2; x++) {
+			int m = 0;
+			for (int c = 0; c < 24; c += 8) {
+				int ta = 0, tb = 0;
+				for (int dy = -2; dy <= 2; dy++) {
+					const uint32_t *ra = (const uint32_t *)(pa + (size_t)(y + dy) * sa);
+					const uint32_t *rb = (const uint32_t *)(pb + (size_t)(y + dy) * sb);
+					for (int dx = -2; dx <= 2; dx++) {
+						ta += (ra[x + dx] >> c) & 255;
+						tb += (rb[x + dx] >> c) & 255;
+					}
+				}
+				int d = abs(ta - tb) / 25;
+				m = d > m ? d : m;
+			}
+			over += m > 2;
+			sum += m;
+		}
+	}
+	*mean = sum / ((double)(w - 4) * (h - 4));
+	return over;
+}
+
+/* A picture of a face as a PNG, every step-th texel of it: cairo's, so
+ * multiplied by its alpha. Into dir/faces, to see what they weigh. */
+static void rf_dump_one(const char *path, const uint32_t *t, int w, int h, int step)
+{
+	int ow = (w + step - 1) / step, oh = (h + step - 1) / step;
+	cairo_surface_t *s = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, ow, oh);
+	unsigned char *d = cairo_image_surface_get_data(s);
+	int st = cairo_image_surface_get_stride(s);
+	for (int y = 0; y < oh; y++) {
+		uint32_t *row = (uint32_t *)(d + (size_t)y * st);
+		for (int x = 0; x < ow; x++) {
+			uint32_t p = t[(size_t)(y * step) * w + x * step], a = p >> 24, q = a << 24;
+			for (int c = 0; c < 24; c += 8) {
+				q |= ((((p >> c) & 255) * a + 127) / 255) << c;
+			}
+			row[x] = q;
+		}
+	}
+	cairo_surface_mark_dirty(s);
+	cairo_surface_write_to_png(s, path);
+	cairo_surface_destroy(s);
+}
+
+static void rf_dump(const struct rface_set *fs, const char *dir)
+{
+	char path[1024];
+	snprintf(path, sizeof path, "%s/faces", dir);
+	mkdir(path, 0755);
+	for (int i = 0; i < fs->n; i++) {
+		const struct rface *f = &fs->f[i];
+		if (!f->lv || f->trace) {
+			continue;
+		}
+		static const char *const KIND[RF_PICS] = { "rest", "lamp", "rest0", "lamp0" };
+		for (int k = 0; k < RF_PICS; k++) {
+			if (rf_has(f, k)) {
+				int b = f->base[k];
+				snprintf(path, sizeof path, "%s/faces/%02d-%s-%s.png", dir, i, f->what,
+					KIND[k]);
+				rf_dump_one(path, f->pic[k][b], f->tw[b], f->th[b], 1);
+			}
+		}
+	}
+}
+
+struct rf_buf {
+	unsigned char *d;
+	size_t n, cap;
+};
+
+static cairo_status_t rf_buf_write(void *closure, const unsigned char *data, unsigned int len)
+{
+	struct rf_buf *b = closure;
+	if (b->n + len > b->cap) {
+		size_t cap = (b->n + len) * 2;
+		unsigned char *d = realloc(b->d, cap);
+		if (!d) {
+			return CAIRO_STATUS_WRITE_ERROR;
+		}
+		b->d = d;
+		b->cap = cap;
+	}
+	memcpy(b->d + b->n, data, len);
+	b->n += len;
+	return CAIRO_STATUS_SUCCESS;
+}
+
+static bool rf_write(const struct rface_set *s, const char *path)
+{
+	FILE *fp = fopen(path, "wb");
+	if (!fp) {
+		return false;
+	}
+	int32_t n = 0;
+	for (int i = 0; i < s->n; i++) {
+		n += s->f[i].lv > 0 && !s->f[i].trace;
+	}
+	fwrite("DSKFACE4", 1, 8, fp);
+	fwrite(&n, sizeof n, 1, fp);
+	struct rf_buf *png = calloc((size_t)s->n * (RF_PICS + 2), sizeof *png);
+	bool ok = png != NULL;
+	for (int i = 0; ok && i < s->n; i++) {
+		const struct rface *f = &s->f[i];
+		if (!f->lv || f->trace) {
+			continue;
+		}
+		struct rf_rec r;
+		memset(&r, 0, sizeof r);
+		snprintf(r.what, sizeof r.what, "%s", f->what);
+		r.nth = rf_nth(s, i);
+		r.tw = f->tw[0];
+		r.th = f->th[0];
+		r.turn = (float)f->turn;
+		const vec3 *V[6] = { &f->o, &f->u, &f->v, &f->n, &f->at, &f->lamp };
+		double *D[6] = { r.o, r.u, r.v, r.n, r.at, r.lamp };
+		for (int k = 0; k < 6; k++) {
+			D[k][0] = V[k]->x;
+			D[k][1] = V[k]->y;
+			D[k][2] = V[k]->z;
+		}
+		for (int k = 0; k <= RF_PICS + 1; k++) {
+			struct rf_buf *b = &png[(size_t)i * (RF_PICS + 2) + k];
+			cairo_surface_t *img;
+			if (k == RF_PICS + 1) {
+				/* the heights, between hmin and hmax in 255 steps */
+				if (!f->height || f->hmax - f->hmin < 1e-4f) {
+					continue;
+				}
+				r.hmin = f->hmin;
+				r.hmax = f->hmax;
+				img = cairo_image_surface_create(CAIRO_FORMAT_A8, r.tw, r.th);
+				unsigned char *d = cairo_image_surface_get_data(img);
+				int st = cairo_image_surface_get_stride(img);
+				for (int y = 0; y < r.th; y++) {
+					for (int x = 0; x < r.tw; x++) {
+						double hgt = (f->height[(size_t)y * r.tw + x] - f->hmin)
+							/ (f->hmax - f->hmin);
+						d[(size_t)y * st + x] = (unsigned char)(clampf(hgt, 0, 1) * 255 + 0.5);
+					}
+				}
+			} else if (k < RF_PICS) {
+				if (!rf_has(f, k)) {
+					continue;
+				}
+				int bl = f->base[k], pw = f->tw[bl], ph = f->th[bl];
+				const uint32_t *t = f->pic[k][bl];
+				r.scale[k] = f->scale[k];
+				r.base[k] = (uint8_t)bl;
+				img = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, pw, ph);
+				unsigned char *d = cairo_image_surface_get_data(img);
+				int st = cairo_image_surface_get_stride(img);
+				for (int y = 0; y < ph; y++) {
+					uint32_t *row = (uint32_t *)(d + (size_t)y * st);
+					for (int x = 0; x < pw; x++) {
+						uint32_t p = t[(size_t)y * pw + x], a = p >> 24;
+						uint32_t q = a << 24;
+						for (int c = 0; c < 24; c += 8) {
+							q |= ((((p >> c) & 255) * a + 127) / 255) << c;
+						}
+						row[x] = q;
+					}
+				}
+			} else {
+				img = cairo_image_surface_create(CAIRO_FORMAT_A8, r.tw, r.th);
+				unsigned char *d = cairo_image_surface_get_data(img);
+				int st = cairo_image_surface_get_stride(img);
+				for (int y = 0; y < r.th; y++) {
+					memcpy(d + (size_t)y * st, f->own + (size_t)y * r.tw, (size_t)r.tw);
+				}
+			}
+			cairo_surface_mark_dirty(img);
+			ok = ok && cairo_surface_write_to_png_stream(img, rf_buf_write, b)
+				== CAIRO_STATUS_SUCCESS;
+			cairo_surface_destroy(img);
+			r.len[k] = (uint32_t)b->n;
+		}
+		fwrite(&r, sizeof r, 1, fp);
+	}
+	for (int i = 0; ok && i < s->n * (RF_PICS + 2); i++) {
+		if (png[i].n) {
+			fwrite(png[i].d, 1, png[i].n, fp);
+		}
+	}
+	for (int i = 0; png && i < s->n * (RF_PICS + 2); i++) {
+		free(png[i].d);
+	}
+	free(png);
+	ok = !ferror(fp) && ok;
+	return fclose(fp) == 0 && ok;
+}
+
+
+/* The move up to the bookcase, frame by frame at a quarter of the size,
+ * traced and laid; a sheet of each into dir. */
+static void rf_film_test(struct rface_set *fs, int w, int h, const char *dir, int layer)
+{
+	int fw = w / 4, fh = h / 4, fhw = fw * ICON_SS, fhh = fh * ICON_SS;
+	size_t n = (size_t)fhw * fhh;
+	float *ht = calloc(n * 4, sizeof(float)), *hl = calloc(n * 4, sizeof(float));
+	unsigned char *it = calloc(n, 1), *il = calloc(n, 1), *need = calloc(n, 1);
+	cairo_surface_t *sheet_t = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, fw * 6, fh * 3);
+	cairo_surface_t *sheet_l = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, fw * 6, fh * 3);
+	cairo_t *ct_ = cairo_create(sheet_t), *cl_ = cairo_create(sheet_l);
+	double aspect = (double)w / (double)h;
+	double tt = 0, tl = 0, tr = 0;
+	printf("\nthe move, %d frames of %d x %d:\n", ROOM_TILT_FRAMES, fw, fh);
+	printf("  frame  traced    laid    rest  rest %%   soft>2 %%   mean\n");
+	for (int k = 0; ht && hl && it && il && need && k < ROOM_TILT_FRAMES; k++) {
+		struct room_cam cam;
+		double u = ROOM_TILT_U0 + (ROOM_TILT_U1 - ROOM_TILT_U0) * k / (ROOM_TILT_FRAMES - 1);
+		int which = layer == 4 ? DESK_VIEW_CONSOLE : layer == 5 ? DESK_VIEW_POST
+			: DESK_VIEW_SHELF;
+		room_cam_lerp(aspect, u, which, &cam);
+		room_film_pose(which, u);
+		rf_pose(fs);
+		struct room_ctx c1 = { 0 };
+		c1.hi = ht;
+		c1.idhi = it;
+		c1.hw = fhw;
+		c1.hh = fhh;
+		c1.layer = layer;
+		c1.cam = cam;
+		double t0 = room_now();
+		room_trace_cpu(&c1);
+		double a = room_now() - t0;
+		struct room_ctx c2 = c1;
+		c2.hi = hl;
+		c2.idhi = il;
+		t0 = room_now();
+		rf_lay_sheet(fs, &c2, need);
+		double b = room_now() - t0;
+		size_t needed = 0;
+		for (size_t i = 0; i < n; i++) {
+			needed += need[i];
+		}
+		c2.need = need;
+		t0 = room_now();
+		room_trace_cpu(&c2);
+		double c = room_now() - t0;
+		cairo_surface_t *s1 = room_resolve(ht, it, fw, fh, NULL);
+		cairo_surface_t *s2 = room_resolve(hl, il, fw, fh, NULL);
+		double mean = 0.0;
+		int over = rf_soft_diff(s2, s1, &mean);
+		printf("  %5d %7.2f %7.2f %7.2f %7.1f %10.2f %6.2f\n", k, a, b, c,
+			100.0 * needed / n, 100.0 * over / ((double)fw * fh), mean);
+		tt += a;
+		tl += b;
+		tr += c;
+		cairo_set_source_surface(ct_, s1, (k % 6) * fw, (k / 6) * fh);
+		cairo_paint(ct_);
+		cairo_set_source_surface(cl_, s2, (k % 6) * fw, (k / 6) * fh);
+		cairo_paint(cl_);
+		cairo_surface_destroy(s1);
+		cairo_surface_destroy(s2);
+	}
+	printf("  all   %7.2f %7.2f %7.2f\n", tt, tl, tr);
+	cairo_destroy(ct_);
+	cairo_destroy(cl_);
+	selftest_png(dir, "film", "trace", sheet_t);
+	selftest_png(dir, "film", "both", sheet_l);
+	cairo_surface_destroy(sheet_t);
+	cairo_surface_destroy(sheet_l);
+	free(ht);
+	free(hl);
+	free(it);
+	free(il);
+	free(need);
+}
+
+/* The cameras a view's face set is pictured for, in the room as the
+ * globals have it: the view at w wide, and the move to it at a quarter of
+ * that. cams has room for 1 + ROOM_TILT_FRAMES. */
+static int rf_view_cams(int which, double aspect, int w, struct room_cam *cams, int *camw)
+{
+	camw[0] = w;
+	int n = 1;
+	for (int k = 0; k < ROOM_TILT_FRAMES; k++) {
+		room_cam_lerp(aspect, ROOM_TILT_U0 + (ROOM_TILT_U1 - ROOM_TILT_U0) * k
+			/ (ROOM_TILT_FRAMES - 1), which, &cams[n]);
+		camw[n++] = w / 4;
+	}
+	/* room_cam_lerp left the desk's camera's room */
+	rf_view_cam(which, aspect, &cams[0]);
+	return n;
+}
+
+/* The desk's own view's pack: the faces of its sheet (layer 1) and of its
+ * drawer's (2), pictured straight down in the room of the widest desk it is
+ * for at its deepest, a 2560 point screen of 16 by 10 -- through a camera
+ * w wide, which at 2560 has the top at its cap (rf_plan). DESK_FACES_BAKE_AT
+ * as for the others. Under g_render_lock. */
+static bool rf_bake_plan(const char *out, int w)
+{
+	double aspect = 1.6, hx = 28.44, at_a = 0.0, at_h = 0.0;
+	const char *bat = getenv("DESK_FACES_BAKE_AT");
+	if (bat && sscanf(bat, "%lf:%lf", &at_a, &at_h) == 2 && at_a > 0.2) {
+		aspect = at_a;
+		hx = fmax(at_h, RM_HX_MIN);
+	}
+	struct rface_set *one = calloc(1, sizeof *one), *two = calloc(1, sizeof *two);
+	bool ok = one && two;
+	if (ok) {
+		double open0 = g_room_open;
+		g_room_open = 1.0;
+		g_rm_hx = hx;
+		struct room_cam cam;
+		room_cam_build(aspect, &cam);
+		printf("the desk: %.2f to 1, %.1f wide, %.1f deep, seen %d wide\n", aspect,
+			2.0 * hx, RM_ZN - RM_ZF, w);
+		for (int layer = 1; layer <= 2; layer++) {
+			struct rface_set *s = layer == 1 ? one : two;
+			g_room_layer = layer;
+			rf_layer(s, layer);
+			double t0 = room_now();
+			long t = rf_bake(s, &cam, &w, 1, cam.eye, true);
+			printf("  its %s: %ld texels in %.1f s\n", layer == 1 ? "sheet" : "drawer", t,
+				room_now() - t0);
+		}
+		/* the drawer's after the desk's, every one, in the order they
+		 * come (rf_nth) */
+		for (int i = 0; i < two->n && one->n < RF_MAX; i++) {
+			one->f[one->n++] = two->f[i];
+			memset(&two->f[i], 0, sizeof two->f[i]);
+		}
+		ok = rf_write(one, out);
+		printf("%s %s\n", ok ? "wrote" : "could not write", out);
+		g_room_open = open0;
+	}
+	if (one) {
+		rf_free(one);
+	}
+	if (two) {
+		rf_free(two);
+	}
+	free(one);
+	free(two);
+	struct room_cam dc;
+	room_cam_build(1.6, &dc);
+	return ok;
+}
+
+bool desk_room_faces_bake(const char *out, int w, int layer)
+{
+	/* the pictures that ship are of the desk as it was made, always (desk_relight) */
+	desk_set_wood(DESK_WOOD_WALNUT, DESK_STAIN_NATURAL);
+	wood_bake_begin();
+	const int which = layer == 4 ? DESK_VIEW_CONSOLE : layer == 5 ? DESK_VIEW_POST
+		: DESK_VIEW_SHELF;
+	if (layer == 1 || layer == 2) {
+		pthread_mutex_lock(&g_render_lock);
+		drawer_items_build();
+		sh_build();
+		bool ok = rf_bake_plan(out, w);
+		pthread_mutex_unlock(&g_render_lock);
+		return ok;
+	}
+	pthread_mutex_lock(&g_render_lock);
+	drawer_items_build();
+	sh_build();
+	double open0 = g_room_open, cc0 = g_cc_out, pb0 = g_pb_open;
+	g_room_open = 0.0;
+	g_cc_out = layer == 4 ? 1.0 : 0.0;
+	g_pb_open = layer == 5 ? 1.0 : 0.0;
+	g_room_layer = layer;
+
+	/* the case as wide as any screen makes it, of those it is pictured
+	 * for: 5:4 to 21:9, and desks up to a 2560 point screen's */
+	static const double ASPECT[] = { 1.25, 4.0 / 3.0, 1.5, 1.6, 16.0 / 9.0, 2.0, 2.37 };
+	static const double HX[] = { 16.0, 21.33, 28.44 };
+	double best = 0.0, ba = 1.6, bh = 16.0;
+	/* DESK_FACES_BAKE_AT=aspect:hx -- everything pictured in that one
+	 * room, for trying the pack against the faces pictured in place */
+	double at_a = 0.0, at_h = 0.0;
+	const char *bat = getenv("DESK_FACES_BAKE_AT");
+	bool one = bat && sscanf(bat, "%lf:%lf", &at_a, &at_h) == 2 && at_a > 0.2;
+	for (size_t i = 0; !one && i < sizeof ASPECT / sizeof ASPECT[0]; i++) {
+		for (size_t j = 0; j < sizeof HX / sizeof HX[0]; j++) {
+			struct room_cam c;
+			g_rm_hx = HX[j];
+			room_cam_shelf(ASPECT[i], &c);
+			if (g_rm_sh_hx > best) {
+				best = g_rm_sh_hx;
+				ba = ASPECT[i];
+				bh = HX[j];
+			}
+		}
+	}
+	struct room_cam cams[1 + ROOM_TILT_FRAMES];
+	int camw[1 + ROOM_TILT_FRAMES];
+	struct rface_set *fs = calloc(1, sizeof *fs), *desk = calloc(1, sizeof *desk);
+	bool ok = fs && desk;
+	if (one) {
+		ba = at_a;
+		bh = fmax(at_h, RM_HX_MIN);
+	}
+	if (ok) {
+		g_rm_hx = bh;
+		int nc = rf_view_cams(which, ba, w, cams, camw);
+		printf("the room: %.2f to 1, desk %.1f wide: case %.1f wide\n", ba, 2.0 * bh,
+			2.0 * g_rm_sh_hx);
+		rf_layer(fs, layer);
+		int di = -1;
+		for (int i = 0; i < fs->n; i++) {
+			if (!strcmp(fs->f[i].what, "desk")) {
+				fs->f[i].trace = true;
+				di = i;
+			}
+			/* the desk, the wall and the floor are the bookcase's pack's,
+			 * in every view, and so are the things on its board; the
+			 * console and the post box their own -- and the clock on the
+			 * desk every view's own, its glass showing the room as it is
+			 * seen from there */
+			const char *w8 = fs->f[i].what;
+			bool room = (!strncmp(w8, "desk", 4) || !strncmp(w8, "wall", 4)
+				|| !strncmp(w8, "floor", 5) || !strncmp(w8, "skirting", 8)
+				|| (!strncmp(w8, "gd-", 3) && strcmp(w8, "gd-tray")))
+				&& !strstr(w8, "-bare");
+			if ((layer != 3 && room) || (layer != 4 && !strncmp(w8, "cc-", 3))
+				|| (layer != 5 && !strncmp(w8, "pb-", 3))) {
+				fs->f[i].trace = true;
+			}
+		}
+		double t0 = room_now();
+		long t1 = rf_bake(fs, cams, camw, nc, cams[0].eye, true);
+		printf("  %ld texels in %.1f s\n", t1, room_now() - t0);
+
+		/* and the post box's door shut, as the bookcase and the console and
+		 * the start of the move to it see its outside: open, nothing does.
+		 * Lit as the bookcase sees it, from where it is most looked at. */
+		if (layer == 5) {
+			struct room_cam sc[2 + ROOM_TILT_FRAMES];
+			int scw[2 + ROOM_TILT_FRAMES];
+			int sn = rf_view_cams(which, ba, w, sc, scw);
+			room_cam_shelf(ba, &sc[sn]);
+			scw[sn++] = w;
+			g_pb_open = 0.0;
+			rf_layer(desk, layer);
+			int k = -1;
+			for (int i = 0; i < desk->n; i++) {
+				desk->f[i].trace = strcmp(desk->f[i].what, "pb-door") != 0;
+				k = desk->f[i].trace ? k : i;
+			}
+			t0 = room_now();
+			long t3 = rf_bake(desk, sc, scw, sn, sc[sn - 1].eye, true);
+			printf("  its door shut: %ld texels in %.1f s\n", t3, room_now() - t0);
+			for (int i = 0; k >= 0 && i < fs->n; i++) {
+				if (!strcmp(fs->f[i].what, "pb-door")) {
+					struct rface open = fs->f[i];
+					fs->f[i] = desk->f[k];
+					desk->f[k] = open;   /* freed with the rest */
+					break;
+				}
+			}
+			g_pb_open = 1.0;
+		}
+		/* and the desk as wide and as deep as any of them */
+		if (layer != 3) {
+			di = -1;
+			goto written;
+		}
+		g_rm_hx = one ? bh : 28.44;
+		nc = rf_view_cams(which, one ? ba : 1.6, w, cams, camw);
+		printf("the desk: %.1f wide, %.1f deep\n", 2.0 * g_rm_hx, RM_ZN - RM_ZF);
+		rf_layer(desk, layer);
+		for (int i = 0; i < desk->n; i++) {
+			desk->f[i].trace = strcmp(desk->f[i].what, "desk") != 0;
+		}
+		t0 = room_now();
+		long t2 = rf_bake(desk, cams, camw, nc, cams[0].eye, true);
+		printf("  %ld texels in %.1f s\n", t2, room_now() - t0);
+		for (int i = 0; di >= 0 && i < desk->n; i++) {
+			if (!desk->f[i].trace) {
+				fs->f[di] = desk->f[i];
+				memset(&desk->f[i], 0, sizeof desk->f[i]);
+			}
+		}
+	written:
+		ok = rf_write(fs, out);
+		printf("%s %s\n", ok ? "wrote" : "could not write", out);
+	}
+	if (fs) {
+		rf_free(fs);
+	}
+	if (desk) {
+		rf_free(desk);
+	}
+	free(fs);
+	free(desk);
+	struct room_cam dc;
+	room_cam_build(1.6, &dc);
+	g_room_open = open0;
+	g_cc_out = cc0;
+	g_pb_open = pb0;
+	pthread_mutex_unlock(&g_render_lock);
+	return ok;
+}
+
+bool desk_room_faces_test(int w, int h, const char *dir)
+{
+	wood_bake_begin();
+	pthread_mutex_lock(&g_render_lock);
+	drawer_items_build();
+	sh_build();
+	double open0 = g_room_open, cc0 = g_cc_out, pb0 = g_pb_open;
+	struct room_q bq0 = g_bq;
+	if (dir && *dir && mkdir(dir, 0755) != 0 && errno != EEXIST) {
+		printf("cannot make %s: %s\n", dir, strerror(errno));
+		dir = NULL;
+	}
+	/* DESK_FACES_SS=1: a sample a pixel, as at 2D (and 3, Ultra's nine) */
+	const char *ssv = getenv("DESK_FACES_SS");
+	if (ssv && atoi(ssv) >= 1 && atoi(ssv) <= 3) {
+		g_bq.ss = atoi(ssv);
+	}
+	/* DESK_FACES_EDGE=2: two of a traced edge's four, as at Low */
+	const char *edv = getenv("DESK_FACES_EDGE");
+	if (edv) {
+		g_bq.edge_traced = atoi(edv);
+	}
+	/* DESK_FACES_LAYER=4: the console's view and the move to it instead;
+	 * 1 and 2, the desk's own sheet and its drawer's */
+	const char *lay = getenv("DESK_FACES_LAYER");
+	const int layer = lay && atoi(lay) >= 1 && atoi(lay) <= 5 ? atoi(lay) : 3;
+	const int which = layer <= 2 ? RF_VIEW_DESK : layer == 4 ? DESK_VIEW_CONSOLE
+		: layer == 5 ? DESK_VIEW_POST : DESK_VIEW_SHELF;
+	g_room_open = layer <= 3 ? 1.0 : 0.0;
+	g_cc_out = layer == 4 ? 1.0 : 0.0;
+	g_pb_open = layer == 5 ? 1.0 : 0.0;
+	g_room_layer = layer;
+
+	/* DESK_FACES_FROM=WxH[:hx]: the faces pictured in the room of that
+	 * screen and that desk, and laid in this one -- whether one set of
+	 * pictures will do for rooms of other shapes */
+	struct rface_set *src = NULL;
+	long src_texels = 0;
+	double t_src = 0.0;
+	const char *from = getenv("DESK_FACES_FROM");
+	int fw = 0, fh = 0;
+	double fhx = RM_HX_MIN;
+	if (from && sscanf(from, "%dx%d:%lf", &fw, &fh, &fhx) >= 2 && fw >= 16 && fh >= 16) {
+		g_rm_hx = fmax(fhx, RM_HX_MIN);
+		struct room_cam fcam;
+		rf_view_cam(which, (double)fw / fh, &fcam);
+		src = calloc(1, sizeof *src);
+		if (src) {
+			rf_layer(src, layer);
+			double t0 = room_now();
+			src_texels = rf_bake(src, &fcam, &fw, 1, fcam.eye, true);
+			t_src = room_now() - t0;
+			printf("pictured in the room of %d x %d, desk %.1f wide, case %.1f\n",
+				fw, fh, 2.0 * g_rm_hx, 2.0 * g_rm_sh_hx);
+		}
+	}
+
+	const char *thx = getenv("DESK_TEST_HX");
+	g_rm_hx = thx && *thx ? fmax(atof(thx), RM_HX_MIN) : RM_HX_MIN;
+	double aspect = (double)w / (double)h;
+	struct room_cam cam;
+	rf_view_cam(which, aspect, &cam);
+	/* DESK_FACES_FILM: the move up to the bookcase as well, frame by frame,
+	 * with the drawer shut as it is for the move */
+	bool film = getenv("DESK_FACES_FILM") != NULL;
+	if (film) {
+		g_room_open = 0.0;
+	}
+	int hw = w * ICON_SS, hh = h * ICON_SS;
+	size_t n = (size_t)hw * hh;
+	printf("the bookcase, %d x %d (%d x %d samples), desk %.1f wide, case %.1f\n\n",
+		w, h, hw, hh, 2.0 * g_rm_hx, 2.0 * g_rm_sh_hx);
+
+	float *ht = calloc(n * 4, sizeof(float)), *hl = calloc(n * 4, sizeof(float));
+	unsigned char *it = calloc(n, 1), *il = calloc(n, 1), *need = calloc(n, 1);
+	struct rface_set *fs = calloc(1, sizeof *fs);
+	bool ok = ht && hl && it && il && need && fs;
+	if (ok) {
+		struct room_ctx ct = { 0 };
+		ct.hi = ht;
+		ct.idhi = it;
+		ct.hw = hw;
+		ct.hh = hh;
+		ct.layer = layer;
+		ct.cam = cam;
+		double t0 = room_now();
+		room_trace_cpu(&ct);
+		double t_trace = room_now() - t0;
+
+		rf_layer(fs, layer);
+		int own_n = fs->n;
+		t0 = room_now();
+		long texels;
+		const char *packp = getenv("DESK_FACES_PACK");
+		struct rface_set *pack = NULL;
+		if (packp) {
+			FILE *fp = fopen(packp, "rb");
+			unsigned char *buf = NULL;
+			long len = 0;
+			if (fp && fseek(fp, 0, SEEK_END) == 0 && (len = ftell(fp)) > 0
+				&& fseek(fp, 0, SEEK_SET) == 0 && (buf = malloc((size_t)len))
+				&& fread(buf, 1, (size_t)len, fp) == (size_t)len) {
+				pack = rf_read(buf, (size_t)len);
+			}
+			if (fp) {
+				fclose(fp);
+			}
+			free(buf);
+			printf("the pack %s: %s, %ld bytes\n", packp, pack ? "read" : "NOT read", len);
+		}
+		/* DESK_FACES_PACK2, _PACK3: the other packs the view lays from */
+		struct rface_set *more[2] = { NULL, NULL };
+		for (int q = 0; pack && q < 2; q++) {
+			const char *mp = getenv(q ? "DESK_FACES_PACK3" : "DESK_FACES_PACK2");
+			FILE *fp = mp ? fopen(mp, "rb") : NULL;
+			unsigned char *buf = NULL;
+			long len = 0;
+			if (fp && fseek(fp, 0, SEEK_END) == 0 && (len = ftell(fp)) > 0
+				&& fseek(fp, 0, SEEK_SET) == 0 && (buf = malloc((size_t)len))
+				&& fread(buf, 1, (size_t)len, fp) == (size_t)len) {
+				more[q] = rf_read(buf, (size_t)len);
+			}
+			if (fp) {
+				fclose(fp);
+			}
+			free(buf);
+			if (mp) {
+				printf("the pack %s: %s\n", mp, more[q] ? "read" : "NOT read");
+			}
+		}
+		if (pack) {
+			const struct rface_set *packs[3] = { pack, more[0], more[1] };
+			rf_link(fs, packs, 3);
+			struct room_cam plan;
+			if (which != RF_VIEW_DESK) {
+				room_cam_lerp(aspect, ROOM_TILT_U0, which, &plan);
+			}
+			rf_view_cam(which, aspect, &cam);
+			fs->eye0 = which != RF_VIEW_DESK ? plan.eye : cam.eye;
+			fs->eye1 = cam.eye;
+			texels = 0;
+		} else if (src) {
+			/* the same faces, in the same order, of the other room */
+			for (int i = 0; i < own_n; i++) {
+				if (i < src->n && !strcmp(src->f[i].what, fs->f[i].what)) {
+					fs->f[i].src = &src->f[i];
+				} else {
+					fs->f[i].trace = true;
+				}
+			}
+			texels = src_texels;
+		} else {
+			struct room_cam cams[1 + ROOM_TILT_FRAMES];
+			int camw[1 + ROOM_TILT_FRAMES];
+			int ncam = 1;
+			cams[0] = cam;
+			camw[0] = w;
+			for (int k = 0; film && k < ROOM_TILT_FRAMES; k++) {
+				room_cam_lerp(aspect, ROOM_TILT_U0 + (ROOM_TILT_U1 - ROOM_TILT_U0) * k
+					/ (ROOM_TILT_FRAMES - 1), which, &cams[ncam]);
+				camw[ncam++] = w / 4;
+			}
+			texels = rf_bake(fs, cams, camw, ncam, cam.eye, false);
+		}
+		double t_bake = src ? t_src : room_now() - t0;
+		const char *ltpu = getenv("DESK_FACES_LTPU");
+		double lt = ltpu ? atof(ltpu) : 4.0;
+		double t_light = 0.0;
+		long lights = 0;
+		if (lt > 0.0) {
+			t0 = room_now();
+			if (pack) {
+				long nn = 0, mm = 0;
+				rf_room_light(fs, layer, &nn, &mm);
+				lights = nn + mm;
+			} else {
+				lights = rf_light(fs, lt);
+			}
+			t_light = room_now() - t0;
+		}
+
+		/* DESK_FACES_PROBE=x,y: what the ray through that pixel meets, and
+		 * which faces it goes through */
+		const char *probe = getenv("DESK_FACES_PROBE");
+		int px_, py_;
+		if (probe && sscanf(probe, "%d,%d", &px_, &py_) == 2) {
+			double pu = (px_ + 0.5) / w, pv = (py_ + 0.5) / h;
+			vec3 ro, rd;
+			room_ray(&cam, pu, pv, &ro, &rd);
+			double tt = 0.02;
+			for (int i = 0; i < 400 && tt < 300.0; i++) {
+				hit3 hh = scene_map(vadd(ro, vmul(rd, tt)), ROOM_KIND);
+				if (hh.d < 0.002 && hh.id > 0) {
+					vec3 hp = vadd(ro, vmul(rd, tt));
+					printf("probe %d,%d: material %d at (%.2f %.2f %.2f), t %.2f\n", px_, py_,
+						hh.id, hp.x, hp.y, hp.z, tt);
+					break;
+				}
+				tt += fmax(hh.d, 0.002);
+			}
+			for (int i = 0; i < fs->n; i++) {
+				double a, b, t;
+				if (rf_hit(&fs->f[i], &cam, pu, pv, &a, &b, &t) && a >= 0 && a <= 1 && b >= 0
+					&& b <= 1) {
+					printf("  through %d %s at t %.2f (a %.2f b %.2f)%s", i, fs->f[i].what, t,
+						a, b, fs->f[i].trace ? " traced" : "");
+					const struct rface *tf = fs->f[i].src;
+					if (tf && tf->lv) {
+						double ta = a, tb = b;
+						rf_move(&fs->f[i], &ta, &tb);
+						float q[4];
+						rf_sample(tf, RF_REST, ta, tb, 0.0, q);
+						int tx = (int)(ta * tf->tw[0]), ty = (int)(tb * tf->th[0]);
+						tx = tx < 0 ? 0 : tx >= tf->tw[0] ? tf->tw[0] - 1 : tx;
+						ty = ty < 0 ? 0 : ty >= tf->th[0] ? tf->th[0] - 1 : ty;
+						printf(" -> (%.3f %.3f) alpha %.2f own %d", ta, tb, q[3],
+							tf->own[(size_t)ty * tf->tw[0] + tx]);
+					}
+					printf("\n");
+				}
+			}
+		}
+		struct room_ctx cl = ct;
+		cl.hi = hl;
+		cl.idhi = il;
+		t0 = room_now();
+		rf_lay_sheet(fs, &cl, need);
+		double t_lay = room_now() - t0;
+		size_t needed = 0;
+		for (size_t i = 0; i < n; i++) {
+			needed += need[i];
+		}
+		cairo_surface_t *s_laid = room_resolve(hl, il, w, h, NULL);
+
+		/* and what no face covers, traced */
+		cl.need = need;
+		t0 = room_now();
+		room_trace_cpu(&cl);
+		double t_rest = room_now() - t0;
+
+		size_t own = 0;
+		for (size_t i = 0; i < n; i++) {
+			own += it[i] != il[i];
+		}
+		cairo_surface_t *s_trace = room_resolve(ht, it, w, h, NULL);
+		cairo_surface_t *s_both = room_resolve(hl, il, w, h, NULL);
+		int over2 = 0, maxd = 0;
+		cairo_surface_t *s_diff = selftest_diff(s_both, s_trace, &over2, &maxd);
+		double mean5 = 0.0;
+		int over5 = rf_soft_diff(s_both, s_trace, &mean5);
+		cairo_surface_t *s_need = cairo_image_surface_create(CAIRO_FORMAT_A8, hw, hh);
+		unsigned char *nd = cairo_image_surface_get_data(s_need);
+		int ns = cairo_image_surface_get_stride(s_need);
+		for (int y = 0; y < hh; y++) {
+			for (int x = 0; x < hw; x++) {
+				nd[(size_t)y * ns + x] = need[(size_t)y * hw + x] ? 255 : 0;
+			}
+		}
+		cairo_surface_mark_dirty(s_need);
+
+		int nf = 0;
+		for (int i = 0; i < fs->n; i++) {
+			nf += fs->f[i].lv > 0 || (fs->f[i].src && fs->f[i].src->lv > 0);
+		}
+		if (getenv("DESK_FACES_DEBUG")) {
+			for (int i = 0; i < fs->n; i++) {
+				const struct rface *f = &fs->f[i], *tf = f->src ? f->src : f;
+				if (f->trace && !f->src) {
+					continue;
+				}
+				/* how much of it starts inside something: a face turned
+				 * the wrong way round is all of it */
+				int in = 0;
+				for (int k = 0; k < 81; k++) {
+					vec3 q = vadd(f->o, vadd(vmul(f->u, (k % 9 + 0.5) / 9.0),
+						vmul(f->v, (k / 9 + 0.5) / 9.0)));
+					in += scene_map(vadd(q, vmul(f->n, f->out > 0.0 ? f->out : 0.05)),
+						ROOM_KIND).d < 0.0;
+				}
+				printf("  %2d %-9s %s lv %d %5d x %-5d missed %ld  inside %d%%\n", i, f->what,
+					f->src ? "from" : "own ", tf->lv, tf->tw[0], tf->th[0],
+					atomic_load(&g_rf_missed[i]), in * 100 / 81);
+			}
+		}
+		printf("traced, all of it:   %7.2f s\n", t_trace);
+		printf("faces pictured:      %7.2f s  (%d of %d seen, %.1f M texels)\n",
+			t_bake, nf, fs->n, texels / 1e6);
+		printf("the lamp worked out: %7.2f s  (%ld points, %.0f to the unit)\n", t_light,
+			lights, lt);
+		printf("laid:                %7.2f s\n", t_lay);
+		printf("the rest traced:     %7.2f s  (%.1f %% of the samples)\n", t_rest,
+			100.0 * needed / n);
+		printf("laid and the rest:   %7.2f s  (%.0f %% of the trace)\n", t_lay + t_rest,
+			100.0 * (t_lay + t_rest) / fmax(t_trace, 1e-6));
+		printf("owners that differ:  %.3f %% of the samples\n", 100.0 * own / n);
+		printf("pixels > 2 apart:    %.3f %%, the most %d\n",
+			100.0 * over2 / ((double)w * h), maxd);
+		printf("softened 5x5:        %.3f %% > 2 apart, %.2f on average\n",
+			100.0 * over5 / ((double)w * h), mean5);
+		selftest_png(dir, "shelf", "trace", s_trace);
+		selftest_png(dir, "shelf", "laid", s_laid);
+		selftest_png(dir, "shelf", "both", s_both);
+		selftest_png(dir, "shelf", "diff", s_diff);
+		selftest_png(dir, "shelf", "need", s_need);
+		cairo_surface_destroy(s_trace);
+		cairo_surface_destroy(s_laid);
+		cairo_surface_destroy(s_both);
+		cairo_surface_destroy(s_diff);
+		cairo_surface_destroy(s_need);
+		if (film) {
+			rf_film_test(fs, w, h, dir, layer);
+		}
+		if (pack) {
+			rf_free(pack);
+			free(pack);
+		}
+		for (int q = 0; q < 2; q++) {
+			if (more[q]) {
+				rf_free(more[q]);
+				free(more[q]);
+			}
+		}
+		if (getenv("DESK_FACES_DUMP") && dir) {
+			rf_dump(fs, dir);
+		}
+		rf_free(fs);
+	}
+	if (src) {
+		rf_free(src);
+		free(src);
+	}
+	free(ht);
+	free(hl);
+	free(it);
+	free(il);
+	free(need);
+	free(fs);
+	/* the desk camera owns the aspect-derived geometry; put it back */
+	struct room_cam desk;
+	room_cam_build(aspect, &desk);
+	g_room_open = open0;
+	g_cc_out = cc0;
+	g_pb_open = pb0;
+	g_bq = bq0;
+	pthread_mutex_unlock(&g_render_lock);
+	return ok;
+}
+
 bool desk_room_selftest(int w, int h, const char *dir)
 {
+	wood_bake_begin();
 	pthread_mutex_lock(&g_render_lock);
 	drawer_items_build();
 	sh_build();
@@ -7111,13 +12069,15 @@ bool desk_room_selftest(int w, int h, const char *dir)
 	static const struct {
 		const char *name;
 		int layer, cam;
-		double open, cc, pb;
+		double open, cc, pb, lid;
 	} SHEETS[] = {
-		{ "desk", 1, 0, 1.0, 0.0, 0.0 },
-		{ "drawer", 2, 0, 1.0, 0.0, 0.0 },
-		{ "shelf", 3, 1, 1.0, 0.0, 0.0 },
-		{ "console", 4, 2, 0.0, 1.0, 0.0 },
-		{ "post", 5, 3, 0.0, 0.0, 1.0 },
+		{ "desk", 1, 0, 1.0, 0.0, 0.0, 1.0 },
+		{ "drawer", 2, 0, 1.0, 0.0, 0.0, 1.0 },
+		{ "shelf", 3, 1, 1.0, 0.0, 0.0, 1.0 },
+		{ "console", 4, 2, 0.0, 1.0, 0.0, 1.0 },
+		/* the console's other sheet, its lid up (room_bare_make) */
+		{ "lid-up", 4, 2, 0.0, 1.0, 0.0, 2.0 },
+		{ "post", 5, 3, 0.0, 0.0, 1.0, 1.0 },
 	};
 	bool all = true;
 	int hw = w * ICON_SS, hh = h * ICON_SS;
@@ -7136,6 +12096,7 @@ bool desk_room_selftest(int w, int h, const char *dir)
 		g_room_open = SHEETS[k].open;
 		g_cc_out = SHEETS[k].cc;
 		g_pb_open = SHEETS[k].pb;
+		g_cc_lid = SHEETS[k].lid;
 		g_room_layer = SHEETS[k].layer;
 
 		struct room_ctx cg = { 0 }, cc = { 0 };
@@ -7212,6 +12173,7 @@ bool desk_room_selftest(int w, int h, const char *dir)
 	g_room_open = open0;
 	g_cc_out = cc0;
 	g_pb_open = pb0;
+	g_cc_lid = 1.0;
 	pthread_mutex_unlock(&g_render_lock);
 	printf("\ncov/own: samples that hit something else, or belong to something\n"
 		"else. col: samples more than 4%% apart. worst: the largest relative\n"
@@ -7225,12 +12187,178 @@ bool desk_room_selftest(int w, int h, const char *dir)
 		: "The GPU does NOT draw the room the C does.");
 	return all;
 }
+
+/* desk-gputest --tour: the room from any camera, a frame a line -- for a film of the room
+ * itself, the camera going round it rather than between its four views. Each line:
+ *     name  eye.x eye.y eye.z  at.x at.y at.z  fov  cc_out pb_open cc_lid drawer_open
+ * in the room's own units (the desk top at y 0, its near edge at z RM_ZN, a unit 45 points),
+ * fov the frame's width at a distance of one. The whole room is in the bookcase's layer;
+ * the pictures and lettering laid over the views (the clock's figures, the labels) are not,
+ * nor is the lamp's coming up at login. A frame is <dir>/<name>.png, w by h. */
+static void tour_cam(vec3 eye, vec3 at, double fov, double aspect, struct room_cam *c)
+{
+	memset(c, 0, sizeof *c);
+	c->eye = eye;
+	c->ww = vnorm(vsub(at, eye));
+	vec3 up = fabs(c->ww.y) > 0.999 ? v3(0.0, 0.0, -1.0) : v3(0.0, 1.0, 0.0);
+	c->uu = vnorm(vcross(c->ww, up));
+	c->vv = vcross(c->uu, c->ww);
+	c->fov_x = fov;
+	c->fov_y = fov / fmax(aspect, 0.2);
+	c->pitch = asin(fmin(fmax(-c->ww.y, -1.0), 1.0));
+	c->z0 = RM_ZF;
+	c->z1 = RM_ZN;
+}
+
+bool desk_room_tour(const char *path, const char *dir, int w, int h)
+{
+	FILE *f = fopen(path, "r");
+	if (!f) {
+		printf("cannot read %s: %s\n", path, strerror(errno));
+		return false;
+	}
+	if (mkdir(dir, 0755) != 0 && errno != EEXIST) {
+		printf("cannot make %s: %s\n", dir, strerror(errno));
+		fclose(f);
+		return false;
+	}
+	wood_bake_begin();
+	pthread_mutex_lock(&g_render_lock);
+	drawer_items_build();
+	sh_build();
+	double open0 = g_room_open, cc0 = g_cc_out, pb0 = g_pb_open;
+	struct room_q bq0 = g_bq;
+	const char *ss = getenv("DESK_TOUR_SS");
+	g_bq.ss = ss && *ss ? (int)fmax(1.0, fmin(4.0, atof(ss))) : 3;
+	g_rgpu.dead = false;
+	g_rgpu.trial = true;
+	struct desk_gpu *g = room_gpu();
+	g_rgpu.trial = false;
+	if (!g) {
+		g_bq = bq0;
+		pthread_mutex_unlock(&g_render_lock);
+		fclose(f);
+		printf("no GPU to trace with\n");
+		return false;
+	}
+	const char *thx = getenv("DESK_TEST_HX");
+	g_rm_hx = thx && *thx ? fmax(atof(thx), RM_HX_MIN) : RM_HX_MIN;
+	/* the four views' cameras, which set the room out for this shape (the bookcase's
+	 * width, where the console stands), and say where things are to aim a path at */
+	double aspect = (double)w / (double)h;
+	struct room_cam vc[4];
+	room_cam_build(aspect, &vc[0]);
+	room_cam_shelf(aspect, &vc[1]);
+	room_cam_console(aspect, &vc[2]);
+	room_cam_post(aspect, &vc[3]);
+	static const char *const VN[4] = { "desk", "shelf", "console", "post" };
+	for (int i = 0; i < 4; i++) {
+		printf("view %-8s eye %8.3f %8.3f %8.3f  looking %6.3f %6.3f %6.3f  fov %.3f\n", VN[i],
+			vc[i].eye.x, vc[i].eye.y, vc[i].eye.z, vc[i].ww.x, vc[i].ww.y, vc[i].ww.z, vc[i].fov_x);
+	}
+	printf("room    desk half width %.2f, top z %.2f..%.2f, floor y %.1f, bookcase z %.2f..%.2f "
+		"(cornice y %.1f, half width %.2f)\n", RM_HX, RM_ZF, RM_ZN, RM_FLOOR, RM_SH_ZB, RM_SH_ZF,
+		RM_SH_CORN_Y, g_rm_sh_hx);
+	printf("        console x %.2f..%.2f z %.2f..%.2f, post box at %.2f, %.2f, lamp %.2f %.2f %.2f\n",
+		RM_CC_X0, RM_CC_X1, RM_CC_ZB, RM_CC_PZ0, RM_PB_CX, RM_PB_CZ,
+		ROOM_LAMP_POS0.x * ROOM_LAMP_K, ROOM_LAMP_POS0.y * ROOM_LAMP_K,
+		RM_ZN + (ROOM_LAMP_POS0.z - RM_ZN) * ROOM_LAMP_K);
+	fflush(stdout);
+	int hw = w * ICON_SS, hh = h * ICON_SS;
+	size_t n = (size_t)hw * hh;
+	float *hi = malloc(n * 4 * sizeof(float));
+	unsigned char *idhi = malloc(n);
+	bool ok = hi && idhi;
+	char line[512];
+	int frames = 0;
+	double t_all = room_now();
+	while (ok && fgets(line, sizeof line, f)) {
+		char name[128];
+		double ex, ey, ez, tx, ty, tz, fov, cc, pb, lid, open;
+		if (line[0] == '#' || sscanf(line, "%127s %lf %lf %lf %lf %lf %lf %lf %lf %lf %lf %lf", name,
+				&ex, &ey, &ez, &tx, &ty, &tz, &fov, &cc, &pb, &lid, &open) != 12) {
+			continue;
+		}
+		struct room_cam cam;
+		tour_cam(v3(ex, ey, ez), v3(tx, ty, tz), fov, aspect, &cam);
+		g_room_open = open;
+		g_cc_out = cc;
+		g_pb_open = pb;
+		g_cc_lid = lid;
+		g_room_layer = 3;
+		struct room_ctx ctx = { 0 };
+		memset(hi, 0, n * 4 * sizeof(float));
+		memset(idhi, 0, n);
+		ctx.hi = hi;
+		ctx.idhi = idhi;
+		ctx.hw = hw;
+		ctx.hh = hh;
+		ctx.layer = 3;
+		ctx.cam = cam;
+		long counted = 0;
+		double t0 = room_now();
+		room_gpu_uniforms(g, &ctx);
+		if (!room_gpu_tiles(g, &ctx, &counted)) {
+			printf("%s: the GPU failed a draw\n", name);
+			ok = false;
+			break;
+		}
+		cairo_surface_t *img = room_resolve(hi, idhi, w, h, NULL);
+		char out[1024];
+		snprintf(out, sizeof out, "%s/%s.png", dir, name);
+		cairo_surface_write_to_png(img, out);
+		cairo_surface_destroy(img);
+		frames++;
+		printf("%s %.2f s\n", name, room_now() - t0);
+		fflush(stdout);
+	}
+	fclose(f);
+	free(hi);
+	free(idhi);
+	room_gpu_end();
+	g_room_open = open0;
+	g_cc_out = cc0;
+	g_pb_open = pb0;
+	g_cc_lid = 1.0;
+	g_bq = bq0;
+	pthread_mutex_unlock(&g_render_lock);
+	printf("%d frames in %.1f s\n", frames, room_now() - t_all);
+	return ok;
+}
 #else
 bool desk_room_selftest(int w, int h, const char *dir)
 {
 	(void)w;
 	(void)h;
 	(void)dir;
+	printf("built without the GPU path\n");
+	return false;
+}
+
+bool desk_room_faces_test(int w, int h, const char *dir)
+{
+	(void)w;
+	(void)h;
+	(void)dir;
+	printf("built without the GPU path\n");
+	return false;
+}
+
+bool desk_room_faces_bake(const char *out, int w, int layer)
+{
+	(void)out;
+	(void)w;
+	(void)layer;
+	printf("built without the GPU path\n");
+	return false;
+}
+
+bool desk_room_tour(const char *path, const char *dir, int w, int h)
+{
+	(void)path;
+	(void)dir;
+	(void)w;
+	(void)h;
 	printf("built without the GPU path\n");
 	return false;
 }
@@ -7718,6 +12846,120 @@ static cairo_surface_t *grain_tile(void)
 	return g_grain_tile;
 }
 
+/* Value noise on a lattice of px by py cells that wraps, for a tile that
+ * repeats without a seam: 0..1 at (x, y), in cells. */
+static double wrap_noise(double x, double y, int px, int py, double seed)
+{
+	double fx = floor(x), fy = floor(y), tx = x - fx, ty = y - fy;
+	int ix = ((int)fx % px + px) % px, iy = ((int)fy % py + py) % py;
+	int jx = (ix + 1) % px, jy = (iy + 1) % py;
+	double a = hash21(ix + seed, iy), b = hash21(jx + seed, iy);
+	double c = hash21(ix + seed, jy), d = hash21(jx + seed, jy);
+	tx = tx * tx * (3.0 - 2.0 * tx);
+	ty = ty * ty * (3.0 - 2.0 * ty);
+	return a + (b - a) * tx + (c - a) * ty + (a - b - c + d) * tx * ty;
+}
+
+/* What a tile of light and shade over a colour is, as grain_tile has it:
+ * premultiplied white for lighter, black for darker, by l (-1..1). */
+static uint32_t tile_shade(double l, double up, double down)
+{
+	double a = l > 0.0 ? l * up : -l * down;
+	uint32_t al = (uint32_t)lround(clampf(a, 0.0, 1.0) * 255.0);
+	uint32_t c = l > 0.0 ? al : 0u;
+	return al << 24 | c << 16 | c << 8 | c;
+}
+
+/* Morocco: leather boarded until its grain stands up in pebbles, a crease
+ * round each -- cells, the creases where two are nearly as near, the pebbles
+ * lit from the lamp's side. A tile that repeats. */
+static cairo_surface_t *g_pebble_tile;
+static pthread_once_t g_pebble_tile_once = PTHREAD_ONCE_INIT;
+
+static void pebble_tile_make(void)
+{
+	const int n = 192, cells = 24;
+	double cs = (double)n / cells;
+	cairo_surface_t *tile = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, n, n);
+	unsigned char *data = cairo_image_surface_get_data(tile);
+	int stride = cairo_image_surface_get_stride(tile);
+	for (int y = 0; y < n; y++) {
+		uint32_t *row = (uint32_t *)(data + y * stride);
+		for (int x = 0; x < n; x++) {
+			double px = (x + 0.5) / cs, py = (y + 0.5) / cs;
+			int cx = (int)floor(px), cy = (int)floor(py);
+			double f1 = 9.0, f2 = 9.0, dx1 = 0.0, dy1 = 0.0;
+			for (int j = -1; j <= 1; j++) {
+				for (int i = -1; i <= 1; i++) {
+					int gx = ((cx + i) % cells + cells) % cells, gy = ((cy + j) % cells + cells) % cells;
+					double fx = cx + i + 0.15 + 0.7 * hash21(gx * 1.3, gy * 2.1);
+					double fy = cy + j + 0.15 + 0.7 * hash21(gx * 3.7 + 9.0, gy * 1.9);
+					double d = hypot(px - fx, py - fy);
+					if (d < f1) {
+						f2 = f1;
+						f1 = d;
+						dx1 = px - fx;
+						dy1 = py - fy;
+					} else if (d < f2) {
+						f2 = d;
+					}
+				}
+			}
+			/* the crease, and the pebble's top catching the lamp up to the left */
+			double crease = 1.0 - clampf((f2 - f1) / 0.22, 0.0, 1.0);
+			double lit = f1 > 1e-6 ? -(dx1 + dy1) / (f1 * 1.414) : 0.0;
+			double l = -crease * crease * 0.9 + lit * (1.0 - crease) * 0.35 * clampf(f1 / 0.5, 0.0, 1.0);
+			row[x] = tile_shade(l, 0.30, 0.42);
+		}
+	}
+	cairo_surface_mark_dirty(tile);
+	g_pebble_tile = tile;
+}
+
+static cairo_surface_t *pebble_tile(void)
+{
+	pthread_once(&g_pebble_tile_once, pebble_tile_make);
+	return g_pebble_tile;
+}
+
+/* Linoleum: linseed and cork pressed with a marbling drawn through it along
+ * the roll, and a fine grit. A tile that repeats. */
+static cairo_surface_t *g_marble_tile;
+static pthread_once_t g_marble_tile_once = PTHREAD_ONCE_INIT;
+
+static void marble_tile_make(void)
+{
+	const int n = 256;
+	cairo_surface_t *tile = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, n, n);
+	unsigned char *data = cairo_image_surface_get_data(tile);
+	int stride = cairo_image_surface_get_stride(tile);
+	for (int y = 0; y < n; y++) {
+		uint32_t *row = (uint32_t *)(data + y * stride);
+		for (int x = 0; x < n; x++) {
+			double u = (double)x / n, v = (double)y / n;
+			/* the marbling: stretched along x, wandering, and lifted where it folds */
+			double warp = wrap_noise(u * 8.0, v * 8.0, 8, 8, 3.0) * 1.4
+				+ wrap_noise(u * 16.0, v * 16.0, 16, 16, 5.0) * 0.5;
+			double m = wrap_noise(u * 6.0 + warp, v * 40.0, 6, 40, 11.0) * 0.6
+				+ wrap_noise(u * 12.0 + warp * 2.0, v * 80.0, 12, 80, 17.0) * 0.4;
+			double streak = clampf((m - 0.5) * 2.0, -1.0, 1.0);
+			/* and the cork in it, a fleck here and there */
+			double fleck = hash21(x * 0.37 + 2.0, y * 0.53 + 7.0);
+			double grit = hash21(x * 1.13 + 0.5, y * 2.71 + 0.5) - 0.5;
+			double l = streak * 0.40 + grit * 0.28 + (fleck > 0.985 ? 0.6 : fleck < 0.012 ? -0.6 : 0.0);
+			row[x] = tile_shade(l, 0.22, 0.26);
+		}
+	}
+	cairo_surface_mark_dirty(tile);
+	g_marble_tile = tile;
+}
+
+static cairo_surface_t *marble_tile(void)
+{
+	pthread_once(&g_marble_tile_once, marble_tile_make);
+	return g_marble_tile;
+}
+
 /* The tiles made ahead, on a thread of their own (desk.h). Each is made
  * once, by whichever asks first, and a painter asking while one is being
  * made waits only for the rest of it. */
@@ -7964,23 +13206,60 @@ static void paper_age(cairo_t *cr, double w, double h, unsigned seed, double yea
 /* The same, worked out at a third of the size and laid on stretched: it
  * is all soft gradients, which look the same either way, and a window's
  * sheet is large and drawn again whenever it changes size. */
+/* desk_paper_age_hold: the size held, and the age last worked out for it */
+static _Thread_local int g_age_hold_w, g_age_hold_h;
+static _Thread_local struct {
+	cairo_surface_t *s;
+	int w, h;
+	unsigned seed;
+	double years;
+} g_age_held;
+
+void desk_paper_age_hold(int w, int h)
+{
+	/* (the picture is kept when let go of: the next frame of the glide
+	 * holds the same size again, and a third of a sheet is small) */
+	g_age_hold_w = w > 0 && h > 0 ? w : 0;
+	g_age_hold_h = w > 0 && h > 0 ? h : 0;
+}
+
 static void paper_age_coarse(cairo_t *cr, double w, double h, unsigned seed, double years)
 {
 	const double k = 3.0;
-	int sw = (int)ceil(w / k) + 1, sh = (int)ceil(h / k) + 1;
-	if (sw < 8 || sh < 8) {
+	/* worked out for the size held, if one is (everything on it is placed
+	 * and sized in proportion to the sheet, so stretched it is the same
+	 * paper, give or take the round of a spot) */
+	double aw = g_age_hold_w ? g_age_hold_w : w, ah = g_age_hold_w ? g_age_hold_h : h;
+	int sw = (int)ceil(aw / k) + 1, sh = (int)ceil(ah / k) + 1;
+	if (sw < 8 || sh < 8 || (int)ceil(w / k) + 1 < 8 || (int)ceil(h / k) + 1 < 8) {
 		paper_age(cr, w, h, seed, years);
 		return;
 	}
-	cairo_surface_t *s = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, sw, sh);
-	cairo_t *c = cairo_create(s);
-	cairo_scale(c, 1.0 / k, 1.0 / k);
-	paper_age(c, w, h, seed, years);
-	cairo_destroy(c);
+	cairo_surface_t *s = NULL;
+	if (g_age_hold_w && g_age_held.s && g_age_held.w == g_age_hold_w && g_age_held.h == g_age_hold_h
+		&& g_age_held.seed == seed && g_age_held.years == years) {
+		s = cairo_surface_reference(g_age_held.s);
+	} else {
+		s = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, sw, sh);
+		cairo_t *c = cairo_create(s);
+		cairo_scale(c, 1.0 / k, 1.0 / k);
+		paper_age(c, aw, ah, seed, years);
+		cairo_destroy(c);
+		if (g_age_hold_w) {
+			if (g_age_held.s) {
+				cairo_surface_destroy(g_age_held.s);
+			}
+			g_age_held.s = cairo_surface_reference(s);
+			g_age_held.w = g_age_hold_w;
+			g_age_held.h = g_age_hold_h;
+			g_age_held.seed = seed;
+			g_age_held.years = years;
+		}
+	}
 	cairo_save(cr);
 	cairo_rectangle(cr, 0, 0, w, h);
 	cairo_clip(cr);
-	cairo_scale(cr, k, k);
+	cairo_scale(cr, k * w / aw, k * h / ah);
 	cairo_set_source_surface(cr, s, 0, 0);
 	cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_BILINEAR);
 	cairo_paint(cr);
@@ -9804,11 +15083,25 @@ struct desk_fold {
 	int sw[FOLD_MAX + 1], sh[FOLD_MAX + 1];
 	cairo_surface_t *top[FOLD_MAX + 1];   /* the stack from above after k folds */
 	double tilt;
+	bool book;                /* a notebook: it shuts, it does not fold */
+	cairo_surface_t *cover;   /* and it shut, the size of face, its name on it */
+	/* Folded by a hand coming down it: the top part comes down, the first thing it does, and
+	 * what lies under stays where it was. All of this is the bottom coming up on the sheet
+	 * upside down, and drawn upside down. */
+	bool by_hand;
 };
+
+/* A notebook, by t: its cover down, and then the size it lies at */
+#define BOOK_SHUT 0.46
 
 /* Which fold is under way at t, and how far through it. */
 static void fold_at(const struct desk_fold *f, double t, int *k, double *p)
 {
+	if (f->book) {
+		*k = t >= BOOK_SHUT ? 1 : 0;
+		*p = *k ? 0.0 : t / BOOK_SHUT;
+		return;
+	}
 	double u = clampf(t / FOLD_DONE, 0.0, 1.0) * f->n;
 	int kk = (int)floor(u);
 	if (kk >= f->n) {
@@ -10103,13 +15396,14 @@ static void fold_label(cairo_t *cr, double rw, double rh, cairo_surface_t *icon,
 	cairo_restore(cr);
 }
 
-struct desk_fold *desk_fold_new(cairo_surface_t *face, unsigned seed, double packet_w,
-	cairo_surface_t *icon, const char *name)
+static struct desk_fold *fold_new(cairo_surface_t *face, unsigned seed, double packet_w,
+	cairo_surface_t *icon, const char *name, bool by_hand)
 {
 	struct desk_fold *f = calloc(1, sizeof *f);
 	if (!f) {
 		return NULL;
 	}
+	f->by_hand = by_hand;
 	f->face = cairo_surface_reference(face);
 	f->w = cairo_image_surface_get_width(face);
 	f->h = cairo_image_surface_get_height(face);
@@ -10128,7 +15422,7 @@ struct desk_fold *desk_fold_new(cairo_surface_t *face, unsigned seed, double pac
 		if (fmax(rx, ry) < 1.45 && f->n > 0) {
 			break;
 		}
-		int axis = ry >= rx ? FOLD_ACROSS : FOLD_DOWN;
+		int axis = ry >= rx || (by_hand && f->n == 0) ? FOLD_ACROSS : FOLD_DOWN;
 		double len = axis == FOLD_ACROSS ? ch : cw;
 		double crease = floor(len * (0.5 + fabs(fold_bias(seed, f->n))));
 		f->step[f->n] = (struct fold_step){ axis, len, crease };
@@ -10157,19 +15451,111 @@ struct desk_fold *desk_fold_new(cairo_surface_t *face, unsigned seed, double pac
 	desk_initial_of(name && *name ? name : "?", initial, sizeof initial);
 	cairo_save(cr);
 	if (last->axis == FOLD_ACROSS) {
-		/* it lands upside down: print it that way */
-		cairo_translate(cr, 0, last->len);
-		cairo_scale(cr, 1, -1);
+		/* it lands upside down: print it that way (and by hand, it is drawn upside down) */
+		if (by_hand) {
+			cairo_translate(cr, 0, last->crease);
+		} else {
+			cairo_translate(cr, 0, last->len);
+			cairo_scale(cr, 1, -1);
+		}
 		fold_label(cr, rw, rh, icon, name ? name : "", initial);
 	} else {
 		/* it lands mirrored, and the right way up is along its length */
-		cairo_translate(cr, last->len, 0);
-		cairo_scale(cr, -1, 1);
+		cairo_translate(cr, last->len, by_hand ? rw : 0.0);
+		cairo_scale(cr, -1, by_hand ? -1 : 1);
 		fold_label(cr, rh, rw, icon, name ? name : "", initial);
 	}
 	cairo_restore(cr);
 	cairo_destroy(cr);
 	return f;
+}
+
+struct desk_fold *desk_fold_new(cairo_surface_t *face, unsigned seed, double packet_w,
+	cairo_surface_t *icon, const char *name)
+{
+	return fold_new(face, seed, packet_w, icon, name, false);
+}
+
+struct desk_fold *desk_fold_new_by_hand(cairo_surface_t *face, unsigned seed, double packet_w,
+	cairo_surface_t *icon, const char *name)
+{
+	int w = cairo_image_surface_get_width(face), h = cairo_image_surface_get_height(face);
+	cairo_surface_t *over = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+	cairo_t *cr = cairo_create(over);
+	cairo_translate(cr, 0, h);
+	cairo_scale(cr, 1, -1);
+	cairo_set_source_surface(cr, face, 0, 0);
+	cairo_paint(cr);
+	cairo_destroy(cr);
+	cairo_surface_flush(over);
+	struct desk_fold *f = fold_new(over, seed, packet_w, icon, name, true);
+	cairo_surface_destroy(over);
+	return f;
+}
+
+double desk_fold_hand_reach(const struct desk_fold *f)
+{
+	if (f->book) {
+		return f->h * 0.6;
+	}
+	return 2.0 * (f->step[0].len - f->step[0].crease);
+}
+
+double desk_fold_hand_t(const struct desk_fold *f, double frac)
+{
+	frac = clampf(frac, 0.0, 1.0);
+	if (f->book) {
+		return frac * BOOK_SHUT;
+	}
+	/* the end of a flap turning over is only ever seen going across: how far over it has
+	 * turned, for how far across it has come; and how far through the fold that is, as it is
+	 * eased (fold_flap) */
+	double e = acos(1.0 - 2.0 * frac) / M_PI;
+	double p = 0.5 - sin(asin(1.0 - 2.0 * e) / 3.0);
+	return clampf(p, 0.0, 1.0) * FOLD_DONE / f->n;
+}
+
+int desk_fold_hand_y(const struct desk_fold *f, double t)
+{
+	if (!f->by_hand) {
+		return 0;
+	}
+	int k;
+	double p;
+	fold_at(f, clampf(t, 0.0, 1.0), &k, &p);
+	return f->h - f->sh[k];
+}
+
+/* A notebook's fold: face is the picture of it open, wire and all (notebook.h),
+ * and what it comes to is the notebook shut, its name on its label. */
+struct desk_fold *desk_fold_new_book(cairo_surface_t *face, unsigned seed, double packet_w,
+	const char *name)
+{
+	struct desk_fold *f = calloc(1, sizeof *f);
+	if (!f) {
+		return NULL;
+	}
+	f->book = true;
+	f->n = 1;
+	f->seed = seed;
+	f->face = cairo_surface_reference(face);
+	f->w = cairo_image_surface_get_width(face);
+	f->h = cairo_image_surface_get_height(face);
+	f->top[0] = cairo_surface_reference(face);
+	f->sw[0] = f->w;
+	f->sh[0] = f->h;
+	f->sw[1] = (int)ceil(packet_w);
+	f->sh[1] = (int)ceil(packet_w * desk_notebook_shut_aspect());
+	f->top[1] = desk_notebook_shut_named(name, f->sw[1], f->sh[1]);
+	f->cover = desk_notebook_shut_named(name, f->w, f->h);
+	return f;
+}
+
+/* Between shut and lying where it lies: 0 .. 1. */
+static double book_going(double t)
+{
+	double p = clampf((t - BOOK_SHUT) / (FOLD_DONE - BOOK_SHUT), 0.0, 1.0);
+	return p * p * (3.0 - 2.0 * p);
 }
 
 void desk_fold_free(struct desk_fold *f)
@@ -10184,6 +15570,7 @@ void desk_fold_free(struct desk_fold *f)
 	}
 	cairo_surface_destroy(f->back);
 	cairo_surface_destroy(f->face);
+	cairo_surface_destroy(f->cover);
 	free(f);
 }
 
@@ -10203,13 +15590,21 @@ int desk_fold_stage(const struct desk_fold *f, double t)
 	return k;
 }
 
-double desk_fold_done(void)
+double desk_fold_done(const struct desk_fold *f)
 {
-	return FOLD_DONE;
+	return f && f->book ? BOOK_SHUT : FOLD_DONE;
 }
 
 void desk_fold_extent(struct desk_fold *f, double t, int *w, int *h, int *margin)
 {
+	if (f->book) {
+		double p = book_going(t);
+		*w = (int)ceil(f->w + (f->sw[1] - f->w) * p);
+		*h = (int)ceil(f->h + (f->sh[1] - f->h) * p);
+		/* its cover stands up over the desk to the left of it */
+		*margin = t < BOOK_SHUT ? (int)ceil(0.40 * f->w) + 24 : 24;
+		return;
+	}
 	int k;
 	double p;
 	fold_at(f, t, &k, &p);
@@ -10223,6 +15618,30 @@ void desk_fold_extent(struct desk_fold *f, double t, int *w, int *h, int *margin
 void desk_fold_draw(cairo_t *cr, struct desk_fold *f, double t)
 {
 	t = clampf(t, 0.0, 1.0);
+	if (f->book) {
+		if (t < BOOK_SHUT) {
+			desk_notebook_shutting(cr, f->face, f->cover, t / BOOK_SHUT);
+			return;
+		}
+		double p = book_going(t);
+		double w = f->w + (f->sw[1] - f->w) * p, h = f->h + (f->sh[1] - f->h) * p;
+		cairo_save(cr);
+		cairo_scale(cr, w / f->w, h / f->h);
+		cairo_set_source_surface(cr, f->cover, 0, 0);
+		cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
+		cairo_paint(cr);
+		cairo_restore(cr);
+		/* and as it gets there, the picture of it made for that size */
+		double a = clampf((p - 0.70) / 0.30, 0.0, 1.0);
+		if (a > 0.0) {
+			cairo_save(cr);
+			cairo_scale(cr, w / f->sw[1], h / f->sh[1]);
+			cairo_set_source_surface(cr, f->top[1], 0, 0);
+			cairo_paint_with_alpha(cr, a);
+			cairo_restore(cr);
+		}
+		return;
+	}
 	int k;
 	double p;
 	fold_at(f, t, &k, &p);
@@ -10233,6 +15652,10 @@ void desk_fold_draw(cairo_t *cr, struct desk_fold *f, double t)
 	 * folded, not while it is still the sheet it was */
 	double tilt = f->tilt * clampf((t - 0.55) / 0.45, 0.0, 1.0);
 	cairo_save(cr);
+	if (f->by_hand) {
+		cairo_translate(cr, 0, h);
+		cairo_scale(cr, 1, -1);
+	}
 	cairo_translate(cr, w * 0.5, h * 0.5);
 	cairo_rotate(cr, tilt);
 	cairo_translate(cr, -w * 0.5, -h * 0.5);
@@ -10311,6 +15734,9 @@ cairo_surface_t *desk_fold_packet(struct desk_fold *f)
 	if (!f) {
 		return NULL;
 	}
+	if (f->book) {
+		return cairo_surface_reference(f->top[1]);
+	}
 	cairo_surface_t *st = fold_stage(f, f->n);
 	int w = f->sw[f->n], h = f->sh[f->n];
 	/* the leaves under the top one show past it by a few pixels */
@@ -10326,8 +15752,14 @@ cairo_surface_t *desk_fold_packet(struct desk_fold *f)
 		cairo_rectangle(cr, off * 0.4 + jx, off + jy, w, h);
 		cairo_fill(cr);
 	}
+	cairo_save(cr);
+	if (f->by_hand) {
+		cairo_translate(cr, 0, h);
+		cairo_scale(cr, 1, -1);
+	}
 	cairo_set_source_surface(cr, st, 0, 0);
 	cairo_paint(cr);
+	cairo_restore(cr);
 	cairo_rectangle(cr, 0, 0, w, h);
 	cairo_clip(cr);
 	cairo_pattern_t *puff = cairo_pattern_create_radial(w * 0.5, h * 0.46, fmin(w, h) * 0.1,
@@ -12113,8 +17545,16 @@ static double drawer_item_height(const struct desk_drawer_item *it)
 	if (it->look >= 0 && it->look < DESK_DOCK_COUNT) {
 		return TOOL_HEIGHT[it->look];
 	}
-	return it->look == DESK_LOOK_PACKET ? 0.12 : 0.03;
+	return it->look == DESK_LOOK_CAMERA ? 0.32 : it->look == DESK_LOOK_THING ? it->thick
+		: it->look == DESK_LOOK_PICTURE ? it->thick
+		: it->look == DESK_LOOK_NOTEBOOK ? 0.18
+		: it->look == DESK_LOOK_PACKET ? 0.12 : 0.03;
 }
+
+/* Print's camera lying in the drawer, ppu pixels to the room's unit, turned
+ * so, and its middle in the picture (see the camera, below); NULL if its
+ * picture could not be read. */
+static cairo_surface_t *cam_top_lying(double ppu, double turn, double *ax, double *ay);
 
 /* How lit the felt is at (x, y) on the drawer sheet, against its middle:
  * the drawer's lamp falls off toward its ends, and what lies there is in the
@@ -12203,6 +17643,45 @@ static cairo_surface_t *drawer_item_image(struct room_render *rr, const struct d
 		return img;
 	}
 	double turn = (hash21((double)(it->seed % 977u), 4.1) - 0.5) * 0.14;
+	if (it->look == DESK_LOOK_CAMERA) {
+		cairo_surface_t *img = cam_top_lying(ppu, turn, ax, ay);
+		if (img) {
+			return img;
+		}
+	}
+	if (it->look == DESK_LOOK_THING && it->lying) {
+		cairo_surface_t *img = it->lying(ppu, turn, ax, ay);
+		if (img) {
+			return img;
+		}
+	}
+	if (it->look == DESK_LOOK_NOTEBOOK) {
+		cairo_surface_t *img = desk_notebook_top_lying(ppu, turn, ax, ay);
+		if (img) {
+			return img;
+		}
+	}
+	if (it->look == DESK_LOOK_PICTURE && it->picture && it->along > 0.0) {
+		/* a picture to look like: as long as it is, turned as it happens to lie */
+		double pw = cairo_image_surface_get_width(it->picture);
+		double ph = cairo_image_surface_get_height(it->picture);
+		double k = it->along * ppu / fmax(pw, ph);
+		double diag = hypot(pw, ph) * k + 4.0;
+		cairo_surface_t *img = cairo_image_surface_create(CAIRO_FORMAT_ARGB32,
+			(int)ceil(diag), (int)ceil(diag));
+		cairo_t *cr = cairo_create(img);
+		cairo_translate(cr, diag * 0.5, diag * 0.5);
+		cairo_rotate(cr, turn);
+		cairo_scale(cr, k, k);
+		cairo_translate(cr, -pw * 0.5, -ph * 0.5);
+		cairo_set_source_surface(cr, it->picture, 0, 0);
+		cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
+		cairo_paint(cr);
+		cairo_destroy(cr);
+		cairo_surface_flush(img);
+		*ax = *ay = diag * 0.5;
+		return img;
+	}
 	if (it->look == DESK_LOOK_PACKET && it->packet) {
 		/* a sheet folded away: as it was folded, smaller */
 		double pw = cairo_image_surface_get_width(it->packet);
@@ -12432,6 +17911,299 @@ cairo_surface_t *desk_drawer_item_picture(int screen_w, int screen_h,
 	*ax = iax + pl;
 	*ay = iay + pt;
 	return out;
+}
+
+/* ---- the card of looks ---------------------------------------------
+ *
+ * Up out of the drawer over a program kept there, when it is asked for with
+ * the other button (wm.c): a card from a catalogue, the program's name at its
+ * head, and on it each thing the program could look like lying in the drawer,
+ * as it would lie there and named under it, the one it looks like now ringed
+ * in pencil. At its foot, where the person's own pictures go. In points. */
+
+#define LOOKS_CELL_W 108.0
+#define LOOKS_CELL_H 100.0
+#define LOOKS_PIC_H 66.0
+#define LOOKS_MARGIN 20.0
+#define LOOKS_HEAD 54.0
+#define LOOKS_FOOT 40.0
+
+static void looks_grid(int n, int want, int *cols, int *rows)
+{
+	want = want > 0 ? want : 5;
+	*cols = n < want ? (n > 0 ? n : 1) : want;
+	*rows = (n + *cols - 1) / *cols;
+	*rows = *rows > 0 ? *rows : 1;
+}
+
+void desk_looks_card_size(int n, int cols, double pt, int *w, int *h)
+{
+	int rows;
+	looks_grid(n, cols, &cols, &rows);
+	*w = (int)ceil((LOOKS_MARGIN * 2.0 + cols * LOOKS_CELL_W) * pt);
+	*h = (int)ceil((LOOKS_HEAD + rows * LOOKS_CELL_H + LOOKS_FOOT) * pt);
+}
+
+static void looks_cell(int i, int n, int cols, double pt, double *x, double *y)
+{
+	int rows;
+	looks_grid(n, cols, &cols, &rows);
+	*x = (LOOKS_MARGIN + (i % cols) * LOOKS_CELL_W) * pt;
+	*y = (LOOKS_HEAD + (i / cols) * LOOKS_CELL_H) * pt;
+}
+
+int desk_looks_card_hit(int n, int cols, double pt, double x, double y)
+{
+	for (int i = 0; i < n; i++) {
+		double cx, cy;
+		looks_cell(i, n, cols, pt, &cx, &cy);
+		if (x >= cx && x < cx + LOOKS_CELL_W * pt && y >= cy && y < cy + LOOKS_CELL_H * pt) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+/* How far into a picture what is in it goes, from each side (its alpha). */
+static void alpha_box(cairo_surface_t *img, double *x0, double *y0, double *x1, double *y1)
+{
+	cairo_surface_flush(img);
+	int w = cairo_image_surface_get_width(img), h = cairo_image_surface_get_height(img);
+	int stride = cairo_image_surface_get_stride(img);
+	const unsigned char *px = cairo_image_surface_get_data(img);
+	int l = w, t = h, r = -1, b = -1;
+	for (int y = 0; y < h; y++) {
+		const uint32_t *row = (const uint32_t *)(px + (size_t)y * stride);
+		for (int x = 0; x < w; x++) {
+			if ((row[x] >> 24) > 24) {
+				l = x < l ? x : l;
+				r = x > r ? x : r;
+				t = y < t ? y : t;
+				b = y > b ? y : b;
+			}
+		}
+	}
+	if (r < 0) {
+		*x0 = *y0 = 0.0;
+		*x1 = w;
+		*y1 = h;
+		return;
+	}
+	*x0 = l;
+	*y0 = t;
+	*x1 = r + 1;
+	*y1 = b + 1;
+}
+
+/* A pencil's ring round a word or a thing: once round and a little past, not quite true. */
+static void pencil_ring(cairo_t *cr, double cx, double cy, double rx, double ry, unsigned seed)
+{
+	cairo_save(cr);
+	cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+	double a0 = -2.2 + hash21((double)seed, 1.7) * 0.6;
+	int steps = 64;
+	for (int k = 0; k < steps; k++) {
+		double t0 = (double)k / steps, t1 = (double)(k + 1) / steps;
+		double a = a0 + t0 * 2.0 * M_PI * 1.08, b = a0 + t1 * 2.0 * M_PI * 1.08;
+		/* wandering out as it goes round, and lighter where it was pressed less */
+		double w0 = 1.0 + 0.05 * t0 + 0.02 * sin(a * 3.0 + seed);
+		double w1 = 1.0 + 0.05 * t1 + 0.02 * sin(b * 3.0 + seed);
+		cairo_set_line_width(cr, 1.6 + 0.6 * sin(M_PI * t0));
+		cairo_set_source_rgba(cr, 0.24, 0.24, 0.26, 0.55 + 0.25 * sin(M_PI * t0));
+		cairo_move_to(cr, cx + cos(a) * rx * w0, cy + sin(a) * ry * w0);
+		cairo_line_to(cr, cx + cos(b) * rx * w1, cy + sin(b) * ry * w1);
+		cairo_stroke(cr);
+	}
+	cairo_restore(cr);
+}
+
+/* The one more on the card: a picture to be chosen from anywhere, a frame pencilled in with nothing
+ * in it yet. */
+static void looks_more(cairo_t *cr, double cx, double cy, double w, double h, double pt, bool hot)
+{
+	cairo_save(cr);
+	double a = hot ? 0.85 : 0.62;
+	cairo_set_source_rgba(cr, 0.26, 0.24, 0.22, a);
+	cairo_set_line_width(cr, 1.3 * pt);
+	double dash[2] = { 4.0 * pt, 3.0 * pt };
+	cairo_set_dash(cr, dash, 2, 0.0);
+	desk_rounded_path(cr, cx - w * 0.5, cy - h * 0.5, w, h, 4.0 * pt);
+	cairo_stroke(cr);
+	cairo_set_dash(cr, NULL, 0, 0.0);
+	/* a little picture in it: hills and a sun */
+	double s = fmin(w, h) * 0.30;
+	cairo_set_line_width(cr, 1.5 * pt);
+	cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
+	cairo_move_to(cr, cx - s, cy + s * 0.55);
+	cairo_line_to(cr, cx - s * 0.35, cy - s * 0.15);
+	cairo_line_to(cr, cx + s * 0.05, cy + s * 0.25);
+	cairo_line_to(cr, cx + s * 0.45, cy - s * 0.05);
+	cairo_line_to(cr, cx + s, cy + s * 0.55);
+	cairo_stroke(cr);
+	cairo_new_sub_path(cr);
+	cairo_arc(cr, cx + s * 0.45, cy - s * 0.55, s * 0.18, 0.0, 2.0 * M_PI);
+	cairo_stroke(cr);
+	cairo_restore(cr);
+}
+
+void desk_looks_card_paint(cairo_t *cr, const struct desk_drawer_item *items, const char *const *names,
+	int n, const char *more, int cols, double pt, const char *title, const char *hint, int chosen, int hover)
+{
+	int W, H, cells = n + (more ? 1 : 0);
+	desk_looks_card_size(cells, cols, pt, &W, &H);
+	double r = 5.0 * pt;
+	/* its shadow on what is under it, and the card */
+	cairo_save(cr);
+	for (int k = 6; k >= 1; k--) {
+		desk_rounded_path(cr, 1.5 * pt * k * 0.5, 3.0 * pt + k * 0.6 * pt, W - pt * k, H - 2.0 * pt, r + k);
+		cairo_set_source_rgba(cr, 0.05, 0.03, 0.02, 0.035);
+		cairo_fill(cr);
+	}
+	cairo_restore(cr);
+	double cw = W - 6.0 * pt, ch = H - 8.0 * pt;
+	cairo_save(cr);
+	cairo_translate(cr, 3.0 * pt, 2.0 * pt);
+	fill_paper(cr, 0, 0, cw, ch, r);
+	cairo_save(cr);
+	desk_rounded_path(cr, 0, 0, cw, ch, r);
+	cairo_clip(cr);
+	paper_age(cr, cw, ch, 41u, 0.15);
+	cairo_restore(cr);
+	/* the head: the program's name, and under it the card's own red rule */
+	show_text_fit_as(cr, DESK_FONT_ENGRAVE, title, LOOKS_MARGIN * pt, 32.0 * pt, 19.0 * pt, true,
+		0.20, 0.15, 0.11, 0.92, -1, cw - LOOKS_MARGIN * 2.0 * pt);
+	cairo_set_source_rgba(cr, 0.80, 0.30, 0.28, 0.55);
+	cairo_set_line_width(cr, 1.1 * pt);
+	cairo_move_to(cr, 8.0 * pt, 44.0 * pt);
+	cairo_line_to(cr, cw - 8.0 * pt, 44.0 * pt);
+	cairo_stroke(cr);
+	cairo_restore(cr);
+	/* each look, lying on it */
+	for (int i = 0; i < cells; i++) {
+		double x, y;
+		looks_cell(i, cells, cols, pt, &x, &y);
+		x += 3.0 * pt;
+		y += 2.0 * pt;
+		if (i == n) {
+			looks_more(cr, x + LOOKS_CELL_W * pt * 0.5, y + (8.0 + LOOKS_PIC_H * 0.5) * pt, (LOOKS_CELL_W - 30.0) * pt,
+				(LOOKS_PIC_H - 6.0) * pt, pt, i == hover);
+			show_text_fit_as(cr, DESK_FONT_PRINT, more, x + LOOKS_CELL_W * pt * 0.5, y + (LOOKS_PIC_H + 28.0) * pt,
+				11.5 * pt, false, 0.18, 0.15, 0.12, i == hover ? 0.98 : 0.80, 0, (LOOKS_CELL_W - 10.0) * pt);
+			continue;
+		}
+		double pw = (LOOKS_CELL_W - 18.0) * pt, ph = LOOKS_PIC_H * pt;
+		double ax, ay;
+		cairo_surface_t *img = drawer_item_image(NULL, &items[i], 30.0 * pt, 1.0, &ax, &ay, true);
+		if (img) {
+			double bx0, by0, bx1, by1;
+			alpha_box(img, &bx0, &by0, &bx1, &by1);
+			double k = fmin(1.0, fmin(pw / (bx1 - bx0), ph / (by1 - by0)));
+			if (i == hover) {
+				k *= 1.06;
+			}
+			double ox = x + LOOKS_CELL_W * pt * 0.5 - (bx0 + bx1) * 0.5 * k;
+			double oy = y + 8.0 * pt + ph * 0.5 - (by0 + by1) * 0.5 * k - (i == hover ? 2.0 * pt : 0.0);
+			int iw = cairo_image_surface_get_width(img), ih = cairo_image_surface_get_height(img);
+			cairo_save(cr);
+			cairo_translate(cr, ox, oy);
+			cairo_scale(cr, k, k);
+			double up = i == hover ? 0.5 : 0.2;
+			drawer_shadow(cr, img, 0, 0, iw, ih, 6.0 * up / k * pt, 8.0 * up / k * pt, 0.32,
+				fmax(1.5, 3.0 * pt / k), 1.0);
+			cairo_set_source_surface(cr, img, 0, 0);
+			cairo_paint(cr);
+			cairo_restore(cr);
+			cairo_surface_destroy(img);
+		}
+		double nx = x + LOOKS_CELL_W * pt * 0.5, ny = y + (LOOKS_PIC_H + 28.0) * pt;
+		show_text_fit_as(cr, DESK_FONT_PRINT, names[i], nx, ny, 11.5 * pt, false,
+			0.18, 0.15, 0.12, i == hover ? 0.98 : 0.80, 0, (LOOKS_CELL_W - 10.0) * pt);
+		if (i == chosen) {
+			/* round the thing, clear of its name */
+			pencil_ring(cr, nx, y + (8.0 + LOOKS_PIC_H * 0.5) * pt, (LOOKS_CELL_W * 0.5 - 7.0) * pt,
+				(LOOKS_PIC_H * 0.5 + 5.0) * pt, (unsigned)i * 7u + 3u);
+		}
+	}
+	/* and where the person's own go */
+	if (hint && *hint) {
+		show_text_fit_as(cr, DESK_FONT_PRINT, hint, W * 0.5, H - 20.0 * pt, 10.5 * pt, false,
+			0.30, 0.25, 0.20, 0.70, 0, W - LOOKS_MARGIN * 2.0 * pt);
+	}
+}
+
+/* ---- Alt+Tab: what is on the windows spread out ----------------------
+ *
+ * Where the windows are spread out over the desk (wm.c): on each, a label
+ * with its program's mark and name printed on it, with its shadow, in
+ * points (pt pixels each), no wider than max_w. */
+
+static double switcher_text_w(enum desk_font role, const char *s, double size)
+{
+	static cairo_surface_t *scratch;
+	static cairo_t *mcr;
+	if (!mcr) {
+		scratch = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 4, 4);
+		mcr = cairo_create(scratch);
+	}
+	desk_font_select(mcr, role, s, false, false);
+	cairo_set_font_size(mcr, size);
+	cairo_text_extents_t ext;
+	cairo_text_extents(mcr, s, &ext);
+	return ext.x_advance;
+}
+
+static void switcher_tag_lay(const char *name, double pt, double max_w, double *fs,
+	double *tw, double *th, double *pad)
+{
+	*fs = 13.0 * pt;
+	/* the mark, then the name: 8 in, 22 the mark, 7 to the name, 11 out */
+	*tw = fmax(fmin(48.0 * pt + switcher_text_w(DESK_FONT_PRINT, name, *fs), max_w),
+		40.0 * pt);
+	*th = 32.0 * pt;
+	*pad = ceil(9.0 * pt);
+}
+
+void desk_switcher_tag_size(const char *name, double pt, double max_w, int *w, int *h,
+	int *pad)
+{
+	double fs, tw, th, p;
+	switcher_tag_lay(name, pt, max_w, &fs, &tw, &th, &p);
+	*w = (int)ceil(tw + p * 2.0);
+	*h = (int)ceil(th + p * 2.0);
+	*pad = (int)p;
+}
+
+void desk_draw_switcher_tag(cairo_t *cr, cairo_surface_t *icon, const char *initial,
+	const char *name, double pt, double max_w, unsigned seed)
+{
+	double fs, tw, th, pad;
+	switcher_tag_lay(name, pt, max_w, &fs, &tw, &th, &pad);
+	cairo_surface_t *tag = cairo_image_surface_create(CAIRO_FORMAT_ARGB32,
+		(int)ceil(tw), (int)ceil(th));
+	cairo_t *tc = cairo_create(tag);
+	double r = 3.0 * pt;
+	fill_paper(tc, 0, 0, tw, th, r);
+	cairo_save(tc);
+	desk_rounded_path(tc, 0, 0, tw, th, r);
+	cairo_clip(tc);
+	paper_age(tc, tw, th, seed, 0.15);
+	cairo_restore(tc);
+	/* a label: a fine rule printed round inside its edge */
+	desk_rounded_path(tc, 2.5 * pt, 2.5 * pt, tw - 5.0 * pt, th - 5.0 * pt, r * 0.6);
+	cairo_set_source_rgba(tc, 0.30, 0.24, 0.18, 0.30);
+	cairo_set_line_width(tc, fmax(0.6 * pt, 0.6));
+	cairo_stroke(tc);
+	double ms = 22.0 * pt;
+	sheet_mark(tc, icon, initial, 8.0 * pt, (th - ms) * 0.5, ms, seed);
+	double nx = 37.0 * pt;
+	show_text_fit_as(tc, DESK_FONT_PRINT, name, nx, th * 0.5 + fs * 0.36, fs, false,
+		0.17, 0.14, 0.11, 0.92, -1, tw - nx - 9.0 * pt);
+	cairo_destroy(tc);
+	cairo_surface_flush(tag);
+	drawer_shadow(cr, tag, pad, pad, tw, th, 0.0, 2.0 * pt, 0.32, fmax(2.0, 2.5 * pt), 1.0);
+	cairo_set_source_surface(cr, tag, pad, pad);
+	cairo_paint(cr);
+	cairo_surface_destroy(tag);
 }
 
 bool desk_drawer_handle_hit(int screen_w, int screen_h, double px, double py, double open)
@@ -12694,7 +18466,7 @@ void desk_tilt_at(double t, int frames, int *frame, double *mix)
  * order top left, top right, bottom left, bottom right as the label is read. */
 static void binder_label_quad(int i, vec3 out[4])
 {
-	const struct shelf_binder *b = &SHELF_BINDERS[i];
+	const struct shelf_binder *b = shelf_binder_of(i);
 	double lx = b->hw * 0.66, ly = 1.42;
 	double lz = RM_BN_DEPTH * 0.5 + 0.02;
 	for (int k = 0; k < 4; k++) {
@@ -12829,7 +18601,8 @@ static void face_end(struct face_print *f, cairo_t *cr, double alpha)
 static const char *shelf_label(const struct desk_shelf_info *si)
 {
 	static const char *const KEYS[] = { "shelf|Development", "shelf|Internet", "shelf|Office",
-		"shelf|Graphics", "shelf|Media", "shelf|Games", "shelf|Utilities", "shelf|System" };
+		"shelf|Graphics", "shelf|Media", "shelf|Games", "shelf|Utilities", "shelf|System",
+		"shelf|Favorites" };
 	for (size_t i = 0; si->label_en && i < sizeof KEYS / sizeof KEYS[0]; i++) {
 		if (!strcmp(KEYS[i] + strlen("shelf|"), si->label_en)) {
 			return TR(KEYS[i]);
@@ -12838,15 +18611,45 @@ static const char *shelf_label(const struct desk_shelf_info *si)
 	return si->label_en;
 }
 
+/* How dark the binders' labels are typed (shell.conf binder_ink): 0 with
+ * the tired ribbon they were designed with, 1 a fresh one pressed hard.
+ * A pale label on a dim shelf is hard to read, so the default is already
+ * a little past the tired ribbon. */
+static double g_binder_ink = 0.4;
+
+bool desk_set_binder_ink(double depth)
+{
+	depth = clampf(depth, 0.0, 1.0);
+	if (fabs(depth - g_binder_ink) < 1e-6) {
+		return false;
+	}
+	g_binder_ink = depth;
+	/* the labels are printed into the case, which is kept: print it again */
+	desk_draw_forget_words();
+	return true;
+}
+
+static void lkfx_star(cairo_t *cr, double x, double y, double r);
+
+/* The card in binder thing's pocket is as wide as the pocket is: the
+ * favourites' is narrower, and typed on as narrow. */
+static double binder_label_w(int thing)
+{
+	return 132.0 * shelf_binder_of(thing)->hw / 1.65;
+}
+
 static void binder_label_face(cairo_t *cr, double w, double h,
-	const char *name, int count, unsigned seed)
+	const char *name, int count, unsigned seed, bool star)
 {
 	/* This card was typed once and has been in the pocket ever since. It
 	 * is not white, the ribbon was tired, somebody's thumb has been on the
 	 * bottom corner every time the binder came down, and one corner has
 	 * stopped lying flat. */
 	double years = 0.62 + hash21(seed, 41.3) * 0.34;
+	double ink = g_binder_ink;
 	cairo_save(cr);
+	cairo_matrix_t card;
+	cairo_get_matrix(cr, &card);
 	cairo_set_source_rgb(cr, 0.874, 0.840, 0.758);
 	cairo_paint(cr);
 	paper_age(cr, w, h, seed + 71, years);
@@ -12856,30 +18659,51 @@ static void binder_label_face(cairo_t *cr, double w, double h,
 	cairo_rotate(cr, (hash21(seed, 3.7) - 0.5) * 0.030);
 	cairo_translate(cr, -w * 0.5, -h * 0.5);
 
-	cairo_set_source_rgba(cr, 0.24, 0.18, 0.12, 0.52);
+	cairo_set_source_rgba(cr, 0.24, 0.18, 0.12, 0.52 + 0.30 * ink);
 	cairo_set_line_width(cr, 1.2);
 	cairo_rectangle(cr, w * 0.10, h * 0.09, w * 0.80, h * 0.82);
 	cairo_stroke(cr);
 
-	/* typed smaller for a long name (Développement): the card is no wider */
-	show_text_fit_to(cr, DESK_FONT_TYPE, name, w * 0.5, h * 0.42, h * 0.125, true,
-		0.16, 0.12, 0.09, 0.95, 0, w * 0.72, 0.35);
+	if (!star) {
+		/* typed smaller for a long name (Développement): the card is no wider */
+		show_text_fit_to(cr, DESK_FONT_TYPE, name, w * 0.5, h * 0.42, h * 0.125, true,
+			0.16 - 0.11 * ink, 0.12 - 0.08 * ink, 0.09 - 0.06 * ink, 0.95 + 0.05 * ink, 0,
+			w * 0.72, 0.35);
+	}
 
 	wobble_line(cr, w * 0.20, h * 0.60, w * 0.80, h * 0.60, seed, 3, 0.5, 1.0,
-		0.30, 0.22, 0.15, 0.55);
+		0.30, 0.22, 0.15, 0.55 + 0.30 * ink);
 
 	char buf[16];
 	snprintf(buf, sizeof buf, "%d", count);
 	show_text_as(cr, DESK_FONT_TYPE, buf, w * 0.5, h * 0.80, h * 0.155, true,
-		0.42, 0.14, 0.10, 0.92, 0);
+		0.42 - 0.10 * ink, 0.14 - 0.06 * ink, 0.10 - 0.05 * ink, 0.92 + 0.08 * ink, 0);
 
 	cairo_identity_matrix(cr);
 
-	/* the ribbon, over everything that was typed with it */
+	/* the ribbon, over everything that was typed with it -- missing less of
+	 * it the fresher the ribbon is */
+	double fresh = 1.0 - 0.9 * ink;
 	ink_skip(cr, w * 0.10, h * 0.16, w * 0.80, h * 0.44, seed + 3,
-		0.30 + years * 0.26, 0.876, 0.842, 0.762);
+		(0.30 + years * 0.26) * fresh, 0.876, 0.842, 0.762);
 	ink_skip(cr, w * 0.30, h * 0.66, w * 0.40, h * 0.24, seed + 9,
-		0.20 + years * 0.18, 0.876, 0.842, 0.762);
+		(0.20 + years * 0.18) * fresh, 0.876, 0.842, 0.762);
+
+	if (star) {
+		/* The favourites: a star stamped where the name would be typed --
+		 * stamped, not typed, so the ribbon has nothing to do with it --
+		 * in the red of a stamp pad, not quite straight. Its card is too
+		 * narrow for お気に入り or Favoriten to be read from the desk;
+		 * the name is on its board, inside. */
+		cairo_save(cr);
+		cairo_set_matrix(cr, &card);
+		cairo_translate(cr, w * 0.5, h * 0.36);
+		cairo_rotate(cr, (hash21(seed, 8.1) - 0.5) * 0.30);
+		lkfx_star(cr, 0.0, 0.0, fmin(w * 0.34, h * 0.16));
+		cairo_set_source_rgba(cr, 0.66, 0.11, 0.08, 0.86);
+		cairo_fill(cr);
+		cairo_restore(cr);
+	}
 
 	/* the thumb that takes this binder down, always in the same place */
 	double tx = hash21(seed, 19.7) > 0.5 ? w * 0.26 : w * 0.74;
@@ -13127,11 +18951,13 @@ static void shelf_base_paint(cairo_t *cr, struct room_render *rr)
 	 * installing a package changes what the spine says without re-baking a
 	 * bookcase */
 	const struct desk_app_list *apps = desk_apps_acquire();
-	const double LW = 132.0, LH = 280.0;
+	const double LH = 280.0;
 	cairo_surface_t *face = cairo_image_surface_create(CAIRO_FORMAT_ARGB32,
-		(int)LW, (int)LH);
+		132, (int)LH);
 	cairo_t *fc = cairo_create(face);
-	for (int i = 0; i < DESK_SHELF_COUNT; i++) {
+	for (int r = 0; r < SHELF_ROW; r++) {
+		int i = shelf_row_thing(r);
+		double LW = binder_label_w(i);
 		vec3 q[4];
 		binder_label_quad(i, q);
 		cairo_matrix_t m;
@@ -13143,8 +18969,12 @@ static void shelf_base_paint(cairo_t *cr, struct room_render *rr)
 		cairo_set_operator(fc, CAIRO_OPERATOR_CLEAR);
 		cairo_paint(fc);
 		cairo_restore(fc);
+		cairo_save(fc);
+		cairo_rectangle(fc, 0, 0, LW, LH);
+		cairo_clip(fc);
 		binder_label_face(fc, LW, LH, shelf_label(&apps->shelf[i]), apps->shelf[i].count,
-			(unsigned)(i * 37 + 11));
+			(unsigned)(i * 37 + 11), i == DESK_SHELF_FAV);
+		cairo_restore(fc);
 		cairo_surface_flush(face);
 
 		cairo_save(cr);
@@ -14705,6 +20535,79 @@ static void binder_code(char *buf, size_t n, const char *key, int idx)
 	snprintf(buf, n, "%s\xc2\xb7%03d", k, idx + 1);
 }
 
+/* ---- the flag on a binder sheet: the favourites ----
+ *
+ * A sheet whose program is in the favourites has a flag stuck on it, as a
+ * page of a catalogue somebody means to find again has: a strip of mustard
+ * film, the favourites binder's colour, along the right edge a little
+ * below the corner, most of it standing out past the paper (owner
+ * 2026-11-10: 紙に付箋を貼る). The sheet under the hand shows faintly where
+ * one would go, and more so with the hand on it; pressed there, a flag is
+ * stuck on, or peeled off (wm.c). In the sheet's own pixels. */
+#define BINDER_FLAG_Y 0.165     /* its top, down the sheet */
+#define BINDER_FLAG_H 0.052     /* how wide the strip is */
+#define BINDER_FLAG_IN 0.080    /* how much of it is on the paper */
+#define BINDER_FLAG_OUT 0.090   /* and how much stands out past it */
+
+/* stuck: on the sheet; hot: the hand on it; dim: the shade the sheet is in */
+static void binder_flag(cairo_t *cr, double sw, double sh, bool stuck, bool hot, double dim)
+{
+	double y = sh * BINDER_FLAG_Y, fh = sh * BINDER_FLAG_H;
+	double x0 = sw * (1.0 - BINDER_FLAG_IN), x1 = sw * (1.0 + BINDER_FLAG_OUT);
+	double r = fh * 0.16, k = 1.0 - dim;
+	cairo_save(cr);
+	if (!stuck) {
+		/* where one would go: its outline, and a breath of its colour */
+		desk_rounded_path(cr, x0, y, x1 - x0, fh, r);
+		cairo_set_source_rgba(cr, 0.93, 0.72, 0.18, hot ? 0.38 : 0.10);
+		cairo_fill_preserve(cr);
+		static const double DASH[] = { 3.0, 2.5 };
+		cairo_set_dash(cr, DASH, hot ? 0 : 2, 0.0);
+		cairo_set_line_width(cr, 1.1);
+		cairo_set_source_rgba(cr, 0.42, 0.33, 0.20, hot ? 0.75 : 0.45);
+		cairo_stroke(cr);
+		cairo_restore(cr);
+		return;
+	}
+	/* stuck, and lifted a hair at its free end under the hand */
+	double lift = hot ? fh * 0.10 : 0.0;
+	/* its shadow, past the paper, on whatever is behind */
+	desk_rounded_path(cr, sw + 1.5, y + 2.0 + lift, x1 - sw - 1.0, fh, r);
+	cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.16 * k);
+	cairo_fill(cr);
+	/* on the paper the film lets the paper through; past it, it is its
+	 * own colour, held up to the light */
+	desk_rounded_path(cr, x0, y, sw - x0 + r, fh, r * 0.6);
+	cairo_set_source_rgba(cr, 0.93 * k, 0.70 * k, 0.16 * k, 0.52);
+	cairo_fill(cr);
+	desk_rounded_path(cr, sw - 0.5, y - lift * 0.4, x1 - sw + 0.5, fh, r);
+	cairo_pattern_t *g = cairo_pattern_create_linear(sw, 0, x1, 0);
+	cairo_pattern_add_color_stop_rgba(g, 0.0, 0.90 * k, 0.66 * k, 0.13 * k, 0.92);
+	cairo_pattern_add_color_stop_rgba(g, 1.0, (hot ? 1.0 : 0.97) * k, 0.78 * k, 0.24 * k, 0.92);
+	cairo_set_source(cr, g);
+	cairo_fill_preserve(cr);
+	cairo_pattern_destroy(g);
+	cairo_set_line_width(cr, 0.8);
+	cairo_set_source_rgba(cr, 0.46 * k, 0.32 * k, 0.04 * k, 0.55);
+	cairo_stroke(cr);
+	/* the light along its top edge */
+	cairo_move_to(cr, x0 + r, y + 0.9);
+	cairo_line_to(cr, x1 - r, y + 0.9 - lift * 0.4);
+	cairo_set_line_width(cr, 0.9);
+	cairo_set_source_rgba(cr, 1.0, 0.96, 0.80, 0.40 * k);
+	cairo_stroke(cr);
+	cairo_restore(cr);
+}
+
+bool desk_binder_flag_hit(int w, int h, double lx, double ly)
+{
+	struct binder_geom g;
+	binder_geom(w, h, &g);
+	double y = g.sh * BINDER_FLAG_Y, fh = g.sh * BINDER_FLAG_H;
+	return lx >= g.sw * (1.0 - BINDER_FLAG_IN) - 6.0 && lx <= g.sw * (1.0 + BINDER_FLAG_OUT) + 2.0
+		&& ly >= y - 6.0 && ly <= y + fh + 6.0;
+}
+
 /* ---- the corner of a binder sheet ----
  *
  * The sheet under the hand has its top right corner turned down, as every
@@ -14774,6 +20677,22 @@ void desk_binder_local(int w, int h, double first, int idx, bool hot, double px,
 	*ly = dx * sn + dy * c + (g.ry - g.sy) + (hot ? g.sh * 0.022 : 0.0);
 	*sw = g.sw;
 	*sh = g.sh;
+}
+
+/* Where a finger is round the binder's ring, as the binder is held (2026-11-12): the angle,
+ * the way the sheets swing (binder_angle: a sheet turned over goes up and round, -1.05), and how
+ * far from the ring. False if the binder is not there to be measured. */
+bool desk_binder_finger_at(int w, int h, double px, double py, double *angle, double *r)
+{
+	struct binder_geom g;
+	binder_geom(w, h, &g);
+	if (g.sw <= 0.0 || g.sh <= 0.0) {
+		return false;
+	}
+	binder_unturn(w, h, &px, &py);
+	*angle = atan2(py - g.ry, px - g.rx);
+	*r = hypot(px - g.rx, py - g.ry);
+	return true;
 }
 
 /* A sheet of the fan as it hangs: its middle on the screen, its size, and
@@ -14905,7 +20824,7 @@ static cairo_surface_t *binder_sheet(const struct desk_app_list *apps, int app,
 	int slot = -1;
 	for (int i = 0; i < BINDER_KEEP; i++) {
 		struct binder_kept *k = &binder_kept[i];
-		if (k->s && k->gen == apps->generation && k->app == app && k->pw == pw
+		if (k->s && k->gen == apps->scan_generation && k->app == app && k->pw == pw
 			&& k->ph == ph && strcmp(k->code, code) == 0) {
 			k->used = ++binder_kept_clock;
 			return k->s;
@@ -14927,7 +20846,7 @@ static cairo_surface_t *binder_sheet(const struct desk_app_list *apps, int app,
 		a->initial, a->seed, 0.20 + 0.70 * hash21(a->seed, 2.2));
 	cairo_destroy(cr);
 	cairo_surface_flush(k->s);
-	k->gen = apps->generation;
+	k->gen = apps->scan_generation;
 	k->app = app;
 	k->pw = pw;
 	k->ph = ph;
@@ -14940,15 +20859,20 @@ static cairo_surface_t *binder_sheet(const struct desk_app_list *apps, int app,
  * on the desk, the cloth, the hinge, the stitching and the slip in the left
  * board's pocket. Printed once, like the sheets. */
 /* The colour of binder shelf's boards: what its spine is on the shelf --
- * the oxblood calf or the green buckram (shelf_binder_map) -- as it looks
- * under the lamps it is held up to, which are brighter than the room's. */
+ * the oxblood calf, the green buckram or the favourites' mustard
+ * (shelf_binder_map) -- as it looks under the lamps it is held up to,
+ * which are brighter than the room's. */
 static void binder_dye(int shelf, double rgb[3])
 {
-	bool calf = shelf < 0 || shelf >= DESK_SHELF_COUNT
-		|| SHELF_BINDERS[shelf].mid == MID_BINDER_A;
-	rgb[0] = calf ? 0.34 : 0.13;
-	rgb[1] = calf ? 0.12 : 0.19;
-	rgb[2] = calf ? 0.095 : 0.13;
+	const struct shelf_binder *sb = shelf_binder_of(shelf);
+	int mid = sb ? sb->mid : MID_BINDER_A;
+	static const double DYE[3][3] = {
+		{ 0.34, 0.12, 0.095 }, { 0.13, 0.19, 0.13 }, { 0.55, 0.39, 0.12 },
+	};
+	int k = mid == MID_BINDER_FAV ? 2 : mid == MID_BINDER_B ? 1 : 0;
+	rgb[0] = DYE[k][0];
+	rgb[1] = DYE[k][1];
+	rgb[2] = DYE[k][2];
 }
 
 static void binder_boards_paint(cairo_t *cr, const struct binder_geom *g,
@@ -15045,7 +20969,7 @@ static cairo_surface_t *binder_boards(const struct desk_app_list *apps, int shel
  * True while some are still to do. */
 bool desk_binder_warm(int w, int h, int shelf, double first, int budget)
 {
-	if (shelf < 0 || shelf >= DESK_SHELF_COUNT || w < 8 || h < 8) {
+	if (!desk_shelf_is_binder(shelf) || w < 8 || h < 8) {
 		return false;
 	}
 	const struct desk_app_list *apps = desk_apps_acquire();
@@ -15072,7 +20996,8 @@ bool desk_binder_warm(int w, int h, int shelf, double first, int budget)
 		bool have = false;
 		for (int i = 0; i < BINDER_KEEP && !have; i++) {
 			const struct binder_kept *k = &binder_kept[i];
-			have = k->s && k->gen == apps->generation && k->app == si->first + idx
+			have = k->s && k->gen == apps->scan_generation
+				&& k->app == desk_shelf_app_index(apps, shelf, idx)
 				&& k->pw == pw && k->ph == ph && strcmp(k->code, code) == 0;
 		}
 		if (have) {
@@ -15082,7 +21007,7 @@ bool desk_binder_warm(int w, int h, int shelf, double first, int budget)
 			more = true;
 			break;
 		}
-		binder_sheet(apps, si->first + idx, code, g.sw, g.sh, scale);
+		binder_sheet(apps, desk_shelf_app_index(apps, shelf, idx), code, g.sw, g.sh, scale);
 		budget--;
 	}
 	desk_apps_release(apps);
@@ -15111,7 +21036,7 @@ enum { BINDER_FLAT_SHADOW = 1, BINDER_FLAT_BOARDS = 2, BINDER_FLAT_SHEETS = 4,
 static void binder_draw_flat(cairo_t *cr, int w, int h, int shelf, double first,
 	int sel, double open_t, const struct desk_binder_corner *corner, int taken, int parts)
 {
-	if (shelf < 0 || shelf >= DESK_SHELF_COUNT) {
+	if (!desk_shelf_is_binder(shelf)) {
 		return;
 	}
 	double e = clampf(open_t, 0.0, 1.0);
@@ -15227,7 +21152,8 @@ static void binder_draw_flat(cairo_t *cr, int w, int h, int shelf, double first,
 		bool hot = idx == sel;
 		char code[32];
 		binder_code(code, sizeof code, si->key, idx);
-		cairo_surface_t *sheet = binder_sheet(apps, si->first + idx, code, g.sw, g.sh, scale);
+		int ai = desk_shelf_app_index(apps, shelf, idx);
+		cairo_surface_t *sheet = binder_sheet(apps, ai, code, g.sw, g.sh, scale);
 		cairo_save(cr);
 		if (hiding && j > front) {
 			binder_clip_outside(cr, hide);
@@ -15271,11 +21197,16 @@ static void binder_draw_flat(cairo_t *cr, int w, int h, int shelf, double first,
 			bool warns[2];
 			int n = binder_corner_items(corner->in_drawer, words, glyphs, warns);
 			curl_draw(cr, g.sw, cs, open, corner->lift, corner->hot,
-				apps->apps[si->first + idx].seed, n, words, glyphs, warns);
+				apps->apps[ai].seed, n, words, glyphs, warns);
+		}
+		/* its flag, stuck on; or on the one under the hand, where one goes */
+		double shade = hot ? 0.0 : 0.05 + 0.030 * fmax((double)j - frac, 0.0);
+		if (ai >= 0 && (apps->apps[ai].fav || (hot && corner && corner->hot < 0))) {
+			binder_flag(cr, g.sw, g.sh, apps->apps[ai].fav, hot && corner && corner->flag_hot,
+				fmin(shade * 2.2, 0.6));
 		}
 		if (!hot) {
 			/* the ones behind sit in the front one's shade */
-			double shade = 0.05 + 0.030 * fmax((double)j - frac, 0.0);
 			cairo_set_source_rgba(cr, 0.06, 0.04, 0.02, shade);
 			cairo_rectangle(cr, 0, 0, g.sw, g.sh);
 			cairo_fill(cr);
@@ -15453,7 +21384,7 @@ static void binder_cover_face(cairo_t *cr, double W, double H, double r,
 static void binder_spine_face(cairo_t *cr, int i, double ts, double H,
 	const struct desk_shelf_info *si)
 {
-	const struct shelf_binder *b = &SHELF_BINDERS[i];
+	const struct shelf_binder *b = shelf_binder_of(i);
 	double k = H / b->h;
 	double cy = H - b->label_y * k;
 	/* the pocket, and the label in it */
@@ -15462,14 +21393,14 @@ static void binder_spine_face(cairo_t *cr, int i, double ts, double H,
 	desk_rounded_path(cr, ts * 0.5 - px, cy - py, px * 2.0, py * 2.0, px * 0.12);
 	cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.38);
 	cairo_fill(cr);
-	const double LW = 132.0, LH = 280.0;
+	const double LW = binder_label_w(i), LH = 280.0;
 	double lx = b->hw * 0.66 * k, ly = 1.42 * k;
 	cairo_translate(cr, ts * 0.5 - lx, cy - ly);
 	cairo_scale(cr, lx * 2.0 / LW, ly * 2.0 / LH);
 	cairo_rectangle(cr, 0, 0, LW, LH);
 	cairo_clip(cr);
 	binder_label_face(cr, LW, LH, shelf_label(si), si->count,
-		(unsigned)(i * 37 + 11));
+		(unsigned)(i * 37 + 11), i == DESK_SHELF_FAV);
 	cairo_restore(cr);
 }
 
@@ -15564,7 +21495,7 @@ static void binder_kind(int w, int h, int shelf, const struct binder_pics *pics,
 	memset(K, 0, sizeof *K);
 	struct binder_geom g;
 	binder_geom(w, h, &g);
-	const struct shelf_binder *sb = &SHELF_BINDERS[shelf];
+	const struct shelf_binder *sb = shelf_binder_of(shelf);
 	K->bx = g.bx;
 	K->by = g.by;
 	K->bw = g.bw;
@@ -15656,7 +21587,7 @@ static bool binder_pics_step(int w, int h, int shelf, double first, double k, bo
 			cairo_destroy(c);
 			cairo_surface_flush(g_npics.cover);
 		} else if (!g_npics.spine[0]) {
-			const struct shelf_binder *sb = &SHELF_BINDERS[shelf];
+			const struct shelf_binder *sb = shelf_binder_of(shelf);
 			double ts = g.bh * (2.0 * sb->hw) / sb->h, sw = ts / OP_SPINE_N;
 			for (int i = 0; i < OP_SPINE_N; i++) {
 				g_npics.spine[i] = cairo_image_surface_create(CAIRO_FORMAT_ARGB32,
@@ -15692,7 +21623,7 @@ static const struct binder_pics *binder_pics_for(int w, int h, int shelf, double
  * ahead of it: true while there is more to print. */
 bool desk_binder_anim_warm(int w, int h, int shelf)
 {
-	if (shelf < 0 || shelf >= DESK_SHELF_COUNT || w < 8 || h < 8) {
+	if (!desk_shelf_is_binder(shelf) || w < 8 || h < 8) {
 		return false;
 	}
 	int ow, oh;
@@ -15703,7 +21634,7 @@ bool desk_binder_anim_warm(int w, int h, int shelf)
 void desk_draw_binder(cairo_t *cr, int w, int h, int shelf, double first,
 	int sel, double open_t, const struct desk_binder_corner *corner, int taken)
 {
-	if (shelf < 0 || shelf >= DESK_SHELF_COUNT || open_t <= 0.002) {
+	if (!desk_shelf_is_binder(shelf) || open_t <= 0.002) {
 		return;
 	}
 	if (open_t < 0.999) {
@@ -16148,13 +22079,70 @@ static double book_text(cairo_t *cr, const char *s, double x, double y, double w
 	return e.x_advance;
 }
 
-/* One line of the index: the program's mark, its name and what it is, a
- * leader of dots and the shelf it is on. */
+/* The favourites' flag of a line of the index: in the margin before it, an
+ * arrow of the same mustard film as on the binders' sheets, pointing at the
+ * line (binder_flag); x, y, w, h. */
+static void book_flag_rect(const double r[4], double f[4])
+{
+	double rh = r[3];
+	f[0] = r[0] - rh * 0.78;
+	f[1] = r[1] + rh * 0.30;
+	f[2] = rh * 0.60;
+	f[3] = rh * 0.34;
+}
+
+static void book_flag(cairo_t *cr, const double r[4], bool stuck, bool hot)
+{
+	double f[4];
+	book_flag_rect(r, f);
+	double x = f[0], y = f[1], fw = f[2], fh = f[3], tip = fh * 0.55;
+	cairo_save(cr);
+	cairo_move_to(cr, x, y);
+	cairo_line_to(cr, x + fw - tip, y);
+	cairo_line_to(cr, x + fw, y + fh * 0.5);
+	cairo_line_to(cr, x + fw - tip, y + fh);
+	cairo_line_to(cr, x, y + fh);
+	cairo_close_path(cr);
+	if (!stuck) {
+		cairo_set_source_rgba(cr, 0.93, 0.72, 0.18, hot ? 0.40 : 0.12);
+		cairo_fill_preserve(cr);
+		static const double DASH[] = { 2.4, 2.0 };
+		cairo_set_dash(cr, DASH, hot ? 0 : 2, 0.0);
+		cairo_set_line_width(cr, 0.9);
+		cairo_set_source_rgba(cr, 0.42, 0.33, 0.20, hot ? 0.75 : 0.45);
+		cairo_stroke(cr);
+		cairo_restore(cr);
+		return;
+	}
+	cairo_pattern_t *g = cairo_pattern_create_linear(x, 0, x + fw, 0);
+	cairo_pattern_add_color_stop_rgba(g, 0.0, hot ? 1.0 : 0.96, 0.76, 0.22, 0.90);
+	cairo_pattern_add_color_stop_rgba(g, 1.0, 0.90, 0.66, 0.14, 0.78);
+	cairo_set_source(cr, g);
+	cairo_fill_preserve(cr);
+	cairo_pattern_destroy(g);
+	cairo_set_line_width(cr, 0.7);
+	cairo_set_source_rgba(cr, 0.46, 0.32, 0.04, 0.55);
+	cairo_stroke(cr);
+	cairo_move_to(cr, x + fh * 0.2, y + 0.8);
+	cairo_line_to(cr, x + fw - tip, y + 0.8);
+	cairo_set_line_width(cr, 0.7);
+	cairo_set_source_rgba(cr, 1.0, 0.96, 0.80, 0.45);
+	cairo_stroke(cr);
+	cairo_restore(cr);
+}
+
+/* One line of the index: its favourites' flag, if it has one (or, the
+ * hand on the line, where one goes), the program's mark, its name and what
+ * it is, a leader of dots and the shelf it is on. */
 static void book_entry(cairo_t *cr, const struct book_geom *g, const double r[4],
-	const struct desk_app *a, const struct desk_app_list *l, bool hot, bool chosen)
+	const struct desk_app *a, const struct desk_app_list *l, bool hot, bool chosen,
+	bool flag_hot)
 {
 	(void)g;
 	double x = r[0], y = r[1], w = r[2], rh = r[3];
+	if (a->fav || hot) {
+		book_flag(cr, r, a->fav, flag_hot);
+	}
 	if (hot || chosen) {
 		/* gone over with a highlighter */
 		cairo_save(cr);
@@ -16399,7 +22387,8 @@ static void book_page(cairo_t *cr, int w, int h, const struct book_geom *g,
 			}
 			double r[4];
 			book_row_rect(g, side, bi->row[i], r);
-			book_entry(cr, g, r, &l->apps[bi->app[i]], l, lk->hover == i, lk->sel == i);
+			book_entry(cr, g, r, &l->apps[bi->app[i]], l, lk->hover == i, lk->sel == i,
+				lk->hover == i && lk->hover_flag);
 		}
 		if (side) {
 			/* nothing of the index on this page: the one chosen, at large */
@@ -17664,10 +23653,10 @@ static bool book_hot_rect(int w, int h, const struct desk_book_look *lk, int par
 		double rr[4];
 		book_row_rect(&g, bi->side[i], bi->row[i], rr);
 		double rh = rr[3];
-		/* the highlighter's stroke (book_entry) */
-		r[0] = rr[0] - rh * 0.15 - pad;
+		/* the highlighter's stroke (book_entry), and the flag in the margin */
+		r[0] = rr[0] - rh * 0.80 - pad;
 		r[1] = rr[1] + rh * 0.10 - pad;
-		r[2] = rr[2] + rh * 0.30 + pad * 2.0;
+		r[2] = rr[2] + rh * 0.95 + pad * 2.0;
 		r[3] = rh * 0.82 + pad * 2.0;
 		return true;
 	}
@@ -17887,8 +23876,11 @@ int desk_book_hit(int w, int h, const struct desk_book_look *lk, double x, doubl
 	for (int t = 0; t < DESK_BOOK_TABS; t++) {
 		double r[4];
 		book_tab_rect(&g, t, r);
-		if (x >= r[0] - g.bw * 0.004 && x <= r[0] + r[2] + g.bw * 0.012 && y >= r[1]
-			&& y <= r[1] + r[3]) {
+		/* the slips between the tabs count to the nearer one: a finger
+		 * that comes down on one has meant a tab all the same */
+		double slip = (g.tab_h - r[3]) * 0.5;
+		if (x >= r[0] - g.bw * 0.004 && x <= r[0] + r[2] + g.bw * 0.012 && y >= r[1] - slip
+			&& y <= r[1] + r[3] + slip) {
 			*arg = t;
 			return DESK_BOOK_HIT_TAB;
 		}
@@ -17902,8 +23894,13 @@ int desk_book_hit(int w, int h, const struct desk_book_look *lk, double x, doubl
 		if (bi->spread[i] != spread) {
 			continue;
 		}
-		double r[4];
+		double r[4], f[4];
 		book_row_rect(&g, bi->side[i], bi->row[i], r);
+		book_flag_rect(r, f);
+		if (x >= f[0] - 3.0 && x < r[0] - r[3] * 0.08 && y >= r[1] && y <= r[1] + r[3]) {
+			*arg = i;
+			return DESK_BOOK_HIT_FLAG;
+		}
 		if (x >= r[0] && x <= r[0] + r[2] && y >= r[1] && y <= r[1] + r[3]) {
 			*arg = i;
 			return DESK_BOOK_HIT_ENTRY;
@@ -18137,6 +24134,130 @@ void desk_draw_sheet_flight(cairo_t *cr, cairo_surface_t *sheet,
 	cairo_restore(cr);
 }
 
+/* ---- samples of what the desk may be made of ------------------------
+ *
+ * For Shell Settings' fan of them: a strip cut from the top of the desk as
+ * it would be in that wood (timber_at as the top has it, desk_wood_at's
+ * stain, its years of use), lit as the lamp lights the desk and tone-mapped
+ * as the room is, so that a sample is the colour of the desk it makes. */
+
+/* The lamp on the desk, and the room seen in the lacquer over it, as the
+ * trace has them there: found by matching samples to the desk traced in each
+ * wood (the v0.2 page's chips, cut from it). */
+#define SAMPLE_LIGHT 1.30
+#define SAMPLE_SHEEN 0.070
+#define SAMPLES_KEPT 24
+#define GRAINS_KEPT (DESK_WOOD_COUNT * 2)
+
+static struct {
+	int wood, stain, w, h;
+	cairo_surface_t *s;
+} g_samples[SAMPLES_KEPT];
+static int g_samples_next;
+
+/* What a sample is before its stain and the light, pixel by pixel: the
+ * wood's colour over the four looks at it -- three numbers. The timber is
+ * the slow part (about 2 ms to a thousand pixels), so a sample in another
+ * stain is only these put together again. */
+static struct {
+	int wood, w, h;
+	float *px;
+} g_grains[GRAINS_KEPT];
+static int g_grains_next;
+
+static const float *sample_grain(int wood, int w, int h)
+{
+	for (int i = 0; i < GRAINS_KEPT; i++) {
+		if (g_grains[i].px && g_grains[i].wood == wood && g_grains[i].w == w && g_grains[i].h == h) {
+			return g_grains[i].px;
+		}
+	}
+	float *px = malloc(sizeof *px * 3 * (size_t)w * (size_t)h);
+	if (!px) {
+		return NULL;
+	}
+	for (int j = 0; j < h; j++) {
+		for (int i = 0; i < w; i++) {
+			/* four looks a pixel, as the room is traced: the latewood is a
+			 * line finer than one */
+			vec3 sum = v3(0.0, 0.0, 0.0);
+			for (int ss = 0; ss < 4; ss++) {
+				double x = (i + SS_OFF[ss][0]) / w, y = (j + SS_OFF[ss][1]) / h;
+				/* a strip of the desk's top, off to its right, back to front: 4.3
+				 * units of one board across, and along it as much as the sample
+				 * is long, as the desk is on the screen made smaller (the v0.2
+				 * page's chips, cut from the desk traced at 1440 across) */
+				double u = 11.0 + x * 4.3, v = -3.5 + y * 3.92 * h / w;
+				struct mtl m;
+				memset(&m, 0, sizeof m);
+				timber_at(&DESK_WOODS[wood], v3(u, 0.0, v), u, v, &m, 5.4, 1.0);
+				sum = vadd(sum, m.albedo);
+			}
+			float *o = px + 3 * ((size_t)j * (size_t)w + (size_t)i);
+			o[0] = (float)(sum.x * 0.25);
+			o[1] = (float)(sum.y * 0.25);
+			o[2] = (float)(sum.z * 0.25);
+		}
+	}
+	int k = g_grains_next;
+	g_grains_next = (g_grains_next + 1) % GRAINS_KEPT;
+	free(g_grains[k].px);
+	g_grains[k].wood = wood;
+	g_grains[k].w = w;
+	g_grains[k].h = h;
+	g_grains[k].px = px;
+	return px;
+}
+
+cairo_surface_t *desk_wood_sample(int wood, int stain, int w, int h)
+{
+	wood = wood < 0 || wood >= DESK_WOOD_COUNT ? DESK_WOOD_WALNUT : wood;
+	stain = desk_stain_offered(wood, stain) ? stain : DESK_STAIN_NATURAL;
+	w = w < 4 ? 4 : w > 512 ? 512 : w;
+	h = h < 4 ? 4 : h > 1024 ? 1024 : h;
+	for (int i = 0; i < SAMPLES_KEPT; i++) {
+		if (g_samples[i].s && g_samples[i].wood == wood && g_samples[i].stain == stain
+			&& g_samples[i].w == w && g_samples[i].h == h) {
+			return cairo_surface_reference(g_samples[i].s);
+		}
+	}
+	cairo_surface_t *s = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+	const float *grain = sample_grain(wood, w, h);
+	if (cairo_surface_status(s) != CAIRO_STATUS_SUCCESS || !grain) {
+		return s;
+	}
+	cairo_surface_flush(s);
+	unsigned char *px = cairo_image_surface_get_data(s);
+	int stride = cairo_image_surface_get_stride(s);
+	for (int j = 0; j < h; j++) {
+		uint32_t *row = (uint32_t *)(px + (size_t)j * (size_t)stride);
+		/* the lamp, a little less toward the far end; the room in the lacquer */
+		double y = (j + 0.5) / h, fall = 1.06 - 0.12 * y;
+		vec3 sheen = v3(SAMPLE_SHEEN, SAMPLE_SHEEN * 0.92, SAMPLE_SHEEN * 0.62);
+		for (int i = 0; i < w; i++) {
+			const float *g = grain + 3 * ((size_t)j * (size_t)w + (size_t)i);
+			vec3 a = stained(v3(g[0], g[1], g[2]), stain);
+			vec3 c = tonemap(vadd(vmul(a, SAMPLE_LIGHT * fall), sheen));
+			uint32_t r = (uint32_t)lround(clampf(c.x, 0.0, 1.0) * 255.0);
+			uint32_t gg = (uint32_t)lround(clampf(c.y, 0.0, 1.0) * 255.0);
+			uint32_t b = (uint32_t)lround(clampf(c.z, 0.0, 1.0) * 255.0);
+			row[i] = 0xff000000u | r << 16 | gg << 8 | b;
+		}
+	}
+	cairo_surface_mark_dirty(s);
+	int k = g_samples_next;
+	g_samples_next = (g_samples_next + 1) % SAMPLES_KEPT;
+	if (g_samples[k].s) {
+		cairo_surface_destroy(g_samples[k].s);
+	}
+	g_samples[k].wood = wood;
+	g_samples[k].stain = stain;
+	g_samples[k].w = w;
+	g_samples[k].h = h;
+	g_samples[k].s = cairo_surface_reference(s);
+	return s;
+}
+
 /* ---- Shell Settings ------------------------------------------------
  *
  * The shell's own settings are a form printed on a sheet of the shell's
@@ -18177,7 +24298,9 @@ struct form_layout {
 	char hand[FORM_ROWS][2][256];
 	int nl[FORM_ROWS], nwarn[FORM_ROWS];
 	char note[FORM_ROWS][FORM_NOTE_MAX][256];
-	double note_y[FORM_ROWS];
+	double note_x[FORM_ROWS], note_y[FORM_ROWS];
+	/* a fan of samples: where it turns, and its plate (x, y, w) */
+	double fan_x[FORM_ROWS], fan_y[FORM_ROWS], plate[FORM_ROWS][3];
 	double foot_y, total;
 };
 
@@ -18191,6 +24314,481 @@ static void form_hand(cairo_t *cr, const char *s, double size)
 {
 	desk_font_select(cr, DESK_FONT_HAND, s, false, false);
 	cairo_set_font_size(cr, size);
+}
+
+/* ---- a fan of samples (DESK_SWATCH_*) ----
+ *
+ * What the desk is made of is chosen as at a joiner's: from a fan of
+ * samples riveted at one end, each a strip of the desk in that wood (or that
+ * stain) with its name stamped in gold along it. The one chosen is taken
+ * out of the fan, a little way along its length, and lies over the rest; the
+ * one under the hand comes out a little; the name of the one chosen is on a
+ * brass plate beside it. As the v0.2 page's fan has them. */
+
+#define FAN_CW 38.0          /* a sample's width */
+#define FAN_CH 122.0         /* and length */
+#define FAN_PIN 13.0         /* its rivet, up from its end */
+#define FAN_LIFT 20.0        /* room left over the fan */
+#define FAN_PART (11.0 * M_PI / 180.0)   /* the fan parted either side of the chosen one */
+#define FAN_RAISE 1.04       /* the chosen one, up off the rest toward the eye */
+#define FAN_PART_HOVER (3.5 * M_PI / 180.0)   /* and of the one under the hand */
+#define FAN_PLATE_H 30.0
+#define FAN_BOX 30.0         /* the box before the plate, ticked */
+#define SIGN_LINE_W 300.0    /* the line an order is signed on */
+
+/* the angle between two samples, n of them */
+static double fan_step(int n)
+{
+	return n > 1 ? fmin(12.5, 63.0 / (n - 1)) * M_PI / 180.0 : 0.0;
+}
+
+static double fan_angle(int n, int k)
+{
+	return (k - (n - 1) * 0.5) * fan_step(n);
+}
+
+static void form_tick(cairo_t *cr, double bx, double by);
+
+/* how far either side of its rivet the fan reaches */
+static double fan_half_width(int n)
+{
+	double a = fan_angle(n, n - 1);
+	a += FAN_PART + FAN_PART_HOVER;
+	return (FAN_CH - FAN_PIN) * FAN_RAISE * sin(a) + FAN_CW * 0.5 * cos(a) + 6.0;
+}
+
+/* How a fan lies: its row's samples, the one under the hand, and the one
+ * chosen before the chosen one and how far they have changed places (t, 1
+ * done). */
+struct fan_state {
+	const struct desk_form_row *r;
+	int n, hover, was;
+	double t;
+};
+
+/* Is sample k in the fan? Not a stain that is not made for the wood
+ * (desk_stain_offered): the fan of colours on ebony is of the three it is
+ * made in, closed up. */
+static bool fan_has(const struct desk_form_row *r, int k)
+{
+	return r->swatch != DESK_SWATCH_STAIN || desk_stain_offered(r->swatch_with, k);
+}
+
+/* the angle sample k lies at, among those in the fan: fewer of them opened
+ * wider, as far as the whole fan would be (but not so far apart that they
+ * are not a fan), so that the one beside the one out of it still shows */
+static double fan_angle_of(const struct fan_state *fs, int k)
+{
+	int at = 0, m = 0;
+	for (int j = 0; j < fs->n; j++) {
+		if (fan_has(fs->r, j)) {
+			at += j < k;
+			m++;
+		}
+	}
+	if (m == fs->n || m < 2) {
+		return fan_angle(m, at);
+	}
+	double step = fmin(fan_step(fs->n) * (fs->n - 1) / (m - 1), 20.0 * M_PI / 180.0);
+	return (at - (m - 1) * 0.5) * step;
+}
+
+static struct fan_state fan_state_of(const struct desk_shell_form *f, int i, int n)
+{
+	bool moving = f->fan_row == i && f->fan_t > 0.0 && f->fan_t < 1.0;
+	return (struct fan_state){ &f->rows[i], n, i == f->hover ? f->hover_opt : -1,
+		moving ? f->fan_was : -1, moving ? f->fan_t : 1.0 };
+}
+
+/* which way sample k is turned for the fan to part at sample c */
+static double fan_side(int c, int k)
+{
+	return c < 0 || k == c ? 0.0 : k < c ? -1.0 : 1.0;
+}
+
+/* How far sample k is turned past where it lies: every sample stays on its
+ * rivet, as on a real fan, and the fan is parted either side of the one
+ * chosen -- closing where the one before it was, opening at the new one --
+ * and a little either side of the one under the hand. */
+static double fan_swing(const struct fan_state *fs, int k)
+{
+	double e = 1.0 - pow(1.0 - clampf(fs->t, 0.0, 1.0), 3.0);
+	return FAN_PART * (fan_side(fs->r->value, k) * e + fan_side(fs->was, k) * (1.0 - e))
+		+ FAN_PART_HOVER * fan_side(fs->hover, k);
+}
+
+/* How far up off the rest sample k is, 0 to 1: the one chosen lifted on its
+ * rivet as it is turned up, the one before it laid down again. */
+static double fan_raise(const struct fan_state *fs, int k)
+{
+	double e = 1.0 - pow(1.0 - clampf(fs->t, 0.0, 1.0), 3.0);
+	return k == fs->r->value ? e : k == fs->was ? 1.0 - e : 0.0;
+}
+
+/* A sample's outline, the rivet at 0, 0 and its length up from there:
+ * its tip's corners rounded a little, its end round. */
+static void fan_chip_path(cairo_t *cr)
+{
+	double hw = FAN_CW * 0.5, top = -(FAN_CH - FAN_PIN), r = 6.0, end = FAN_PIN - hw;
+	cairo_new_path(cr);
+	cairo_move_to(cr, -hw, end);
+	cairo_line_to(cr, -hw, top + r);
+	cairo_arc(cr, -hw + r, top + r, r, M_PI, 1.5 * M_PI);
+	cairo_line_to(cr, hw - r, top);
+	cairo_arc(cr, hw - r, top + r, r, 1.5 * M_PI, 2.0 * M_PI);
+	cairo_line_to(cr, hw, end);
+	cairo_arc(cr, 0.0, end, hw, 0.0, M_PI);
+	cairo_close_path(cr);
+}
+
+/* Is (x, y), from the rivet, on sample k as it lies? */
+static bool fan_chip_at(const struct fan_state *fs, int k, double x, double y)
+{
+	if (!fan_has(fs->r, k)) {
+		return false;
+	}
+	double a = fan_angle_of(fs, k) + fan_swing(fs, k);
+	double sc = 1.0 + (FAN_RAISE - 1.0) * fan_raise(fs, k);
+	double u = (x * cos(a) + y * sin(a)) / sc, v = (-x * sin(a) + y * cos(a)) / sc;
+	double hw = FAN_CW * 0.5, end = FAN_PIN - hw;
+	if (fabs(u) <= hw && v >= -(FAN_CH - FAN_PIN) && v <= end) {
+		return true;
+	}
+	return hypot(u, v - end) <= hw;
+}
+
+/* Its name, stamped in gold down it from the tip: a word in letters turned
+ * to run along it; one in Chinese, Japanese or Korean, a character under
+ * another, upright, as such a word is written down a page. A long one is
+ * stamped smaller, never cut off. */
+static void fan_chip_tag(cairo_t *cr, const char *name)
+{
+	double hw = FAN_CW * 0.5, top = -(FAN_CH - FAN_PIN), room = FAN_CH - 50.0;
+	bool cjk = false;
+	for (const unsigned char *p = (const unsigned char *)name; *p; p++) {
+		cjk = cjk || *p >= 0xe3;
+	}
+	char word[96];
+	size_t len = 0;
+	for (const char *p = name; *p && len + 1 < sizeof word; p++) {
+		word[len++] = cjk ? *p : (char)toupper((unsigned char)*p);
+	}
+	word[len] = '\0';
+	cairo_save(cr);
+	desk_font_select(cr, DESK_FONT_UI, word, true, false);
+	double size = cjk ? 11.0 : 10.0, step = 12.5, space = 1.4, run = 0.0;
+	cairo_set_font_size(cr, size);
+	char ch[8];
+	int count = 0;
+	for (const char *p = word; *p;) {
+		p += cal_letter(p, ch);
+		cairo_text_extents_t e;
+		cairo_text_extents(cr, ch, &e);
+		run += e.x_advance + space;
+		count++;
+	}
+	double fit = cjk ? (count * step > room ? room / (count * step) : 1.0)
+		: (run > room ? room / run : 1.0);
+	if (fit < 1.0) {
+		size *= fmax(fit, 0.6);
+		step *= fit;
+		space *= fit;
+		cairo_set_font_size(cr, size);
+	}
+	for (int pass = 0; pass < 2; pass++) {
+		cairo_save(cr);
+		if (cjk) {
+			double y = top + 8.0 + step;
+			for (const char *p = word; *p;) {
+				p += cal_letter(p, ch);
+				cairo_text_extents_t e;
+				cairo_text_extents(cr, ch, &e);
+				/* the long vowel mark and a dash go down the column, as written so */
+				if (!strcmp(ch, "\xe3\x83\xbc") || !strcmp(ch, "\xef\xbc\x8d") || !strcmp(ch, "-")) {
+					cairo_save(cr);
+					cairo_translate(cr, -hw + 7.0 + size * 0.5 - e.x_advance * 0.0 - 1.0,
+						y - step + (step - e.x_advance) * 0.5);
+					cairo_rotate(cr, M_PI * 0.5);
+					cairo_move_to(cr, 0.0, -size * 0.38 + (pass ? 0.0 : 1.0));
+					cairo_text_path(cr, ch);
+					cairo_restore(cr);
+				} else {
+					cairo_move_to(cr, -hw + 7.0 + (size - e.x_advance) * 0.5, y + (pass ? 0.0 : 1.0));
+					cairo_text_path(cr, ch);
+				}
+				y += step;
+			}
+		} else {
+			cairo_translate(cr, -hw + 7.0, top + 10.0);
+			cairo_rotate(cr, M_PI * 0.5);
+			double x = 0.0;
+			for (const char *p = word; *p;) {
+				p += cal_letter(p, ch);
+				cairo_text_extents_t e;
+				cairo_text_extents(cr, ch, &e);
+				cairo_move_to(cr, x, pass ? 0.0 : -1.0);
+				cairo_text_path(cr, ch);
+				x += e.x_advance + space;
+			}
+		}
+		cairo_restore(cr);
+		if (pass == 0) {
+			cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.62);
+		} else {
+			cairo_set_source_rgba(cr, 0.965, 0.862, 0.612, 0.92);
+		}
+		cairo_fill(cr);
+	}
+	cairo_restore(cr);
+}
+
+/* Sample k of row r, out of the fan as far as it is, over the rest: its
+ * shadow on what is under it, the desk in that wood, the lamp on its
+ * lacquer, the hole it turns on, its name. */
+static void fan_chip(cairo_t *cr, const struct fan_state *fs, int k, double fx, double fy)
+{
+	const struct desk_form_row *r = fs->r;
+	double a = fan_angle_of(fs, k) + fan_swing(fs, k);
+	double up = fan_raise(fs, k), sc = 1.0 + (FAN_RAISE - 1.0) * up;
+	double hw = FAN_CW * 0.5, top = -(FAN_CH - FAN_PIN);
+	/* the shadow: down and to the right of it, the lamp being up to the left
+	 * -- further off, and softer, from the one lifted up off the rest */
+	for (int s = 0; s < 3; s++) {
+		double far = 1.0 + 1.6 * up;
+		cairo_save(cr);
+		cairo_translate(cr, fx + (1.5 + s * 0.8) * far, fy + (3.0 + s * 1.2) * far);
+		cairo_rotate(cr, a);
+		cairo_scale(cr, sc, sc);
+		fan_chip_path(cr);
+		cairo_set_source_rgba(cr, 0.10, 0.06, 0.02, s == 0 ? 0.22 + 0.06 * up : 0.07 + 0.05 * up);
+		if (s == 0) {
+			cairo_fill(cr);
+		} else {
+			cairo_set_line_width(cr, 2.0 + s * 2.0);
+			cairo_stroke(cr);
+		}
+		cairo_restore(cr);
+	}
+	cairo_save(cr);
+	cairo_translate(cr, fx, fy);
+	cairo_rotate(cr, a);
+	cairo_scale(cr, sc, sc);
+	fan_chip_path(cr);
+	cairo_save(cr);
+	cairo_clip(cr);
+	/* the desk itself, as many of the screen's pixels as it covers */
+	double dx = 1.0, dy = 0.0;
+	cairo_user_to_device_distance(cr, &dx, &dy);
+	double ds = hypot(dx, dy);
+	/* in whole pixels to the point, so a sheet that is turning does not ask
+	 * for a new picture of them at every step */
+	ds = ds < 1.5 ? 1.0 : ds < 2.5 ? 2.0 : 3.0;
+	int pw = (int)ceil(FAN_CW * ds), ph = (int)ceil(FAN_CH * ds);
+	int wood = r->swatch == DESK_SWATCH_WOOD ? k : r->swatch_with;
+	int stain = r->swatch == DESK_SWATCH_WOOD ? r->swatch_with : k;
+	cairo_surface_t *pic = desk_wood_sample(wood, stain, pw, ph);
+	cairo_save(cr);
+	cairo_translate(cr, -hw, top);
+	cairo_scale(cr, FAN_CW / pw, FAN_CH / ph);
+	cairo_set_source_surface(cr, pic, 0, 0);
+	cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
+	cairo_paint(cr);
+	cairo_restore(cr);
+	cairo_surface_destroy(pic);
+	/* the lamp on its lacquer, from the left; its end in its own shadow */
+	cairo_pattern_t *g = cairo_pattern_create_linear(-hw, top, hw * 0.9, top + FAN_CW * 0.35);
+	cairo_pattern_add_color_stop_rgba(g, 0.0, 1.0, 0.96, 0.88, 0.26);
+	cairo_pattern_add_color_stop_rgba(g, 0.38, 1.0, 0.96, 0.88, 0.0);
+	cairo_set_source(cr, g);
+	cairo_paint(cr);
+	cairo_pattern_destroy(g);
+	g = cairo_pattern_create_linear(0.0, FAN_PIN, 0.0, FAN_PIN - FAN_CH * 0.3);
+	cairo_pattern_add_color_stop_rgba(g, 0.0, 0.0, 0.0, 0.0, 0.26);
+	cairo_pattern_add_color_stop_rgba(g, 1.0, 0.0, 0.0, 0.0, 0.0);
+	cairo_set_source(cr, g);
+	cairo_paint(cr);
+	cairo_pattern_destroy(g);
+	if (k == r->value) {
+		cairo_set_source_rgba(cr, 1.0, 0.97, 0.90, 0.06);
+		cairo_paint(cr);
+	}
+	cairo_restore(cr);
+	/* its edge: dark all round, lit along its tip */
+	fan_chip_path(cr);
+	cairo_set_line_width(cr, 1.0);
+	cairo_set_source_rgba(cr, 0.06, 0.03, 0.01, 0.55);
+	cairo_stroke(cr);
+	cairo_move_to(cr, -hw + 6.0, top + 1.0);
+	cairo_line_to(cr, hw - 6.0, top + 1.0);
+	cairo_set_source_rgba(cr, 1.0, 0.94, 0.84, 0.35);
+	cairo_stroke(cr);
+	if (up > 0.0) {
+		/* lifted, its edges catch the lamp: lit down its left, in shade down
+		 * its right, as a thing with a thickness to it */
+		cairo_set_line_width(cr, 1.4);
+		cairo_move_to(cr, -hw + 0.9, top + 6.0);
+		cairo_line_to(cr, -hw + 0.9, FAN_PIN - hw);
+		cairo_set_source_rgba(cr, 1.0, 0.94, 0.84, 0.32 * up);
+		cairo_stroke(cr);
+		cairo_move_to(cr, hw - 0.9, top + 6.0);
+		cairo_line_to(cr, hw - 0.9, FAN_PIN - hw);
+		cairo_set_source_rgba(cr, 0.04, 0.02, 0.0, 0.40 * up);
+		cairo_stroke(cr);
+	}
+	/* the hole it turns on */
+	cairo_arc(cr, 0.0, 0.0, 7.0, 0.0, 2.0 * M_PI);
+	cairo_set_source_rgb(cr, 0.07, 0.04, 0.02);
+	cairo_fill(cr);
+	if (r->options[k]) {
+		fan_chip_tag(cr, r->options[k]);
+	}
+	cairo_restore(cr);
+}
+
+/* The rivet the fan turns on: brass, its slot across it. */
+static void fan_rivet(cairo_t *cr, double x, double y)
+{
+	cairo_save(cr);
+	cairo_arc(cr, x + 0.6, y + 2.0, 10.0, 0.0, 2.0 * M_PI);
+	cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.35);
+	cairo_fill(cr);
+	cairo_pattern_t *g = cairo_pattern_create_radial(x - 3.5, y - 3.5, 0.5, x, y, 10.5);
+	cairo_pattern_add_color_stop_rgb(g, 0.0, 1.0, 0.957, 0.81);
+	cairo_pattern_add_color_stop_rgb(g, 0.55, 0.80, 0.63, 0.29);
+	cairo_pattern_add_color_stop_rgb(g, 1.0, 0.45, 0.32, 0.11);
+	cairo_arc(cr, x, y, 10.0, 0.0, 2.0 * M_PI);
+	cairo_set_source(cr, g);
+	cairo_fill_preserve(cr);
+	cairo_pattern_destroy(g);
+	cairo_set_line_width(cr, 0.8);
+	cairo_set_source_rgba(cr, 0.30, 0.20, 0.05, 0.7);
+	cairo_stroke(cr);
+	double a = 32.0 * M_PI / 180.0;
+	cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+	cairo_set_line_width(cr, 2.2);
+	cairo_move_to(cr, x - 6.5 * cos(a), y - 6.5 * sin(a));
+	cairo_line_to(cr, x + 6.5 * cos(a), y + 6.5 * sin(a));
+	cairo_set_source_rgba(cr, 0.23, 0.14, 0.03, 0.85);
+	cairo_stroke(cr);
+	cairo_move_to(cr, x - 6.5 * cos(a), y - 6.5 * sin(a) + 1.2);
+	cairo_line_to(cr, x + 6.5 * cos(a), y + 6.5 * sin(a) + 1.2);
+	cairo_set_line_width(cr, 0.8);
+	cairo_set_source_rgba(cr, 1.0, 0.95, 0.75, 0.45);
+	cairo_stroke(cr);
+	cairo_restore(cr);
+}
+
+/* A brass plate with a name engraved in it, screwed down at its ends. */
+static void fan_plate(cairo_t *cr, double x, double y, double w, const char *name)
+{
+	double h = FAN_PLATE_H;
+	cairo_save(cr);
+	desk_rounded_path(cr, x + 1.0, y + 2.5, w, h, 4.0);
+	cairo_set_source_rgba(cr, 0.12, 0.07, 0.02, 0.30);
+	cairo_fill(cr);
+	cairo_pattern_t *g = cairo_pattern_create_linear(0.0, y, 0.0, y + h);
+	cairo_pattern_add_color_stop_rgb(g, 0.0, 0.99, 0.90, 0.62);
+	cairo_pattern_add_color_stop_rgb(g, 0.45, 0.86, 0.69, 0.33);
+	cairo_pattern_add_color_stop_rgb(g, 1.0, 0.63, 0.47, 0.19);
+	desk_rounded_path(cr, x, y, w, h, 4.0);
+	cairo_set_source(cr, g);
+	cairo_fill_preserve(cr);
+	cairo_pattern_destroy(g);
+	cairo_set_line_width(cr, 1.0);
+	cairo_set_source_rgba(cr, 0.33, 0.22, 0.06, 0.75);
+	cairo_stroke(cr);
+	cairo_move_to(cr, x + 4.0, y + 1.5);
+	cairo_line_to(cr, x + w - 4.0, y + 1.5);
+	cairo_set_source_rgba(cr, 1.0, 0.98, 0.86, 0.7);
+	cairo_stroke(cr);
+	/* the screws */
+	for (int e = 0; e < 2; e++) {
+		double sx = e ? x + w - 10.0 : x + 10.0, sy = y + h * 0.5;
+		cairo_arc(cr, sx, sy, 3.6, 0.0, 2.0 * M_PI);
+		cairo_set_source_rgb(cr, 0.55, 0.41, 0.16);
+		cairo_fill(cr);
+		cairo_arc(cr, sx, sy, 3.6, 0.0, 2.0 * M_PI);
+		cairo_set_line_width(cr, 0.7);
+		cairo_set_source_rgba(cr, 0.28, 0.18, 0.04, 0.8);
+		cairo_stroke(cr);
+		cairo_move_to(cr, sx - 2.6, sy + (e ? 0.9 : -0.9));
+		cairo_line_to(cr, sx + 2.6, sy + (e ? -0.9 : 0.9));
+		cairo_set_line_width(cr, 1.0);
+		cairo_stroke(cr);
+	}
+	/* the name, cut into it: dark, and the cut's lower lip catching the light */
+	bool latin = true;
+	for (const unsigned char *p = (const unsigned char *)name; *p; p++) {
+		latin = latin && *p < 0xe3;
+	}
+	char word[96];
+	size_t k = 0;
+	for (const char *p = name; *p && k + 1 < sizeof word; p++) {
+		word[k++] = latin ? (char)toupper((unsigned char)*p) : *p;
+	}
+	word[k] = '\0';
+	desk_font_select(cr, DESK_FONT_UI, word, true, false);
+	cairo_set_font_size(cr, latin ? 12.5 : 13.5);
+	double space = latin ? 2.4 : 3.0, tw = 0.0;
+	char ch[8];
+	for (const char *p = word; *p;) {
+		p += cal_letter(p, ch);
+		cairo_text_extents_t e;
+		cairo_text_extents(cr, ch, &e);
+		tw += e.x_advance + space;
+	}
+	tw -= space;
+	double scale = tw > w - 34.0 ? (w - 34.0) / tw : 1.0;
+	for (int pass = 0; pass < 2; pass++) {
+		cairo_save(cr);
+		cairo_translate(cr, x + w * 0.5 - tw * scale * 0.5, y + h * 0.5 + 5.0 + (pass ? 0.0 : 1.0));
+		cairo_scale(cr, scale, 1.0);
+		double cx = 0.0;
+		for (const char *p = word; *p;) {
+			p += cal_letter(p, ch);
+			cairo_text_extents_t e;
+			cairo_text_extents(cr, ch, &e);
+			cairo_move_to(cr, cx, 0.0);
+			cairo_text_path(cr, ch);
+			cx += e.x_advance + space;
+		}
+		cairo_restore(cr);
+		if (pass == 0) {
+			cairo_set_source_rgba(cr, 1.0, 0.95, 0.74, 0.65);
+		} else {
+			cairo_set_source_rgba(cr, 0.24, 0.15, 0.03, 0.92);
+		}
+		cairo_fill(cr);
+	}
+	cairo_restore(cr);
+}
+
+/* A fan, its rivet at fx, fy, and the plate. */
+static void fan_draw(cairo_t *cr, const struct fan_state *fs, double fx, double fy,
+	const double plate[3])
+{
+	const struct desk_form_row *r = fs->r;
+	for (int k = 0; k < fs->n; k++) {
+		if (k != r->value && fan_has(r, k)) {
+			fan_chip(cr, fs, k, fx, fy);
+		}
+	}
+	if (r->value >= 0 && r->value < fs->n && fan_has(r, r->value)) {
+		fan_chip(cr, fs, r->value, fx, fy);
+	}
+	fan_rivet(cr, fx, fy);
+	if (r->value >= 0 && r->value < fs->n) {
+		/* ticked on the order, in the box printed before its plate */
+		double bx = plate[0] - FAN_BOX, by = plate[1] + (FAN_PLATE_H - 17.0) * 0.5, bs = 17.0;
+		cairo_save(cr);
+		cairo_set_line_width(cr, 1.3);
+		cairo_set_source_rgba(cr, 0.27, 0.21, 0.15, 0.85);
+		cairo_rectangle(cr, bx + 0.5, by + 0.5, bs, bs);
+		cairo_stroke(cr);
+		cairo_restore(cr);
+		form_tick(cr, bx, by);
+		fan_plate(cr, plate[0], plate[1], plate[2], r->options[r->value]);
+	}
 }
 
 /* An action's word, and how it is written: "Open ›" firmly, or what is
@@ -18244,7 +24842,53 @@ static void form_layout(cairo_t *cr, double w, const struct desk_shell_form *f,
 		/* the label's last line, and the note's first */
 		double below = y + 23.0 + (L->nlab[i] > 1 ? L->nlab[i] - 1 : 0) * FORM_LABEL_LH;
 		double next = below + 19.0;
-		if ((r->kind == DESK_FORM_CHOICE || r->kind == DESK_FORM_DATE) && r->options) {
+		L->note_x[i] = tx;
+		if (r->kind == DESK_FORM_CHOICE && r->swatch && r->options) {
+			/* the fan under the label; its plate and the note beside it, or
+			 * under it if the sheet is too narrow for that */
+			int k = 0;
+			while (k < DESK_FORM_OPTS && r->options[k]) {
+				k++;
+			}
+			L->nopt[i] = k;
+			double half = fan_half_width(k);
+			L->fan_x[i] = tx + half;
+			L->fan_y[i] = below + 8.0 + FAN_CH - FAN_PIN + FAN_LIFT;
+			double bottom = L->fan_y[i] + FAN_PIN + 6.0;
+			double px = tx + 2.0 * half + 24.0;
+			if (right - px >= 210.0) {
+				/* the box it is ticked in, and the plate after it */
+				L->plate[i][0] = px + FAN_BOX;
+				L->plate[i][1] = below + 34.0;
+				L->plate[i][2] = fmin(230.0, right - px - FAN_BOX);
+				L->note_x[i] = px;
+				next = L->plate[i][1] + FAN_PLATE_H + 26.0;
+				form_wrap_note(cr, r, right - px, L, i);
+				L->note_y[i] = next;
+				double note_end = next + (L->nl[i] > 0 ? (L->nl[i] - 1) * FORM_NOTE_LH + 5.0 : -12.0);
+				L->h[i] = fmax(bottom, note_end) - y + 14.0;
+			} else {
+				L->plate[i][2] = fmin(230.0, right - tx - FAN_BOX);
+				L->plate[i][0] = L->fan_x[i] - L->plate[i][2] * 0.5 < tx + FAN_BOX ? tx + FAN_BOX
+					: L->fan_x[i] - L->plate[i][2] * 0.5;
+				L->plate[i][1] = bottom + 10.0;
+				next = L->plate[i][1] + FAN_PLATE_H + 26.0;
+				form_wrap_note(cr, r, right - tx, L, i);
+				L->note_y[i] = next;
+				L->h[i] = next - y + (L->nl[i] > 0 ? (L->nl[i] - 1) * FORM_NOTE_LH + 5.0 : -12.0)
+					+ 14.0;
+			}
+			y += L->h[i];
+			continue;
+		}
+		if (r->kind == DESK_FORM_SIGN) {
+			/* the line to sign on, under the label, and what it says under it */
+			L->opt_x[i][0] = tx;
+			L->opt_w[i][0] = fmin(SIGN_LINE_W, right - tx);
+			L->opt_y[i][0] = below + 38.0;
+			L->nopt[i] = 1;
+			next = below + 38.0 + 32.0;
+		} else if ((r->kind == DESK_FORM_CHOICE || r->kind == DESK_FORM_DATE) && r->options) {
 			form_font(cr, 14.0, false);
 			double x = tx;
 			int line = 0;
@@ -18406,6 +25050,75 @@ static void form_underline(cairo_t *cr, double x, double y, double w)
 	cairo_restore(cr);
 }
 
+/* An order's line to sign on, w long from x on the line at y: printed, with
+ * what it is for under it; "Sign here ›" pencilled at its end while there is
+ * something ticked to sign for; signed, the name written along it in pencil,
+ * as far as t has written it -- a light, quick hand, sloping a little, and a
+ * stroke back under it to finish. */
+static void form_sign(cairo_t *cr, const struct desk_form_row *r, double x, double y, double w,
+	double t, bool hover)
+{
+	cairo_save(cr);
+	cairo_set_line_width(cr, 1.0);
+	cairo_set_source_rgba(cr, 0.30, 0.24, 0.17, 0.55);
+	cairo_move_to(cr, x, y + 0.5);
+	cairo_line_to(cr, x + w, y + 0.5);
+	cairo_stroke(cr);
+	cairo_restore(cr);
+	form_caps(cr, TR("SIGNATURE"), x, y + 15.0, 8.5);
+	if (r->value == 1 && r->options && r->options[1]) {
+		cairo_save(cr);
+		form_hand(cr, r->options[1], 17.0);
+		cairo_text_extents_t e;
+		cairo_text_extents(cr, r->options[1], &e);
+		cairo_set_source_rgba(cr, 0.21, 0.21, 0.23, 0.88);
+		cairo_move_to(cr, x + w - e.x_advance, y - 7.0);
+		cairo_show_text(cr, r->options[1]);
+		cairo_restore(cr);
+		if (hover) {
+			form_underline(cr, x + w - e.x_advance, y - 2.0, e.x_advance);
+		}
+	} else if (r->value == 2 && r->options && r->options[0]) {
+		const char *name = r->options[0];
+		double e = clampf(t / 0.8, 0.0, 1.0), f = clampf((t - 0.72) / 0.28, 0.0, 1.0);
+		e = 1.0 - pow(1.0 - e, 1.6);
+		cairo_save(cr);
+		form_hand(cr, name, 30.0);
+		cairo_text_extents_t te;
+		cairo_text_extents(cr, name, &te);
+		double sx = x + 14.0, tw = te.x_advance;
+		cairo_save(cr);
+		cairo_rectangle(cr, sx - 6.0, y - 60.0, (tw + 12.0) * e, 80.0);
+		cairo_clip(cr);
+		cairo_translate(cr, sx, y - 6.0);
+		cairo_rotate(cr, -0.07);
+		cairo_transform(cr, &(cairo_matrix_t){ 1.0, 0.0, -0.18, 1.0, 0.0, 0.0 });
+		cairo_set_source_rgba(cr, 0.20, 0.20, 0.23, 0.86);
+		cairo_move_to(cr, 0.0, 0.0);
+		cairo_show_text(cr, name);
+		cairo_restore(cr);
+		if (f > 0.0) {
+			/* and back under it */
+			cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+			cairo_set_line_width(cr, 1.6);
+			cairo_set_source_rgba(cr, 0.20, 0.20, 0.23, 0.80);
+			double x0 = sx + tw + 4.0, y0 = y - 12.0, x1 = sx - 2.0, y1 = y + 1.0;
+			const int n = 24;
+			for (int k = 0; k <= (int)(n * f); k++) {
+				double u = (double)k / n;
+				double px = x0 + (x1 - x0) * u, py = y0 + (y1 - y0) * u + sin(u * M_PI) * 7.0;
+				if (k == 0) {
+					cairo_move_to(cr, px, py);
+				} else {
+					cairo_line_to(cr, px, py);
+				}
+			}
+			cairo_stroke(cr);
+		}
+		cairo_restore(cr);
+	}
+}
+
 /* A note's lines, from its first baseline down, at x: what it warns of in
  * the red the desk marks things in, the rest in pencil grey. */
 static void form_note(cairo_t *cr, const struct form_layout *L, int i, double x, double ink)
@@ -18506,7 +25219,13 @@ void desk_draw_shell_form(cairo_t *cr, double w, double h, const struct desk_she
 			print_word(cr, L->label[i][k], tx, y + 23.0 + k * FORM_LABEL_LH, 15.0,
 				0.18, 0.14, 0.10, 0.94 * ink);
 		}
-		if ((r->kind == DESK_FORM_CHOICE || r->kind == DESK_FORM_DATE) && r->options) {
+		if (r->kind == DESK_FORM_CHOICE && r->swatch && r->options) {
+			struct fan_state fs = fan_state_of(f, i, L->nopt[i]);
+			fan_draw(cr, &fs, L->fan_x[i], L->fan_y[i], L->plate[i]);
+		} else if (r->kind == DESK_FORM_SIGN) {
+			form_sign(cr, r, L->opt_x[i][0], L->opt_y[i][0], L->opt_w[i][0],
+				f->sign_t > 0.0 && f->sign_t < 1.0 ? f->sign_t : 1.0, i == f->hover);
+		} else if ((r->kind == DESK_FORM_CHOICE || r->kind == DESK_FORM_DATE) && r->options) {
 			bool date = r->kind == DESK_FORM_DATE;
 			for (int k = 0; k < L->nopt[i]; k++) {
 				double ox = L->opt_x[i][k], ow = L->opt_w[i][k], oy = L->opt_y[i][k];
@@ -18544,7 +25263,7 @@ void desk_draw_shell_form(cairo_t *cr, double w, double h, const struct desk_she
 				form_underline(cr, ox, oy + 5.0, L->opt_w[i][0]);
 			}
 		}
-		form_note(cr, L, i, tx, ink);
+		form_note(cr, L, i, L->note_x[i], ink);
 	}
 	/* where it is kept, at the foot */
 	if (f->kept_in && *f->kept_in) {
@@ -18600,6 +25319,30 @@ int desk_shell_form_hit(double w, double h, const struct desk_shell_form *f, dou
 			break;
 		}
 		hit = i;
+		if (r->kind == DESK_FORM_CHOICE && r->swatch) {
+			/* a sample: the one out of the fan first, it lying over the rest,
+			 * then the others from the top of the pile down */
+			struct fan_state fs = fan_state_of(f, i, L->nopt[i]);
+			double dx = x - L->fan_x[i], dy = fy - L->fan_y[i];
+			if (r->value >= 0 && r->value < fs.n && fan_chip_at(&fs, r->value, dx, dy)) {
+				*opt = r->value;
+			}
+			for (int k = fs.n - 1; k >= 0 && *opt < 0; k--) {
+				if (k != r->value && fan_chip_at(&fs, k, dx, dy)) {
+					*opt = k;
+				}
+			}
+			continue;
+		}
+		if (r->kind == DESK_FORM_SIGN) {
+			/* the line, while there is something to sign for */
+			double ly = L->opt_y[i][0];
+			if (r->value == 1 && fy >= ly - 36.0 && fy <= ly + 14.0 && x >= L->opt_x[i][0] - 10.0
+				&& x <= L->opt_x[i][0] + L->opt_w[i][0] + 10.0) {
+				*opt = 0;
+			}
+			continue;
+		}
 		/* a choice's word, or an action's "Open ›" while there is something
 		 * to open */
 		bool words = r->kind == DESK_FORM_CHOICE || r->kind == DESK_FORM_DATE
@@ -18614,6 +25357,365 @@ int desk_shell_form_hit(double w, double h, const struct desk_shell_form *f, dou
 	}
 	free(L);
 	return hit;
+}
+
+/* ---- a face pasted onto what it is printed on ----
+ *
+ * A face laid on as one flat sheet is right at one height only, and the console's own view
+ * looks down at the set from well off to one side of most of it: the knob's pointer, laid at
+ * the tower's height, came out beside the bakelite it is cut into, and the words round a
+ * button's ring off the ring (2026-11-11, the owner: 描画ズレ, and then 3Dオブジェクトに貼り
+ * 付け式のほうが良いかも). So the faces of what stands off the panel are pasted on: each such
+ * control is a few decks -- a disc or a block with a flat or a domed top, standing on the next
+ * one down -- and each pixel of it is the camera's ray through that pixel, met with the decks
+ * from the top down. Where it meets a deck's top, it shows the face at that point across the
+ * panel; where it meets a deck's side, nothing (the trace has the side); past them all, the
+ * face at the panel's own height. Which pixel of the face each pixel of the screen shows is
+ * worked out once and kept (cc_paste_map); a face that changes is then only looked up. */
+struct cc_deck {
+	double u, s;          /* its middle, across and up the face */
+	double r;             /* a disc this wide, or (0) a block hu by hs */
+	double hu, hs;
+	double top, base;     /* its top, off the face, and where its sides stop */
+	double dome;          /* the top is cut from a sphere this big, its crown at top (0 flat) */
+	double slot_u, slot_s;  /* a slot through it, so wide and so high (0 none) */
+};
+
+#define CC_DECKS 5
+
+/* What a control is, as decks from the top down, and the height of what it stands on (0 decks:
+ * it is laid as one sheet, the way the instruments under glass are). */
+static int cc_decks(int i, struct cc_deck d[CC_DECKS], double *ground)
+{
+	const double SK = RM_CC_SKIN;
+	double u = CC[i].u, s = CC[i].s;
+	if (cc_btn_mid(i)) {
+		/* cc_button: the cap's dome, with the etching, and the ring round it, with the word.
+		 * Not the skirt the cap sits in, between them: the word runs in over it, and pasted
+		 * onto the skirt as well the letters broke in two at its edge. */
+		double b = CC[i].on == CC_ON_LID ? CC_LID_N1 : SK;
+		bool big = CC[i].on == CC_ON_FACE;
+		double ring = big ? CC_PW_RING : CC_LB_RING, cap = big ? CC_PW_R : CC_LB_R;
+		d[0] = (struct cc_deck){ u, s, cap, 0, 0, b + 0.20, b + 0.15, big ? CC_PW_DOME
+			: CC_LB_DOME, 0, 0 };
+		d[1] = (struct cc_deck){ u, s, ring, 0, 0, b + 0.09, b, 0, 0, 0 };
+		/* (the four under the lid stand on the plate the set is mounted on) */
+		*ground = CC[i].on == CC_ON_LID ? CC_LID_N1 : CC[i].on == CC_ON_UNDER ? SK + 0.07 : SK;
+		return 2;
+	}
+	switch (i) {
+	case CC_VOL:
+		/* the bakelite on the brass skirt */
+		d[0] = (struct cc_deck){ u, s, 0.505, 0, 0, SK + 0.31, SK + 0.07, 0, 0, 0 };
+		d[1] = (struct cc_deck){ u, s, 0.88, 0, 0, SK + 0.07, SK, 0, 0, 0 };
+		*ground = SK;
+		return 2;
+	case CC_BRIGHT:
+	case CC_SCREEN:
+		/* the plate, with the slot the handle runs in */
+		d[0] = (struct cc_deck){ u, s, 0, CC[i].hu * 0.95, 0.30, SK + 0.08, SK, 0,
+			CC[i].hu * 0.82, 0.11 };
+		*ground = SK;
+		return 1;
+	case CC_WIFI:
+	case CC_BT: {
+		/* the pilot lamp's lens and its brass cup, the lever's boss, and the sub-panel */
+		double ls = s + CC[i].hs * 0.86;
+		d[0] = (struct cc_deck){ u, ls, 0.155, 0, 0, SK + 0.295, SK + 0.10, 0.155, 0, 0 };
+		d[1] = (struct cc_deck){ u, ls, 0.21, 0, 0, SK + 0.10, SK + 0.06, 0, 0, 0 };
+		d[2] = (struct cc_deck){ u, s, 0.14, 0, 0, SK + 0.17, SK + 0.06, 0, 0, 0 };
+		d[3] = (struct cc_deck){ u, s, 0, CC[i].hu * 0.82, CC[i].hs * 0.82, SK + 0.06, SK, 0,
+			0, 0 };
+		*ground = SK;
+		return 4;
+	}
+	case CC_PW_KEY:
+		/* the lock's barrel; what is scored round it is on the panel */
+		d[0] = (struct cc_deck){ CC_PW_LOCK_U, CC_PW_KEY_S, 0.235, 0, 0, SK + 0.11, SK, 0, 0,
+			0 };
+		*ground = SK;
+		return 1;
+	default:
+		return 0;
+	}
+}
+
+/* is (u, s) inside the deck's footprint (and, for one with a slot, not in the slot) */
+static bool cc_deck_in(const struct cc_deck *k, double u, double s, bool *slot)
+{
+	double du = u - k->u, ds = s - k->s;
+	*slot = k->slot_u > 0.0 && fabs(du) < k->slot_u && fabs(ds) < k->slot_s;
+	return k->r > 0.0 ? du * du + ds * ds <= k->r * k->r
+		: fabs(du) <= k->hu && fabs(ds) <= k->hs;
+}
+
+/* The ray o + t dir, in the face's own coordinates (x across, y out, z up), met with the decks:
+ * true and where it lands, across and up, or false for a side, or nothing. */
+static bool cc_decks_ray(const struct cc_deck *d, int n, double ground, vec3 o, vec3 dir,
+	double *pu, double *ps)
+{
+	if (dir.y > -1e-6) {
+		return false;
+	}
+	bool slot;
+	for (int k = 0; k < n; k++) {
+		if (d[k].dome > 0.0) {
+			/* the sphere its top is cut from */
+			vec3 c = v3(d[k].u, d[k].top - d[k].dome, d[k].s);
+			vec3 oc = vsub(o, c);
+			double b = vdot(oc, dir), cc = vdot(oc, oc) - d[k].dome * d[k].dome;
+			double disc = b * b - cc * vdot(dir, dir);
+			if (disc >= 0.0) {
+				double t = (-b - sqrt(disc)) / vdot(dir, dir);
+				vec3 p = vadd(o, vmul(dir, t));
+				if (t > 0.0 && p.y >= d[k].base && cc_deck_in(&d[k], p.x, p.z, &slot)) {
+					*pu = p.x;
+					*ps = p.z;
+					return true;
+				}
+			}
+			/* (no sides: below its rim the next deck down is the top) */
+			continue;
+		}
+		double t = (d[k].top - o.y) / dir.y;
+		double u = o.x + dir.x * t, s = o.z + dir.z * t;
+		bool in = cc_deck_in(&d[k], u, s, &slot);
+		if (in && !slot) {
+			*pu = u;
+			*ps = s;
+			return true;
+		}
+		t = (d[k].base - o.y) / dir.y;
+		double bu = o.x + dir.x * t, bs = o.z + dir.z * t;
+		bool bslot;
+		if (in) {
+			/* down the slot: its floor is the ground, unless the ray runs into its wall */
+			if (!cc_deck_in(&d[k], bu, bs, &bslot) || !bslot) {
+				return false;
+			}
+			continue;
+		}
+		if (cc_deck_in(&d[k], bu, bs, &bslot) && !bslot) {
+			return false;   /* the side */
+		}
+	}
+	double t = (ground - o.y) / dir.y;
+	*pu = o.x + dir.x * t;
+	*ps = o.z + dir.z * t;
+	return true;
+}
+
+/* The ray through a point of the screen (where the sheet is laid at ox, oy, sw by sh), in a
+ * face's own coordinates. */
+static void cc_face_ray(const struct room_cam *cam, const struct cc_face *f, double aspect,
+	double ox, double oy, double sw, double sh, double x, double y, vec3 *o, vec3 *dir)
+{
+	vec3 ro, rd;
+	room_ray(cam, (x - ox) / sw, (y - oy) / sh, &ro, &rd);
+	*o = cc_to_face(f, vsub(ro, v3(0.0, 0.0, cc_dz(1.0, aspect))));
+	*dir = v3(vdot(rd, f->ax), vdot(rd, f->an), vdot(rd, f->as));
+}
+
+/* Where on the screen the corners of a pasted face can land: its face, at the ground and at
+ * the top of its tallest deck. */
+static bool cc_paste_bounds(const struct room_cam *cam, double aspect, double ox, double oy,
+	double sw, double sh, int i, double *x0, double *y0, double *x1, double *y1)
+{
+	struct cc_deck d[CC_DECKS];
+	double ground = 0.0;
+	int n = cc_decks(i, d, &ground);
+	if (n == 0) {
+		return false;
+	}
+	double top = ground;
+	for (int k = 0; k < n; k++) {
+		top = fmax(top, d[k].top);
+	}
+	struct cc_face panel, tower;
+	cc_faces(&panel, &tower);
+	const struct cc_face *f = CC[i].tower ? &tower : &panel;
+	*x0 = *y0 = 1e9;
+	*x1 = *y1 = -1e9;
+	for (int k = 0; k < 8; k++) {
+		vec3 p = cc_world(f, CC[i].u + ((k & 1) ? CC[i].fu : -CC[i].fu), (k & 4) ? top : ground,
+			CC[i].s + ((k & 2) ? CC[i].fs : -CC[i].fs), 1.0, aspect);
+		double u, v;
+		if (!room_project(cam, p, &u, &v)) {
+			return false;
+		}
+		*x0 = fmin(*x0, ox + u * sw);
+		*y0 = fmin(*y0, oy + v * sh);
+		*x1 = fmax(*x1, ox + u * sw);
+		*y1 = fmax(*y1, oy + v * sh);
+	}
+	return true;
+}
+
+/* Which pixel of the face (fw by fh) each pixel of the screen in a box shows: two floats a
+ * pixel, NAN for none. Kept, two to a control (the set as it is shown, and the lid's own
+ * picture as it swings), for as long as nothing they were worked out from changes. */
+struct cc_paste_map {
+	int i, x0, y0, w, h;
+	double ox, oy, sw, sh, aspect, fw, fh;
+	vec3 eye, ww;
+	float *at;
+};
+
+static struct cc_paste_map g_cc_paste[CC_COUNT][2];
+static int g_cc_paste_next[CC_COUNT];
+static pthread_mutex_t g_cc_paste_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static const struct cc_paste_map *cc_paste_map(const struct room_cam *cam, double aspect,
+	double ox, double oy, double sw, double sh, int i, double fw, double fh)
+{
+	for (int e = 0; e < 2; e++) {
+		struct cc_paste_map *m = &g_cc_paste[i][e];
+		if (m->at && m->ox == ox && m->oy == oy && m->sw == sw && m->sh == sh
+			&& m->aspect == aspect && m->fw == fw && m->fh == fh
+			&& m->eye.x == cam->eye.x && m->eye.y == cam->eye.y && m->eye.z == cam->eye.z
+			&& m->ww.x == cam->ww.x && m->ww.y == cam->ww.y && m->ww.z == cam->ww.z) {
+			return m;
+		}
+	}
+	double bx0, by0, bx1, by1;
+	if (!cc_paste_bounds(cam, aspect, ox, oy, sw, sh, i, &bx0, &by0, &bx1, &by1)) {
+		return NULL;
+	}
+	int x0 = (int)floor(bx0) - 1, y0 = (int)floor(by0) - 1;
+	int w = (int)ceil(bx1) + 1 - x0, h = (int)ceil(by1) + 1 - y0;
+	if (w <= 0 || h <= 0 || (size_t)w * h > 4096u * 4096u) {
+		return NULL;
+	}
+	float *at = malloc((size_t)w * h * 2 * sizeof(float));
+	if (!at) {
+		return NULL;
+	}
+	struct cc_deck d[CC_DECKS];
+	double ground = 0.0;
+	int n = cc_decks(i, d, &ground);
+	struct cc_face panel, tower;
+	cc_faces(&panel, &tower);
+	const struct cc_face *f = CC[i].tower ? &tower : &panel;
+	double sx = fw / (2.0 * CC[i].fu), sy = fh / (2.0 * CC[i].fs);
+	double u0 = CC[i].u - CC[i].fu, s1 = CC[i].s + CC[i].fs;
+	/* The ray's direction, left unscaled, goes linearly with the pixel (room_ray before it
+	 * normalizes), so it is stepped across the box rather than worked out a pixel at a time:
+	 * the first opening of the set works out every face's map at once. */
+	vec3 o = cc_to_face(f, vsub(cam->eye, v3(0.0, 0.0, cc_dz(1.0, aspect))));
+	vec3 r0 = vadd(cam->ww, vadd(vmul(cam->uu, ((x0 + 0.5 - ox) / sw - 0.5) * cam->fov_x),
+		vmul(cam->vv, (0.5 - (y0 + 0.5 - oy) / sh) * cam->fov_y)));
+	vec3 rx = vmul(cam->uu, cam->fov_x / sw), ry = vmul(cam->vv, -cam->fov_y / sh);
+	vec3 d0 = v3(vdot(r0, f->ax), vdot(r0, f->an), vdot(r0, f->as));
+	vec3 dx = v3(vdot(rx, f->ax), vdot(rx, f->an), vdot(rx, f->as));
+	vec3 dy = v3(vdot(ry, f->ax), vdot(ry, f->an), vdot(ry, f->as));
+	for (int y = 0; y < h; y++) {
+		for (int x = 0; x < w; x++) {
+			float *a = at + ((size_t)y * w + x) * 2;
+			vec3 dir = vadd(d0, vadd(vmul(dx, x), vmul(dy, y)));
+			double pu, ps;
+			if (cc_decks_ray(d, n, ground, o, dir, &pu, &ps)) {
+				/* (the face's pixel centres are at half-pixels) */
+				a[0] = (float)((pu - u0) * sx - 0.5);
+				a[1] = (float)((s1 - ps) * sy - 0.5);
+				if (a[0] < -1.0f || a[1] < -1.0f || a[0] > fw || a[1] > fh) {
+					a[0] = a[1] = NAN;
+				}
+			} else {
+				a[0] = a[1] = NAN;
+			}
+		}
+	}
+	int e = g_cc_paste_next[i];
+	g_cc_paste_next[i] = (e + 1) % 2;
+	struct cc_paste_map *m = &g_cc_paste[i][e];
+	free(m->at);
+	*m = (struct cc_paste_map){ i, x0, y0, w, h, ox, oy, sw, sh, aspect, fw, fh, cam->eye,
+		cam->ww, at };
+	return m;
+}
+
+/* the face's premultiplied pixel at (x, y), between its pixels, and nothing past its edge */
+static inline void cc_paste_sample(const uint32_t *px, int stride, int fw, int fh, float x,
+	float y, float out[4])
+{
+	int ix = (int)floorf(x), iy = (int)floorf(y);
+	float ax = x - ix, ay = y - iy;
+	out[0] = out[1] = out[2] = out[3] = 0.0f;
+	for (int k = 0; k < 4; k++) {
+		int xx = ix + (k & 1), yy = iy + (k >> 1);
+		if (xx < 0 || yy < 0 || xx >= fw || yy >= fh) {
+			continue;
+		}
+		float wgt = ((k & 1) ? ax : 1.0f - ax) * ((k >> 1) ? ay : 1.0f - ay);
+		uint32_t p = px[(size_t)yy * stride + xx];
+		out[0] += wgt * (float)(p >> 24);
+		out[1] += wgt * (float)((p >> 16) & 0xff);
+		out[2] += wgt * (float)((p >> 8) & 0xff);
+		out[3] += wgt * (float)(p & 0xff);
+	}
+}
+
+/* Paste a face (a cairo image fw by fh) onto control i's decks, into cr in the screen's
+ * pixels; false if it cannot be (and then it is laid flat, as before). */
+static bool cc_paste(cairo_t *cr, const struct room_cam *cam, double aspect, double ox,
+	double oy, double sw, double sh, int i, cairo_surface_t *face, double alpha)
+{
+	int fw = cairo_image_surface_get_width(face), fh = cairo_image_surface_get_height(face);
+	pthread_mutex_lock(&g_cc_paste_lock);
+	const struct cc_paste_map *m = cc_paste_map(cam, aspect, ox, oy, sw, sh, i, fw, fh);
+	if (!m) {
+		pthread_mutex_unlock(&g_cc_paste_lock);
+		return false;
+	}
+	cairo_surface_t *img = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, m->w, m->h);
+	if (cairo_surface_status(img) != CAIRO_STATUS_SUCCESS) {
+		pthread_mutex_unlock(&g_cc_paste_lock);
+		cairo_surface_destroy(img);
+		return false;
+	}
+	cairo_surface_flush(img);
+	const uint32_t *src = (const uint32_t *)cairo_image_surface_get_data(face);
+	int sstride = cairo_image_surface_get_stride(face) / 4;
+	uint32_t *dst = (uint32_t *)cairo_image_surface_get_data(img);
+	int dstride = cairo_image_surface_get_stride(img) / 4;
+	for (int y = 0; y < m->h; y++) {
+		const float *a = m->at + (size_t)y * m->w * 2;
+		uint32_t *row = dst + (size_t)y * dstride;
+		for (int x = 0; x < m->w; x++, a += 2) {
+			if (isnan(a[0])) {
+				continue;
+			}
+			float c[4];
+			cc_paste_sample(src, sstride, fw, fh, a[0], a[1], c);
+			row[x] = (uint32_t)(c[0] + 0.5f) << 24 | (uint32_t)(c[1] + 0.5f) << 16
+				| (uint32_t)(c[2] + 0.5f) << 8 | (uint32_t)(c[3] + 0.5f);
+		}
+	}
+	int x0 = m->x0, y0 = m->y0;
+	pthread_mutex_unlock(&g_cc_paste_lock);
+	cairo_surface_mark_dirty(img);
+	cairo_set_source_surface(cr, img, x0, y0);
+	cairo_paint_with_alpha(cr, alpha);
+	cairo_surface_destroy(img);
+	return true;
+}
+
+/* A point of the screen on a control's face, at a height off it, in the face's pixels. */
+static bool cc_face_point(const struct room_cam *cam, double aspect, double ox, double oy,
+	double sw, double sh, int i, double fw, double fh, double n, double x, double y,
+	double *fx, double *fy)
+{
+	struct cc_face panel, tower;
+	cc_faces(&panel, &tower);
+	vec3 o, dir;
+	cc_face_ray(cam, CC[i].tower ? &tower : &panel, aspect, ox, oy, sw, sh, x, y, &o, &dir);
+	if (dir.y > -1e-6) {
+		return false;
+	}
+	double t = (n - o.y) / dir.y;
+	*fx = (o.x + dir.x * t - (CC[i].u - CC[i].fu)) * fw / (2.0 * CC[i].fu);
+	*fy = (CC[i].s + CC[i].fs - (o.z + dir.z * t)) * fh / (2.0 * CC[i].fs);
+	return true;
 }
 
 /* ---- the console, as the compositor sees it -------------------- */
@@ -18655,6 +25757,51 @@ int desk_console_hit(int screen_w, int screen_h, double px, double py)
 	return id > 0 && id <= CC_COUNT ? id - 1 : -1;
 }
 
+/* Is a sheet pixel under where the lid lies shut? (its box in the sheet, as cut by its ids) */
+static bool cc_lid_footprint(struct room_render *rr, int x, int y);
+static bool cc_lid_points(const struct room_cam *cam, double open, double n, double aspect,
+	double ox, double oy, double sw, double sh, double x[4], double y[4]);
+
+int desk_console_hit_lid(int screen_w, int screen_h, double px, double py, double open)
+{
+	if (open <= 0.0005) {
+		return desk_console_hit(screen_w, screen_h, px, py);
+	}
+	struct room_render *rr;
+	double ox, oy, scale;
+	if (!console_xform(screen_w, screen_h, &rr, &ox, &oy, &scale) || !rr->console_ids) {
+		return -1;
+	}
+	int sx = (int)((px - ox) / scale + 0.5);
+	int sy = (int)((py - oy) / scale + 0.5);
+	if (sx < 0 || sy < 0 || sx >= rr->w || sy >= rr->h) {
+		return -1;
+	}
+	bool under = cc_lid_footprint(rr, sx, sy);
+	if (under && open < 0.999) {
+		return -1;   /* the lid on its way over it */
+	}
+	cairo_surface_t *bare;
+	const unsigned char *bare_ids;
+	const unsigned char *ids = under && room_bare_get(rr, &bare, &bare_ids) ? bare_ids
+		: rr->console_ids;
+	int id = ids[(size_t)sy * rr->w + sx];
+	if (id == CC_LID + 1 || (id > 0 && id <= CC_COUNT && CC[id - 1].on == CC_ON_LID)) {
+		return -1;   /* (up, the lid is not where it lay) */
+	}
+	return id > 0 && id <= CC_COUNT ? id - 1 : -1;
+}
+
+bool desk_console_lid_ready(int screen_w, int screen_h)
+{
+	struct room_render *rr;
+	double ox, oy, scale;
+	cairo_surface_t *bare;
+	const unsigned char *ids;
+	return console_xform(screen_w, screen_h, &rr, &ox, &oy, &scale)
+		&& room_bare_get(rr, &bare, &ids);
+}
+
 /* The names the compositor uses have to be the ones the renderer uses. */
 _Static_assert((int)DESK_CC_COUNT == (int)CC_COUNT
 	&& (int)DESK_CC_WIFI == (int)CC_WIFI
@@ -18663,7 +25810,14 @@ _Static_assert((int)DESK_CC_COUNT == (int)CC_COUNT
 	&& (int)DESK_CC_BRIGHT == (int)CC_BRIGHT
 	&& (int)DESK_CC_PW_KEY == (int)CC_PW_KEY
 	&& (int)DESK_CC_SCREEN == (int)CC_SCREEN
-	&& (int)DESK_CC_LOCK == (int)CC_LOCK,
+	&& (int)DESK_CC_LOCK == (int)CC_LOCK
+	&& (int)DESK_CC_CRT == (int)CC_CRT && (int)DESK_CC_BATT == (int)CC_BATT
+	&& (int)DESK_CC_NET == (int)CC_NET && (int)DESK_CC_PW_OFF == (int)CC_PW_OFF
+	&& (int)DESK_CC_PW_BOOT == (int)CC_PW_BOOT && (int)DESK_CC_PW_OUT == (int)CC_PW_OUT
+	&& (int)DESK_CC_SLEEP == (int)CC_SLEEP && (int)DESK_CC_PW_SUSPEND == (int)CC_PW_SUSPEND
+	&& (int)DESK_CC_AIR == (int)CC_AIR && (int)DESK_CC_SAVE == (int)CC_SAVE
+	&& (int)DESK_CC_NIGHT == (int)CC_NIGHT && (int)DESK_CC_DISPLAY == (int)CC_DISPLAY
+	&& (int)DESK_CC_LID == (int)CC_LID,
 	"console controls out of step");
 
 /* Inside a convex quad, testing every edge for the same turn. The corners
@@ -18700,20 +25854,37 @@ bool desk_console_guard_hit(int screen_w, int screen_h, double px, double py,
 		return false;
 	}
 	double aspect = (double)rr->w / (double)(rr->h > 0 ? rr->h : 1);
-	vec3 q[4];
-	cc_guard_quad(open, 1.0, aspect, q);
-	double x[4], y[4];
-	for (int k = 0; k < 4; k++) {
-		double u, v;
-		if (!room_project(&rr->console_cam, q[k], &u, &v)) {
-			return false;
-		}
-		x[k] = ox + u * rr->w * scale;
-		y[k] = oy + v * rr->h * scale;
+	/* its top, and its free edge's thickness -- up, the edge is most of what shows */
+	double tx[4], ty[4], bx[4], by[4];
+	if (!cc_lid_points(&rr->console_cam, open, CC_LID_N1, aspect, ox, oy, rr->w * scale,
+		rr->h * scale, tx, ty) || !cc_lid_points(&rr->console_cam, open, CC_LID_N0, aspect, ox,
+		oy, rr->w * scale, rr->h * scale, bx, by)) {
+		return false;
 	}
-	double qx[4] = { x[0], x[1], x[3], x[2] };
-	double qy[4] = { y[0], y[1], y[3], y[2] };
-	return cc_in_quad(qx, qy, px, py);
+	/* past upright, the underside is what faces this way */
+	double ex[4] = { tx[2], tx[3], bx[2], bx[3] }, ey[4] = { ty[2], ty[3], by[2], by[3] };
+	return cc_in_quad(tx, ty, px, py) || cc_in_quad(bx, by, px, py)
+		|| cc_in_quad(ex, ey, px, py);
+}
+
+/* Where the middle of the lid's free edge is on the screen, opened that far (0 shut, 1 all the
+ * way): what a finger lifting the lid by its edge holds on to (2026-11-12). */
+bool desk_console_lid_grip(int screen_w, int screen_h, double open, double *x, double *y)
+{
+	struct room_render *rr;
+	double ox, oy, scale;
+	if (!console_xform(screen_w, screen_h, &rr, &ox, &oy, &scale)) {
+		return false;
+	}
+	double aspect = (double)rr->w / (double)(rr->h > 0 ? rr->h : 1);
+	double tx[4], ty[4];
+	if (!cc_lid_points(&rr->console_cam, open, CC_LID_N1, aspect, ox, oy, rr->w * scale,
+		rr->h * scale, tx, ty)) {
+		return false;
+	}
+	*x = (tx[2] + tx[3]) * 0.5;
+	*y = (ty[2] + ty[3]) * 0.5;
+	return true;
 }
 
 /* The machine as screen quads through whichever camera: the operating
@@ -18867,21 +26038,21 @@ bool desk_console_value_at(int screen_w, int screen_h, int idx,
 	if (!console_xform(screen_w, screen_h, &rr, &ox, &oy, &scale)) {
 		return false;
 	}
-	vec3 q[4];
 	double aspect = (double)rr->w / (double)(rr->h > 0 ? rr->h : 1);
-	cc_quad(idx, 1.0, aspect, q);
 	double fw, fh;
 	cc_face_size(idx, &fw, &fh);
-	cairo_matrix_t m;
-	if (!quad_matrix(&rr->console_cam, q, fw, fh, ox, oy,
-		rr->w * scale, rr->h * scale, &m)) {
+	/* where the hand is, on the top of the bakelite or of the fader's plate: the face is
+	 * pasted onto those (cc_paste) */
+	struct cc_deck d[CC_DECKS];
+	double ground = 0.0;
+	if (cc_decks(idx, d, &ground) < 1) {
 		return false;
 	}
-	if (cairo_matrix_invert(&m) != CAIRO_STATUS_SUCCESS) {
+	double lx, ly;
+	if (!cc_face_point(&rr->console_cam, aspect, ox, oy, rr->w * scale, rr->h * scale, idx,
+		fw, fh, d[0].top, px, py, &lx, &ly)) {
 		return false;
 	}
-	double lx = px, ly = py;
-	cairo_matrix_transform_point(&m, &lx, &ly);
 	if (idx == CC_BRIGHT || idx == CC_SCREEN) {
 		/* the slot is as long as the trace cut it, not some fraction of
 		 * the printed face */
@@ -19116,9 +26287,104 @@ static void crt_cache(double w, double h)
 	}
 }
 
+/* crt_text, made smaller where it would run wider than max_w */
+static void crt_text_fit(cairo_t *cr, const char *s, double x, double y,
+	double size, double max_w, double lit, double w, double h)
+{
+	static const double off[4][2] = { { -1, 0 }, { 1, 0 }, { 0, -1 }, { 0, 1 } };
+	crt_warp(w, h, &x, &y);
+	for (int i = 0; i < 4; i++) {
+		double d = size * 0.10;
+		show_text_fit_as(cr, DESK_FONT_SCREEN, s, x + off[i][0] * d, y + off[i][1] * d, size,
+			true, 0.26, 0.92, 0.34, 0.20 * lit, 0, max_w);
+	}
+	show_text_fit_as(cr, DESK_FONT_SCREEN, s, x, y, size, true, 0.76, 1.0, 0.80, 0.95 * lit, 0,
+		max_w);
+}
+
+/* a screen, drawn by the beam: its edges through the glass's curve, soft and then the core */
+static void crt_screen(cairo_t *cr, double x0, double y0, double x1, double y1, double lit,
+	double w, double h)
+{
+	const double X[5] = { x0, x1, x1, x0, x0 }, Y[5] = { y0, y0, y1, y1, y0 };
+	for (int pass = 0; pass < 2; pass++) {
+		for (int e = 0; e < 4; e++) {
+			for (int k = 0; k <= 6; k++) {
+				double t = k / 6.0;
+				double px = X[e] + (X[e + 1] - X[e]) * t, py = Y[e] + (Y[e + 1] - Y[e]) * t;
+				crt_warp(w, h, &px, &py);
+				if (e == 0 && k == 0) {
+					cairo_move_to(cr, px, py);
+				} else {
+					cairo_line_to(cr, px, py);
+				}
+			}
+		}
+		cairo_close_path(cr);
+		cairo_set_line_width(cr, pass ? h * 0.012 : h * 0.040);
+		if (pass) {
+			cairo_set_source_rgba(cr, 0.82, 1.00, 0.86, 0.90 * lit);
+		} else {
+			cairo_set_source_rgba(cr, 0.30, 0.95, 0.40, 0.20 * lit);
+		}
+		cairo_stroke(cr);
+	}
+}
+
+/* What DISPLAY has just made of the screens, on the tube a moment over the trace: SCREENS, the
+ * two drawn as they are used -- side by side, the same on both, the one or the other alone --
+ * and the word for it. */
+static void crt_screens_word(cairo_t *cr, double w, double h, int said, double word,
+	double lit)
+{
+	static const char *const WORD[] = { "EXTEND", "DUPLICATE", "THIS SCREEN", "OTHER SCREEN",
+		"ONE SCREEN", "NOT POSSIBLE" };
+	if (word <= 0.0 || said < 0 || said > DESK_SCREENS_REFUSED) {
+		return;
+	}
+	double a = lit * word;
+	/* the trace let die down under it */
+	cairo_set_source_rgba(cr, 0.010, 0.020, 0.014, 0.86 * word);
+	cairo_paint(cr);
+	crt_text_fit(cr, TR("SCREENS"), w * 0.50, h * 0.255, h * 0.085, w * 0.62, a * 0.80, w, h);
+	double sw = w * 0.20, sh = h * 0.15, cy = h * 0.475;
+	switch (said) {
+	case DESK_SCREENS_ONE:
+		crt_screen(cr, w * 0.5 - sw * 0.5, cy - sh * 0.5, w * 0.5 + sw * 0.5, cy + sh * 0.5,
+			a, w, h);
+		break;
+	case DESK_SCREENS_MIRROR: {
+		double g = w * 0.10;
+		crt_screen(cr, w * 0.5 - g * 0.5 - sw, cy - sh * 0.5, w * 0.5 - g * 0.5, cy + sh * 0.5,
+			a, w, h);
+		crt_screen(cr, w * 0.5 + g * 0.5, cy - sh * 0.5, w * 0.5 + g * 0.5 + sw, cy + sh * 0.5,
+			a, w, h);
+		/* the same on both: an equals sign between them */
+		for (int k = 0; k < 2; k++) {
+			double y = cy + (k ? 1.0 : -1.0) * sh * 0.16;
+			crt_screen(cr, w * 0.5 - g * 0.22, y, w * 0.5 + g * 0.22, y, a * 0.9, w, h);
+		}
+		break;
+	}
+	default: {
+		/* two side by side: both lit (the desk going on), or one alone */
+		bool none = said == DESK_SCREENS_REFUSED;
+		double l = said == DESK_SCREENS_OTHER || none ? 0.22 : 1.0;
+		double r = said == DESK_SCREENS_THIS || none ? 0.22 : 1.0;
+		double g = said == DESK_SCREENS_EXTEND ? 0.0 : w * 0.04;
+		crt_screen(cr, w * 0.5 - g * 0.5 - sw, cy - sh * 0.5, w * 0.5 - g * 0.5, cy + sh * 0.5,
+			a * l, w, h);
+		crt_screen(cr, w * 0.5 + g * 0.5, cy - sh * 0.5, w * 0.5 + g * 0.5 + sw, cy + sh * 0.5,
+			a * r, w, h);
+		break;
+	}
+	}
+	crt_text_fit(cr, TR(WORD[said]), w * 0.50, h * 0.775, h * 0.120, w * 0.78, a, w, h);
+}
+
 static void cc_face_crt(cairo_t *cr, double w, double h,
 	const struct desk_meters *m, double warm, double clock,
-	const double *trace, int ntrace)
+	const double *trace, int ntrace, int said, double word)
 {
 	cairo_set_source_rgb(cr, 0.010, 0.020, 0.014);
 	cairo_paint(cr);
@@ -19234,6 +26500,9 @@ static void cc_face_crt(cairo_t *cr, double w, double h,
 		snprintf(buf, sizeof buf, "-- \xc2\xb0""C");
 	}
 	crt_text(cr, buf, w * 0.672, h * 0.845, h * 0.090, lit * 0.88, w, h);
+
+	/* and over it a moment, what DISPLAY has made of the screens */
+	crt_screens_word(cr, w, h, said, word, lit);
 
 	/* the raster */
 	cairo_set_source_surface(cr, g_crt.comb, 0, 0);
@@ -19531,8 +26800,9 @@ static void cc_face_fader(cairo_t *cr, double w, double h, double sx, double sy,
 			cairo_stroke(cr);
 		}
 	} else {
-		/* as long as the scale would have been, at most */
-		show_text_fit_as(cr, DESK_FONT_ENGRAVE, TR("NO BACKLIGHT"), cx, cy - 0.17 * sy,
+		/* as long as the scale would have been, at most, and standing where its ticks would
+		 * have (higher, and up on the tower it ran off the top of the plate) */
+		show_text_fit_as(cr, DESK_FONT_ENGRAVE, TR("NO BACKLIGHT"), cx, cy - 0.12 * sy,
 			0.105 * sy, true, 0.13, 0.09, 0.04, 0.70, 0, 2.0 * run);
 	}
 	/* (the handle stands up out of the slot: cc_fader3) */
@@ -19621,16 +26891,169 @@ static void arc_text(cairo_t *fc, const char *text, double cx, double cy,
 	cairo_restore(fc);
 }
 
-/* One of the three. The cap is already there in the bake, cold; this is the
- * word round it and the filament behind it. */
+/* A button's face. The cap is already there in the bake, cold; this is the
+ * word round it and the filament behind it. Its ring and cap, in the
+ * room's units. */
+/* What a button does, as a sign etched into its cap (2026-11-10, the owner: lightly): a
+ * path in a box two across, about (x, y), r to half of it. */
+enum {
+	CC_ICON_NONE = 0, CC_ICON_POWER, CC_ICON_RESTART, CC_ICON_LOGOUT, CC_ICON_SUSPEND,
+	CC_ICON_LOCK, CC_ICON_SLEEP, CC_ICON_AIR, CC_ICON_SAVE, CC_ICON_NIGHT, CC_ICON_DISPLAY,
+};
+
+static void cc_icon_path(cairo_t *cr, int icon, double x, double y, double r)
+{
+#define IX(a) (x + (a) * r)
+#define IY(b) (y + (b) * r)
+	switch (icon) {
+	case CC_ICON_POWER:
+		/* the ring broken at the top, and the stroke down into it */
+		cairo_new_sub_path(cr);
+		cairo_arc(cr, x, y + 0.06 * r, 0.78 * r, -M_PI * 0.5 + 0.62, M_PI * 1.5 - 0.62);
+		cairo_move_to(cr, IX(0.0), IY(-0.98));
+		cairo_line_to(cr, IX(0.0), IY(-0.10));
+		break;
+	case CC_ICON_RESTART:
+		/* round once and back to the start, with its head */
+		cairo_new_sub_path(cr);
+		cairo_arc(cr, x, y, 0.76 * r, -M_PI * 0.30, M_PI * 1.38);
+		cairo_move_to(cr, IX(0.22), IY(-0.98));
+		cairo_line_to(cr, IX(0.62), IY(-0.62));
+		cairo_line_to(cr, IX(0.10), IY(-0.40));
+		break;
+	case CC_ICON_LOGOUT:
+		/* out of the door */
+		cairo_move_to(cr, IX(-0.05), IY(-0.82));
+		cairo_line_to(cr, IX(-0.80), IY(-0.82));
+		cairo_line_to(cr, IX(-0.80), IY(0.82));
+		cairo_line_to(cr, IX(-0.05), IY(0.82));
+		cairo_move_to(cr, IX(-0.38), IY(0.0));
+		cairo_line_to(cr, IX(0.90), IY(0.0));
+		cairo_move_to(cr, IX(0.52), IY(-0.36));
+		cairo_line_to(cr, IX(0.90), IY(0.0));
+		cairo_line_to(cr, IX(0.52), IY(0.36));
+		break;
+	case CC_ICON_SUSPEND:
+		/* the crescent moon (the sign for sleep on every machine's button): round the outside
+		 * from where the two circles cross to where they cross again, and back inside */
+		cairo_new_sub_path(cr);
+		cairo_arc(cr, x, y, 0.80 * r, 0.2472, 4.5900);
+		cairo_arc_negative(cr, x + 0.34 * r, y - 0.30 * r, 0.66 * r, -2.2958, -5.4334);
+		cairo_close_path(cr);
+		break;
+	case CC_ICON_LOCK:
+		/* a padlock: the shackle over the body */
+		cairo_new_sub_path(cr);
+		cairo_arc(cr, x, y - 0.24 * r, 0.46 * r, M_PI, 2.0 * M_PI);
+		cairo_line_to(cr, IX(0.46), IY(-0.06));
+		cairo_move_to(cr, IX(-0.46), IY(-0.24));
+		cairo_line_to(cr, IX(-0.46), IY(-0.06));
+		cairo_rectangle(cr, IX(-0.74), IY(-0.06), 1.48 * r, 0.96 * r);
+		cairo_move_to(cr, IX(0.0), IY(0.24));
+		cairo_line_to(cr, IX(0.0), IY(0.56));
+		break;
+	case CC_ICON_SLEEP:
+		/* a screen gone to sleep */
+		cairo_rectangle(cr, IX(-0.86), IY(-0.66), 1.72 * r, 1.12 * r);
+		cairo_move_to(cr, IX(0.0), IY(0.46));
+		cairo_line_to(cr, IX(0.0), IY(0.74));
+		cairo_move_to(cr, IX(-0.38), IY(0.76));
+		cairo_line_to(cr, IX(0.38), IY(0.76));
+		cairo_move_to(cr, IX(-0.26), IY(-0.34));
+		cairo_line_to(cr, IX(0.26), IY(-0.34));
+		cairo_line_to(cr, IX(-0.26), IY(0.14));
+		cairo_line_to(cr, IX(0.26), IY(0.14));
+		break;
+	case CC_ICON_AIR:
+		/* an aeroplane from above, nose up */
+		cairo_move_to(cr, IX(0.0), IY(-0.96));
+		cairo_line_to(cr, IX(0.0), IY(0.84));
+		cairo_move_to(cr, IX(-0.92), IY(0.16));
+		cairo_line_to(cr, IX(0.0), IY(-0.26));
+		cairo_line_to(cr, IX(0.92), IY(0.16));
+		cairo_move_to(cr, IX(-0.38), IY(0.88));
+		cairo_line_to(cr, IX(0.0), IY(0.64));
+		cairo_line_to(cr, IX(0.38), IY(0.88));
+		break;
+	case CC_ICON_SAVE:
+		/* a leaf, and its vein */
+		cairo_move_to(cr, IX(-0.72), IY(0.72));
+		cairo_curve_to(cr, IX(-0.92), IY(-0.30), IX(-0.10), IY(-0.92), IX(0.78), IY(-0.78));
+		cairo_curve_to(cr, IX(0.92), IY(0.10), IX(0.30), IY(0.92), IX(-0.72), IY(0.72));
+		cairo_close_path(cr);
+		cairo_move_to(cr, IX(-0.86), IY(0.86));
+		cairo_line_to(cr, IX(0.30), IY(-0.30));
+		break;
+	case CC_ICON_NIGHT:
+		/* the sun going down: the evening's warm light */
+		cairo_move_to(cr, IX(-0.94), IY(0.40));
+		cairo_line_to(cr, IX(0.94), IY(0.40));
+		cairo_new_sub_path(cr);
+		cairo_arc(cr, x, y + 0.40 * r, 0.46 * r, M_PI, 2.0 * M_PI);
+		for (int k = 0; k < 5; k++) {
+			double a = M_PI + M_PI * (k + 0.5) / 5.0;
+			cairo_move_to(cr, x + cos(a) * 0.64 * r, y + 0.40 * r + sin(a) * 0.64 * r);
+			cairo_line_to(cr, x + cos(a) * 0.90 * r, y + 0.40 * r + sin(a) * 0.90 * r);
+		}
+		break;
+	case CC_ICON_DISPLAY:
+		/* two screens, one in front of the other */
+		cairo_move_to(cr, IX(-0.20), IY(-0.40));
+		cairo_line_to(cr, IX(-0.20), IY(-0.80));
+		cairo_line_to(cr, IX(0.92), IY(-0.80));
+		cairo_line_to(cr, IX(0.92), IY(0.04));
+		cairo_line_to(cr, IX(0.24), IY(0.04));
+		cairo_rectangle(cr, IX(-0.92), IY(-0.40), 1.16 * r, 0.80 * r);
+		cairo_move_to(cr, IX(-0.34), IY(0.40));
+		cairo_line_to(cr, IX(-0.34), IY(0.66));
+		cairo_move_to(cr, IX(-0.62), IY(0.68));
+		cairo_line_to(cr, IX(-0.06), IY(0.68));
+		break;
+	default:
+		break;
+	}
+#undef IX
+#undef IY
+}
+
+/* Etched lightly into the cap's glass: unlit, a groove a little darker than the glass with the
+ * room's light along its lower lip; lit, the etching takes the filament's light and is the
+ * brightest thing on the cap. */
+static void cc_icon_etch(cairo_t *fc, int icon, double cx, double cy, double cap, double k,
+	double lr, double lg, double lb)
+{
+	if (icon == CC_ICON_NONE) {
+		return;
+	}
+	double r = cap * 0.50, lw = fmax(0.9, cap * 0.075);
+	cairo_save(fc);
+	cairo_set_line_cap(fc, CAIRO_LINE_CAP_ROUND);
+	cairo_set_line_join(fc, CAIRO_LINE_JOIN_ROUND);
+	cairo_set_line_width(fc, lw);
+	cc_icon_path(fc, icon, cx + lw * 0.45, cy + lw * 0.45, r);
+	cairo_set_source_rgba(fc, 1.0, 0.96, 0.86, 0.20 * (1.0 - k));
+	cairo_stroke(fc);
+	cc_icon_path(fc, icon, cx, cy, r);
+	cairo_set_source_rgba(fc, 0.05, 0.04, 0.03, 0.34 * (1.0 - 0.6 * k));
+	cairo_stroke(fc);
+	if (k > 0.004) {
+		cairo_set_line_width(fc, lw * 0.85);
+		cc_icon_path(fc, icon, cx, cy, r);
+		cairo_set_source_rgba(fc, fmin(1.0, 0.45 + lr * 0.6), fmin(1.0, 0.45 + lg * 0.6),
+			fmin(1.0, 0.45 + lb * 0.6), 0.62 * k);
+		cairo_stroke(fc);
+	}
+	cairo_restore(fc);
+}
+
 static void cc_face_power_button(cairo_t *fc, double fw, double fh,
-	double sx, double sy, const char *word, double lamp,
-	double lr, double lg, double lb, double pressed)
+	double sx, double sy, double ring_w, double cap_w, const char *word, double lamp,
+	double lr, double lg, double lb, double pressed, int icon)
 {
 	(void)sy;   /* the faces are scaled alike, so across does for up */
 	double cx = fw * 0.5, cy = fh * 0.5;
-	double ring = CC_PW_RING * sx;
-	double cap = CC_PW_R * sx;
+	double ring = ring_w * sx;
+	double cap = cap_w * sx;
 	double k = clampf(lamp, 0.0, 1.0);
 
 	/* Pressed, the cap goes down into the ring: a hair smaller and a
@@ -19659,6 +27082,9 @@ static void cc_face_power_button(cairo_t *fc, double fw, double fh,
 		cairo_pattern_destroy(g);
 	}
 
+	/* what it does, etched into the cap, pressed down into the ring with it */
+	cc_icon_etch(fc, icon, cx, cy, cap * (1.0 - 0.05 * clampf(pressed, 0.0, 1.0)), k, lr, lg, lb);
+
 	/* The word, cut into the bezel, over the light rather than under it.
 	 * Under it the lamp washed the engraving off its own bezel, which is
 	 * the one time you want to be able to read which button this is. */
@@ -19673,11 +27099,11 @@ static void cc_face_power_key(cairo_t *fc, double fw, double fh,
 	double sx, double sy, double turn)
 {
 	(void)fw;
-	/* where the barrel and the key's resting place land in this face */
+	(void)fh;
+	(void)turn;
+	/* where the barrel lands in this face, at the top of it: the key lies below */
 	double lock_x = (CC_PW_LOCK_U - CC[CC_PW_KEY].u + CC[CC_PW_KEY].fu) * sx;
-	double rest_x = (CC_PW_KEY_U - CC[CC_PW_KEY].u + CC[CC_PW_KEY].fu) * sx;
-	double cy = fh * 0.5;
-	double t = clampf(turn, 0.0, 1.0);
+	double cy = (CC[CC_PW_KEY].s + CC[CC_PW_KEY].fs - CC_PW_KEY_S) * sy;
 
 	/* POWER, cut into the plate over the barrel */
 	double ts = 0.125 * sy;
@@ -19702,8 +27128,6 @@ static void cc_face_power_key(cairo_t *fc, double fw, double fh,
 	cairo_restore(fc);
 
 	/* (the key is a thing in the room, drawn over this face: cc_key3) */
-	(void)rest_x;
-	(void)t;
 }
 
 /* ---- what stands up off the panel ----------------------------------
@@ -20019,29 +27443,33 @@ static void cc_fader3(cairo_t *cr, const struct cc_view *v, int i, double val, d
 	cairo_restore(cr);
 }
 
-/* The key: t 0 lying on the panel beside the lock, its blade towards it;
- * taken up and stood in the lock; pushed home; turned a quarter round. */
+/* The key: t 0 lying on the panel under the lock, upright, its blade towards it; taken up,
+ * a quarter turned in the fingers to the slot, and stood in the lock; pushed home; turned a
+ * quarter round. */
 static void cc_key3(cairo_t *cr, const struct cc_view *v, double t)
 {
 	static const double BRASS[3] = { 0.82, 0.66, 0.33 };
 	const double Lb = 0.36, bw = 0.052, kt = 0.040, br = 0.190, bh = 0.060, bt = 0.075;
-	double bs = cc_pw_btn_s();
+	double bs = CC_PW_KEY_S;
 	double top = RM_CC_SKIN + 0.11;            /* the barrel's face */
 	t = clampf(t, 0.0, 1.0);
 	double up = smoothstepf(0.00, 0.40, t);
 	double in = smoothstepf(0.40, 0.58, t);
 	double turn = smoothstepf(0.62, 1.00, t) * M_PI * 0.5;
-	/* its tip: beside the lock, then over the slot, then in it */
-	double tu = 3.14 + (CC_PW_LOCK_U - 3.14) * up;
+	/* its tip: under the lock, then over the slot, then in it */
+	double ts = CC_PW_KEY_REST + (bs - CC_PW_KEY_REST) * up;
 	double tn = (RM_CC_SKIN + kt * 0.5) + (top - RM_CC_SKIN - kt * 0.5) * up
 		+ 0.24 * sin(M_PI * up) - in * Lb * 0.78;
-	double phi = up * M_PI * 0.5;
-	/* along it from bow to tip, across its blade, and through it */
-	vec3 A = cc_view_dir(v, -cos(phi), -sin(phi), 0.0);
-	vec3 W0 = cc_view_dir(v, 0.0, 0.0, 1.0), T0 = cc_view_dir(v, -sin(phi), cos(phi), 0.0);
+	double phi = up * M_PI * 0.5, twist = up * M_PI * 0.5;
+	/* along it from bow to tip, across its blade, and through it: lying, the blade flat and
+	 * across the panel; stood up, across the slot as it was before */
+	vec3 A = cc_view_dir(v, 0.0, -sin(phi), cos(phi));
+	vec3 P1 = cc_view_dir(v, 1.0, 0.0, 0.0), P2 = cc_view_dir(v, 0.0, cos(phi), sin(phi));
+	vec3 W0 = vadd(vmul(P1, cos(twist)), vmul(P2, sin(twist)));
+	vec3 T0 = vsub(vmul(P2, cos(twist)), vmul(P1, sin(twist)));
 	vec3 W = vadd(vmul(W0, cos(turn)), vmul(T0, sin(turn)));
 	vec3 T = vsub(vmul(T0, cos(turn)), vmul(W0, sin(turn)));
-	vec3 tip = cc_view_at(v, tu, tn, bs);
+	vec3 tip = cc_view_at(v, CC_PW_LOCK_U, tn, ts);
 	vec3 root = vsub(tip, vmul(A, Lb));
 	/* what of the blade is out of the barrel */
 	double rootn = tn + Lb * sin(phi);
@@ -20195,160 +27623,20 @@ static void cc_key3(cairo_t *cr, const struct cc_view *v, double t)
  * filled. Colourless, so everything it is made of is edges -- the bright
  * line down its thickness, the one band of the room it reflects, and the
  * shadow it drops on the plate when it is up. */
-static void cc_guard(cairo_t *cr, const struct room_cam *cam,
-	double ox, double oy, double sw, double sh, double slide, double aspect,
-	double open)
-{
-	vec3 q[4];
-	cc_guard_quad(open, slide, aspect, q);
-	double x[4], y[4];
-	for (int k = 0; k < 4; k++) {
-		double u, v;
-		if (!room_project(cam, q[k], &u, &v)) {
-			return;
-		}
-		x[k] = ox + u * sw;
-		y[k] = oy + v * sh;
-	}
-	const int ORD[4] = { 0, 1, 3, 2 };   /* hinge, hinge, free, free */
-
-	/* What it drops on the plate. Colourless glass is nearly all edges and
-	 * nothing else, and without the shadow a raised one read as a flat one
-	 * that had somehow got shorter. */
-	{
-		struct cc_face panel, tower;
-		cc_faces(&panel, &tower);
-		double th = clampf(open, 0.0, 1.0) * CC_PW_SWING;
-		double d = CC_PW_G_S1 - CC_PW_G_S0;
-		double s1 = CC_PW_G_S0 + d * cos(th);
-		const double U[4] = { -CC_PW_G_U, CC_PW_G_U, CC_PW_G_U, -CC_PW_G_U };
-		const double S[4] = { CC_PW_G_S0, CC_PW_G_S0, s1, s1 };
-		cairo_save(cr);
-		bool ok = true;
-		for (int k = 0; k < 4 && ok; k++) {
-			/* thrown a little down the panel and to the right, the way the
-			 * desk lamp throws everything else in this room */
-			vec3 p = cc_world(&panel, U[k] + 0.10, 0.185, S[k] - 0.10,
-				slide, aspect);
-			double u, v;
-			ok = room_project(cam, p, &u, &v);
-			if (!ok) {
-				break;
-			}
-			double px = ox + u * sw, py = oy + v * sh;
-			if (k == 0) {
-				cairo_move_to(cr, px, py);
-			} else {
-				cairo_line_to(cr, px, py);
-			}
-		}
-		if (ok) {
-			cairo_close_path(cr);
-			cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.34);
-			cairo_fill(cr);
-		}
-		cairo_restore(cr);
-	}
-
-	cairo_save(cr);
-	cairo_move_to(cr, x[ORD[0]], y[ORD[0]]);
-	for (int k = 1; k < 4; k++) {
-		cairo_line_to(cr, x[ORD[k]], y[ORD[k]]);
-	}
-	cairo_close_path(cr);
-	cairo_path_t *outline = cairo_copy_path(cr);
-
-	/* what the glass takes out of what is behind it */
-	cairo_set_source_rgba(cr, 0.56, 0.60, 0.64, 0.028);
-	cairo_fill_preserve(cr);
-
-	/* and the one band of the room it hands back. A sheet of glass at an
-	 * angle shows the window as a stripe, not as a wash. */
-	cairo_clip(cr);
-	double mx = (x[0] + x[3]) * 0.5, my = (y[0] + y[3]) * 0.5;
-	double dx = x[1] - x[2], dy = y[1] - y[2];
-	double len = sqrt(dx * dx + dy * dy);
-	if (len > 1.0) {
-		cairo_pattern_t *g = cairo_pattern_create_linear(
-			mx - dy / len * len * 0.5, my + dx / len * len * 0.5,
-			mx + dy / len * len * 0.5, my - dx / len * len * 0.5);
-		cairo_pattern_add_color_stop_rgba(g, 0.00, 1, 1, 1, 0.00);
-		cairo_pattern_add_color_stop_rgba(g, 0.38, 1, 1, 1, 0.01);
-		cairo_pattern_add_color_stop_rgba(g, 0.47, 1, 1, 1, 0.15);
-		cairo_pattern_add_color_stop_rgba(g, 0.53, 1, 1, 1, 0.14);
-		cairo_pattern_add_color_stop_rgba(g, 0.62, 1, 1, 1, 0.01);
-		cairo_pattern_add_color_stop_rgba(g, 1.00, 1, 1, 1, 0.00);
-		cairo_set_source(cr, g);
-		cairo_paint(cr);
-		cairo_pattern_destroy(g);
-	}
-	cairo_restore(cr);
-
-	/* the edges: a hairline all round, and the free edge thicker, because
-	 * that is the one you are looking at the cut face of */
-	cairo_save(cr);
-	cairo_append_path(cr, outline);
-	cairo_set_line_width(cr, fmax(1.0, sh * 0.0016));
-	cairo_set_source_rgba(cr, 1, 1, 1, 0.26);
-	cairo_stroke(cr);
-	cairo_move_to(cr, x[2], y[2]);
-	cairo_line_to(cr, x[3], y[3]);
-	cairo_set_line_width(cr, fmax(1.4, sh * 0.0034));
-	cairo_set_source_rgba(cr, 0.92, 0.96, 1.00, 0.52 + 0.30 * clampf(open, 0, 1));
-	cairo_stroke(cr);
-	cairo_restore(cr);
-	cairo_path_destroy(outline);
-
-	/* The brass channel along its free edge, which is what the glass is
-	 * held in and what you hook a finger under. It used to be a tab in the
-	 * middle, and the middle of this glass is the word RESTART. */
-	{
-		struct cc_face panel, tower;
-		cc_faces(&panel, &tower);
-		double th = clampf(open, 0.0, 1.0) * CC_PW_SWING;
-		double d = CC_PW_G_S1 - CC_PW_G_S0;
-		double s1 = CC_PW_G_S0 + d * cos(th);
-		double n1 = CC_PW_G_N - d * sin(th);
-		double s2 = s1 + 0.070 * cos(th), n2 = n1 - 0.070 * sin(th);
-		const double U[4] = { -CC_PW_G_U, CC_PW_G_U, CC_PW_G_U, -CC_PW_G_U };
-		const double S[4] = { s1, s1, s2, s2 };
-		const double N[4] = { n1, n1, n2, n2 };
-		double tx[4], ty[4];
-		bool ok = true;
-		for (int k = 0; k < 4 && ok; k++) {
-			double u, v;
-			ok = room_project(cam, cc_world(&panel, U[k], N[k] + 0.022, S[k],
-				slide, aspect), &u, &v);
-			tx[k] = ox + u * sw;
-			ty[k] = oy + v * sh;
-		}
-		if (ok) {
-			cairo_save(cr);
-			cairo_move_to(cr, tx[0], ty[0]);
-			for (int k = 1; k < 4; k++) {
-				cairo_line_to(cr, tx[k], ty[k]);
-			}
-			cairo_close_path(cr);
-			cairo_pattern_t *g = cairo_pattern_create_linear(
-				(tx[0] + tx[1]) * 0.5, (ty[0] + ty[1]) * 0.5,
-				(tx[2] + tx[3]) * 0.5, (ty[2] + ty[3]) * 0.5);
-			cairo_pattern_add_color_stop_rgb(g, 0.00, 0.470, 0.372, 0.180);
-			cairo_pattern_add_color_stop_rgb(g, 0.45, 0.812, 0.672, 0.372);
-			cairo_pattern_add_color_stop_rgb(g, 1.00, 0.616, 0.492, 0.250);
-			cairo_set_source(cr, g);
-			cairo_fill_preserve(cr);
-			cairo_pattern_destroy(g);
-			cairo_set_line_width(cr, fmax(1.0, sh * 0.0014));
-			cairo_set_source_rgba(cr, 0.16, 0.12, 0.05, 0.60);
-			cairo_stroke(cr);
-			cairo_restore(cr);
-		}
-	}
-}
-
 static void cc_nameplate(cairo_t *cr, const struct room_cam *cam,
 	double ox, double oy, double sw, double sh, double slide, double aspect,
 	double lit);
+
+/* How far control i's light has come up as the set warms up (warm 0 to 1): one after another,
+ * each over a quarter of the warming -- in twelve steps, which is as smooth as a lamp coming up
+ * looks, and what a piece is drawn again for (desk_console_piece_key): every frame of it, a
+ * piece at a time, was what the set's first second and a half cost (2026-11-12). */
+static double cc_lit(double warm, int i)
+{
+	const double LAMP_W = 0.26;
+	double lit = clampf((warm - i * (1.0 - LAMP_W) / (CC_COUNT - 1)) / LAMP_W, 0.0, 1.0);
+	return round(lit * 12.0) / 12.0;
+}
 
 /* One control's face, printed on the quad it has on the panel. */
 static void cc_control_paint(cairo_t *cr, struct room_render *rr, double ox, double oy,
@@ -20356,9 +27644,7 @@ static void cc_control_paint(cairo_t *cr, struct room_render *rr, double ox, dou
 	int hover, const struct desk_meters *mp, double warm)
 {
 	struct desk_meters m = *mp;
-	const double LAMP_W = 0.26;
-	double lit = clampf((warm - i * (1.0 - LAMP_W) / (CC_COUNT - 1)) / LAMP_W,
-		0.0, 1.0);
+	double lit = cc_lit(warm, i);
 	vec3 q[4];
 	cc_quad(i, 1.0, aspect, q);
 	cairo_matrix_t mt;
@@ -20383,7 +27669,7 @@ static void cc_control_paint(cairo_t *cr, struct room_render *rr, double ox, dou
 	switch (i) {
 	case CC_CRT:
 		cc_face_crt(fc, fw, fh, &m, lit, st ? st->clock : 0.0,
-			g_cc_trace, CC_TRACE);
+			g_cc_trace, CC_TRACE, st ? st->screens_said : -1, st ? st->screens_word : 0.0);
 		break;
 	case CC_BATT:
 		cc_face_battery(fc, fw, fh, &m, lit);
@@ -20409,14 +27695,16 @@ static void cc_control_paint(cairo_t *cr, struct room_render *rr, double ox, dou
 		break;
 	case CC_PW_OFF:
 	case CC_PW_BOOT:
-	case CC_PW_OUT: {
-		static const char *WORD[3] = { "SHUT DOWN", "RESTART", "LOG OUT" };
-		static const double COL[3][3] = {
+	case CC_PW_OUT:
+	case CC_PW_SUSPEND: {
+		static const char *WORD[4] = { "SHUT DOWN", "RESTART", "LOG OUT", "SUSPEND" };
+		static const double COL[4][3] = {
 			{ 1.00, 0.24, 0.15 },
 			{ 1.00, 0.72, 0.17 },
 			{ 0.34, 1.00, 0.46 },
+			{ 0.36, 0.62, 1.00 },
 		};
-		int k = i - CC_PW_OFF;
+		int k = i == CC_PW_SUSPEND ? 3 : i - CC_PW_OFF;
 		/* Nothing here is alight until the key is home. The filaments
 		 * come up with the last of the turn, not with the warm-up:
 		 * this part of the machine is off, not merely unattended. */
@@ -20433,8 +27721,13 @@ static void cc_control_paint(cairo_t *cr, struct room_render *rr, double ox, dou
 				lamp *= 1.0 - smoothstepf(0.0, 0.30, d);
 			}
 		}
-		cc_face_power_button(fc, fw, fh, sx, sy, TR(WORD[k]), lamp,
-			COL[k][0], COL[k][1], COL[k][2], push);
+		if (st && st->push_which == i) {
+			push = fmax(push, clampf(st->push, 0.0, 1.0));
+		}
+		static const int ICON[4] = { CC_ICON_POWER, CC_ICON_RESTART, CC_ICON_LOGOUT,
+			CC_ICON_SUSPEND };
+		cc_face_power_button(fc, fw, fh, sx, sy, CC_LB_RING, CC_LB_R, TR(WORD[k]), lamp,
+			COL[k][0], COL[k][1], COL[k][2], push, ICON[k]);
 		break;
 	}
 	case CC_PW_KEY:
@@ -20442,14 +27735,64 @@ static void cc_control_paint(cairo_t *cr, struct room_render *rr, double ox, dou
 		break;
 	case CC_LOCK:
 		/* always ready, a low blue light, brighter pushed */
-		cc_face_power_button(fc, fw, fh, sx, sy, TR("LOCK"),
+		cc_face_power_button(fc, fw, fh, sx, sy, CC_PW_RING, CC_PW_R, TR("LOCK"),
 			lit * (0.55 + 0.45 * (st ? clampf(st->lock_push, 0.0, 1.0) : 0.0)),
-			0.36, 0.62, 1.00, st ? st->lock_push : 0.0);
+			0.36, 0.62, 1.00, st ? st->lock_push : 0.0, CC_ICON_LOCK);
+		break;
+	case CC_SLEEP: {
+		/* the same, in opal: a low white light, brighter pushed */
+		double push = st && st->push_which == i ? clampf(st->push, 0.0, 1.0) : 0.0;
+		cc_face_power_button(fc, fw, fh, sx, sy, CC_PW_RING, CC_PW_R, TR("SLEEP"),
+			lit * (0.45 + 0.55 * push), 1.00, 0.95, 0.84, push, CC_ICON_SLEEP);
+		break;
+	}
+	case CC_AIR:
+	case CC_SAVE:
+	case CC_NIGHT:
+	case CC_DISPLAY: {
+		/* on the lid: lit while what it puts on is on -- DISPLAY, which is always one way or
+		 * another, always lit, the colour of the way. A machine that cannot do it has it dark
+		 * (DISPLAY, with only the one screen). */
+		static const char *WORD[4] = { "AIRPLANE", "POWER SAVE", "NIGHT", "DISPLAY" };
+		static const double COL[4][3] = {
+			{ 1.00, 0.62, 0.18 },
+			{ 0.34, 1.00, 0.46 },
+			{ 0.40, 0.56, 1.00 },
+			{ 1.00, 0.95, 0.84 },
+		};
+		int k = i - CC_AIR;
+		double push = st && st->push_which == i ? clampf(st->push, 0.0, 1.0) : 0.0;
+		bool on = st && (i == CC_AIR ? st->air_on : i == CC_SAVE ? st->save_on
+			: i == CC_NIGHT ? st->night_on : false);
+		bool can = !st || i == CC_AIR
+			|| (i == CC_SAVE ? st->save_ok : i == CC_NIGHT ? st->night_ok : st->screens_ok);
+		double lamp = !can ? 0.0 : i == CC_DISPLAY ? lit * (0.55 + 0.45 * push)
+			: on ? lit : lit * 0.10 * push;
+		/* DISPLAY lit the colour of how the screens are used: white the desk going on onto
+		 * them, blue the same on all, amber this one only, green the other only */
+		static const double WAY[DESK_SCREENS_MODES][3] = {
+			{ 1.00, 0.95, 0.84 },
+			{ 0.40, 0.62, 1.00 },
+			{ 1.00, 0.62, 0.18 },
+			{ 0.34, 1.00, 0.46 },
+		};
+		const double *c = COL[k];
+		if (i == CC_DISPLAY && st && st->screens_mode >= 0
+			&& st->screens_mode < DESK_SCREENS_MODES) {
+			c = WAY[st->screens_mode];
+		}
+		static const int ICON[4] = { CC_ICON_AIR, CC_ICON_SAVE, CC_ICON_NIGHT,
+			CC_ICON_DISPLAY };
+		cc_face_power_button(fc, fw, fh, sx, sy, CC_LB_RING, CC_LB_R, TR(WORD[k]), lamp,
+			c[0], c[1], c[2], push, ICON[k]);
+		break;
+	}
+	case CC_LID:
 		break;
 	default:
 		cc_face_switch(fc, fw, fh, sx, sy, CC[i].hu, CC[i].hs,
 			st && st->bt_on, true,
-			(st && st->bt_on) ? lit : 0.0, 0.32, 0.56, 1.0, "BLUETOOTH");
+			(st && st->bt_on) ? lit : 0.0, 0.32, 0.56, 1.0, TR("BLUETOOTH"));
 		break;
 	}
 	if (hover == i) {
@@ -20469,31 +27812,42 @@ static void cc_control_paint(cairo_t *cr, struct room_render *rr, double ox, dou
 	cairo_destroy(fc);
 	cairo_surface_flush(face);
 
+	if (cc_paste(cr, &rr->console_cam, aspect, ox, oy, rr->w * scale, rr->h * scale, i, face,
+		0.97)) {
+		cairo_surface_destroy(face);
+		goto stands;
+	}
 	cairo_save(cr);
 	cairo_transform(cr, &mt);
 	cairo_set_source_surface(cr, face, 0, 0);
 	cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
 	cairo_paint_with_alpha(cr, 0.97);
-	/* glass over everything on the tower */
-	if (CC[i].tower) {
+	/* glass over the instruments up on the tower, the tube's round -- and none over the knob
+	 * and the faders beside them, where a sheen the shape of the face was a grey box */
+	if (i == CC_CRT || i == CC_BATT || i == CC_NET) {
 		cairo_pattern_t *g = cairo_pattern_create_linear(0, 0, fw * 0.7, fh);
 		cairo_pattern_add_color_stop_rgba(g, 0.00, 1, 1, 1, 0.17);
 		cairo_pattern_add_color_stop_rgba(g, 0.45, 1, 1, 1, 0.03);
 		cairo_pattern_add_color_stop_rgba(g, 1.00, 1, 1, 1, 0.00);
 		cairo_set_source(cr, g);
-		cairo_rectangle(cr, 0, 0, fw, fh);
+		if (CC[i].round) {
+			cairo_arc(cr, fw * 0.5, fh * 0.5, fmin(fw, fh) * 0.5, 0, 2 * M_PI);
+		} else {
+			cairo_rectangle(cr, 0, 0, fw, fh);
+		}
 		cairo_fill(cr);
 		cairo_pattern_destroy(g);
 	}
 	cairo_restore(cr);
 	cairo_surface_destroy(face);
 
+stands:
 	/* and what stands up off it */
 	if (i == CC_WIFI || i == CC_BT || i == CC_PW_KEY || i == CC_BRIGHT || i == CC_SCREEN) {
 		struct cc_face panel, tower;
 		cc_faces(&panel, &tower);
-		struct cc_view v = { &rr->console_cam, ox, oy, rr->w * scale, rr->h * scale, panel,
-			aspect };
+		struct cc_view v = { &rr->console_cam, ox, oy, rr->w * scale, rr->h * scale,
+			CC[i].tower ? tower : panel, aspect };
 		if (i == CC_PW_KEY) {
 			cc_key3(cr, &v, st ? st->key : 0.0);
 		} else if (i == CC_BRIGHT) {
@@ -20510,12 +27864,12 @@ static void cc_control_paint(cairo_t *cr, struct room_render *rr, double ox, dou
 
 /* The wireless aerial: a motor-driven telescopic one, the kind a car of
  * the eighties put up when the radio went on, standing in a chrome ferrule
- * at the top right of the tower beside the network's meter. ext is 0 down
+ * at the top right of the tower, over the lamp's fader. ext is 0 down
  * and 1 all the way up: the thinnest section comes out first and each
  * thicker one is drawn out after it. Most of it goes up out of the view;
  * what shows is the foot of it at work. */
 #define CC_ANT_U 4.10
-#define CC_ANT_S 0.78
+#define CC_ANT_S 1.22
 static void cc_antenna(cairo_t *cr, struct room_render *rr, double ox, double oy, double scale,
 	double aspect, double ext)
 {
@@ -20554,7 +27908,7 @@ static void cc_antenna(cairo_t *cr, struct room_render *rr, double ox, double oy
 
 /* The row of lenses along the front edge, coming up one after another. */
 static void cc_lenses_paint(cairo_t *cr, struct room_render *rr, double ox, double oy,
-	double scale, double warm, int screen_h)
+	double scale, double warm, int screen_h, const struct desk_console_state *st)
 {
 	struct cc_face panel, tower;
 	cc_faces(&panel, &tower);
@@ -20576,11 +27930,551 @@ static void cc_lenses_paint(cairo_t *cr, struct room_render *rr, double ox, doub
 			cc_lamp(cr, x, y, screen_h * 0.011, 1.0, 0.60, 0.18, lit * 0.85);
 		}
 	}
+	/* and the guarded set's own, under the key's barrel: green, lit with the key home, and
+	 * out with the set when one of the four is pushed */
+	double key = st ? smoothstepf(0.66, 1.0, clampf(st->key, 0.0, 1.0)) : 0.0;
+	double dying = st ? clampf(st->dying, 0.0, 1.0) : 0.0;
+	vec3 lp = cc_world(&panel, CC_PW_LOCK_U, RM_CC_SKIN + 0.20, CC_PW_LAMP_S, 1.0, aspect);
+	double pu, pv;
+	if (key > 0.004 && room_project(&rr->console_cam, lp, &pu, &pv)) {
+		cc_lamp(cr, ox + pu * rr->w * scale, oy + pv * rr->h * scale, screen_h * 0.014,
+			0.30, 1.0, 0.40, key * (1.0 - smoothstepf(0.0, 0.30, dying)) * clampf(warm, 0, 1));
+	}
+}
 
+static uint64_t key_mix(uint64_t h, const void *p, size_t n)
+{
+	const unsigned char *c = p;
+	for (size_t i = 0; i < n; i++) {
+		h = (h ^ c[i]) * 1099511628211ull;
+	}
+	return h;
+}
+#define KEY_ADD(h, v) do { __typeof__(v) key_v_ = (v); \
+	(h) = key_mix((h), &key_v_, sizeof key_v_); } while (0)
+
+/* ---- the lid, as it swings ----
+ *
+ * Shut, the lid is in the traced sheet like everything else on the set, and nothing is drawn
+ * for it. Lifted, what is under it comes from the console's sheet traced with no lid
+ * (rr->console_bare), and the lid is its own picture out of the first sheet -- what of it is
+ * the lid's, by the ids, with the faces of the four on it printed on -- laid over that on the
+ * plane it has got to on its hinge, darker as it turns from the lamp, with its free edge's
+ * thickness and the shadow it throws. */
+
+static struct {
+	unsigned serial;            /* the room its box is of */
+	int x0, y0, x1, y1;         /* where in the sheet the lid lies shut, as its ids have it */
+	bool ok;
+	cairo_surface_t *pic;       /* the lid out of the sheet, the box's size */
+	uint64_t key;               /* what is printed on it */
+} g_lid;
+
+static bool cc_lid_id(int id)
+{
+	return id > 0 && id <= CC_COUNT && CC[id - 1].on == CC_ON_LID;
+}
+
+static bool cc_lid_box(struct room_render *rr)
+{
+	if (g_lid.serial == rr->serial) {
+		return g_lid.ok;
+	}
+	if (g_lid.pic) {
+		cairo_surface_destroy(g_lid.pic);
+		g_lid.pic = NULL;
+	}
+	g_lid.serial = rr->serial;
+	g_lid.ok = false;
+	int x0 = rr->w, y0 = rr->h, x1 = -1, y1 = -1;
+	for (int y = 0; rr->console_ids && y < rr->h; y++) {
+		const unsigned char *row = rr->console_ids + (size_t)y * rr->w;
+		for (int x = 0; x < rr->w; x++) {
+			if (cc_lid_id(row[x])) {
+				x0 = x < x0 ? x : x0;
+				x1 = x > x1 ? x : x1;
+				y0 = y < y0 ? y : y0;
+				y1 = y > y1 ? y : y1;
+			}
+		}
+	}
+	if (x1 < x0 || y1 < y0) {
+		return false;
+	}
+	/* a couple of pixels round it, for the edge the filter softened */
+	g_lid.x0 = x0 > 2 ? x0 - 2 : 0;
+	g_lid.y0 = y0 > 2 ? y0 - 2 : 0;
+	g_lid.x1 = x1 + 3 < rr->w ? x1 + 3 : rr->w;
+	g_lid.y1 = y1 + 3 < rr->h ? y1 + 3 : rr->h;
+	g_lid.ok = true;
+	return true;
+}
+
+static bool cc_lid_footprint(struct room_render *rr, int x, int y)
+{
+	return cc_lid_box(rr) && x >= g_lid.x0 && x < g_lid.x1 && y >= g_lid.y0 && y < g_lid.y1;
+}
+
+/* The lid as it lies shut, out of the sheet, with what is on it printed on. */
+static cairo_surface_t *cc_lid_pic(struct room_render *rr, double aspect,
+	const struct desk_console_state *st, const struct desk_meters *m, double warm)
+{
+	if (!cc_lid_box(rr)) {
+		return NULL;
+	}
+	uint64_t key = 14695981039346656037ull;
+	KEY_ADD(key, rr->serial);
+	for (int i = CC_AIR; i <= CC_DISPLAY; i++) {
+		KEY_ADD(key, desk_console_piece_key(i, st, -1, m));
+	}
+	if (g_lid.pic && g_lid.key == key) {
+		return g_lid.pic;
+	}
+	if (g_lid.pic) {
+		cairo_surface_destroy(g_lid.pic);
+	}
+	int w = g_lid.x1 - g_lid.x0, h = g_lid.y1 - g_lid.y0;
+	cairo_surface_t *mask = cairo_image_surface_create(CAIRO_FORMAT_A8, w, h);
+	unsigned char *md = cairo_image_surface_get_data(mask);
+	int ms = cairo_image_surface_get_stride(mask);
+	for (int y = 0; y < h; y++) {
+		const unsigned char *row = rr->console_ids + (size_t)(y + g_lid.y0) * rr->w + g_lid.x0;
+		for (int x = 0; x < w; x++) {
+			md[(size_t)y * ms + x] = cc_lid_id(row[x]) ? 255 : 0;
+		}
+	}
+	cairo_surface_mark_dirty(mask);
+	g_lid.pic = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+	g_lid.key = key;
+	cairo_t *cr = cairo_create(g_lid.pic);
+	cairo_set_source_surface(cr, rr->console, -g_lid.x0, -g_lid.y0);
+	cairo_mask_surface(cr, mask, 0, 0);
+	/* and the faces of the four on it, as they are printed on the panel */
+	cairo_push_group(cr);
+	for (int i = CC_AIR; i <= CC_DISPLAY; i++) {
+		cc_control_paint(cr, rr, -g_lid.x0, -g_lid.y0, 1.0, aspect, i, st, -1, m, warm);
+	}
+	cairo_pop_group_to_source(cr);
+	cairo_mask_surface(cr, mask, 0, 0);
+	cairo_destroy(cr);
+	cairo_surface_destroy(mask);
+	cairo_surface_flush(g_lid.pic);
+	return g_lid.pic;
+}
+
+/* (where a point of the lid lands: in the sheet's pixels shut, on the screen swung) */
+static bool cc_lid_points(const struct room_cam *cam, double open, double n, double aspect,
+	double ox, double oy, double sw, double sh, double x[4], double y[4])
+{
+	vec3 q[4];
+	cc_lid_corners(open, n, 1.0, aspect, q);
+	for (int k = 0; k < 4; k++) {
+		double u, v;
+		if (!room_project(cam, q[k], &u, &v)) {
+			return false;
+		}
+		x[k] = ox + u * sw;
+		y[k] = oy + v * sh;
+	}
+	return true;
+}
+
+/* the affine map that takes three points to three others */
+static bool cc_affine3(const double px[3], const double py[3], const double qx[3],
+	const double qy[3], cairo_matrix_t *m)
+{
+	double ux = px[1] - px[0], uy = py[1] - py[0], vx = px[2] - px[0], vy = py[2] - py[0];
+	double det = ux * vy - uy * vx;
+	if (fabs(det) < 1e-9) {
+		return false;
+	}
+	double ax = qx[1] - qx[0], ay = qy[1] - qy[0], bx = qx[2] - qx[0], by = qy[2] - qy[0];
+	/* [a b] [u v]^-1 */
+	double xx = (ax * vy - bx * uy) / det, xy = (bx * ux - ax * vx) / det;
+	double yx = (ay * vy - by * uy) / det, yy = (by * ux - ay * vx) / det;
+	cairo_matrix_init(m, xx, yx, xy, yy, qx[0] - (xx * px[0] + xy * py[0]),
+		qy[0] - (yx * px[0] + yy * py[0]));
+	return true;
+}
+
+/* What the console's sheet with the lid up (rr->console_bare) has that the first has not, out
+ * of it once a room: what the lid was over -- the four under it --, the lid all the way up, its
+ * underside and its free edge, and the shadow it throws. The shadow is a veil as dark as the
+ * second sheet is darker than the first, over whatever is there: the lid is a sprite of its own,
+ * over the others, and cannot multiply them. */
+static struct {
+	unsigned serial;
+	bool ok;
+	int fx0, fy0, fx1, fy1;
+	cairo_surface_t *foot;
+	int lx0, ly0, lx1, ly1;
+	cairo_surface_t *lid;
+	int sx0, sy0, sx1, sy1;
+	cairo_surface_t *shade;
+} g_lidup;
+
+static void cc_lid_up_drop(void)
+{
+	cairo_surface_t **s[3] = { &g_lidup.foot, &g_lidup.lid, &g_lidup.shade };
+	for (int i = 0; i < 3; i++) {
+		if (*s[i]) {
+			cairo_surface_destroy(*s[i]);
+			*s[i] = NULL;
+		}
+	}
+	g_lidup.ok = false;
+}
+
+static double cc_px_lum(const uint32_t *row, int x)
+{
+	uint32_t c = row[x];
+	return 0.30 * ((c >> 16) & 255) + 0.59 * ((c >> 8) & 255) + 0.11 * (c & 255);
+}
+
+static bool cc_lid_up(struct room_render *rr)
+{
+	cairo_surface_t *up;
+	const unsigned char *up_ids;
+	if (!rr->console || !rr->console_ids || !room_bare_get(rr, &up, &up_ids)
+		|| !cc_lid_box(rr)) {
+		return false;
+	}
+	if (g_lidup.serial == rr->serial && g_lidup.ok) {
+		return true;
+	}
+	cc_lid_up_drop();
+	g_lidup.serial = rr->serial;
+	int w = rr->w, h = rr->h;
+	cairo_surface_flush(rr->console);
+	cairo_surface_flush(up);
+	if (cairo_image_surface_get_width(up) != w || cairo_image_surface_get_height(up) != h) {
+		return false;
+	}
+	const unsigned char *bd = cairo_image_surface_get_data(rr->console);
+	const unsigned char *ud = cairo_image_surface_get_data(up);
+	int bs = cairo_image_surface_get_stride(rr->console), us = cairo_image_surface_get_stride(up);
+	const unsigned char *ids = rr->console_ids;
+	const int LID = CC_LID + 1;
+
+	/* what it was over: where the lid lay shut, two pixels round, and not the lid up */
+	int fx0 = g_lid.x0, fy0 = g_lid.y0, fx1 = g_lid.x1, fy1 = g_lid.y1;
+	int fw = fx1 - fx0, fh = fy1 - fy0;
+	unsigned char *mask = calloc((size_t)fw * fh, 1);
+	if (!mask) {
+		return false;
+	}
+	for (int y = fy0; y < fy1; y++) {
+		for (int x = fx0; x < fx1; x++) {
+			if (!cc_lid_id(ids[(size_t)y * w + x])) {
+				continue;
+			}
+			for (int yy = y - 2; yy <= y + 2; yy++) {
+				for (int xx = x - 2; xx <= x + 2; xx++) {
+					if (yy >= fy0 && yy < fy1 && xx >= fx0 && xx < fx1
+						&& up_ids[(size_t)yy * w + xx] != LID) {
+						mask[(size_t)(yy - fy0) * fw + (xx - fx0)] = 1;
+					}
+				}
+			}
+		}
+	}
+	g_lidup.foot = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, fw, fh);
+	unsigned char *fd = cairo_image_surface_get_data(g_lidup.foot);
+	int fs = cairo_image_surface_get_stride(g_lidup.foot);
+	for (int y = 0; y < fh; y++) {
+		const uint32_t *src = (const uint32_t *)(ud + (size_t)(y + fy0) * us) + fx0;
+		uint32_t *dst = (uint32_t *)(fd + (size_t)y * fs);
+		for (int x = 0; x < fw; x++) {
+			dst[x] = mask[(size_t)y * fw + x] ? src[x] : 0u;
+		}
+	}
+	cairo_surface_mark_dirty(g_lidup.foot);
+	g_lidup.fx0 = fx0;
+	g_lidup.fy0 = fy0;
+	g_lidup.fx1 = fx1;
+	g_lidup.fy1 = fy1;
+
+	/* the lid up */
+	int lx0 = w, ly0 = h, lx1 = -1, ly1 = -1;
+	for (int y = 0; y < h; y++) {
+		const unsigned char *row = up_ids + (size_t)y * w;
+		for (int x = 0; x < w; x++) {
+			if (row[x] == LID) {
+				lx0 = x < lx0 ? x : lx0;
+				lx1 = x > lx1 ? x : lx1;
+				ly0 = y < ly0 ? y : ly0;
+				ly1 = y > ly1 ? y : ly1;
+			}
+		}
+	}
+	if (lx1 < lx0) {
+		free(mask);
+		cc_lid_up_drop();
+		return false;
+	}
+	lx1++;
+	ly1++;
+	g_lidup.lid = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, lx1 - lx0, ly1 - ly0);
+	unsigned char *ld = cairo_image_surface_get_data(g_lidup.lid);
+	int ls = cairo_image_surface_get_stride(g_lidup.lid);
+	for (int y = ly0; y < ly1; y++) {
+		const uint32_t *src = (const uint32_t *)(ud + (size_t)y * us);
+		uint32_t *dst = (uint32_t *)(ld + (size_t)(y - ly0) * ls);
+		for (int x = lx0; x < lx1; x++) {
+			dst[x - lx0] = up_ids[(size_t)y * w + x] == LID ? src[x] : 0u;
+		}
+	}
+	cairo_surface_mark_dirty(g_lidup.lid);
+	g_lidup.lx0 = lx0;
+	g_lidup.ly0 = ly0;
+	g_lidup.lx1 = lx1;
+	g_lidup.ly1 = ly1;
+
+	/* its shadow: round both, as far again as the lid up is big, wherever the same thing is
+	 * darker in the second sheet */
+	int ux0 = lx0 < fx0 ? lx0 : fx0, uy0 = ly0 < fy0 ? ly0 : fy0;
+	int ux1 = lx1 > fx1 ? lx1 : fx1, uy1 = ly1 > fy1 ? ly1 : fy1;
+	int mx = (ux1 - ux0) / 2, my = (uy1 - uy0) / 2;
+	int sx0 = ux0 - mx > 0 ? ux0 - mx : 0, sy0 = uy0 - my > 0 ? uy0 - my : 0;
+	int sx1 = ux1 + mx < w ? ux1 + mx : w, sy1 = uy1 + my < h ? uy1 + my : h;
+	int bx0 = w, by0 = h, bx1 = -1, by1 = -1;
+	unsigned char *veil = calloc((size_t)(sx1 - sx0) * (sy1 - sy0), 1);
+	if (!veil) {
+		free(mask);
+		return false;
+	}
+	for (int y = sy0; y < sy1; y++) {
+		const uint32_t *br = (const uint32_t *)(bd + (size_t)y * bs);
+		const uint32_t *ur = (const uint32_t *)(ud + (size_t)y * us);
+		for (int x = sx0; x < sx1; x++) {
+			size_t k = (size_t)y * w + x;
+			if (ids[k] != up_ids[k] || up_ids[k] == LID
+				|| (x >= fx0 && x < fx1 && y >= fy0 && y < fy1
+					&& mask[(size_t)(y - fy0) * fw + (x - fx0)])) {
+				continue;
+			}
+			double lb = cc_px_lum(br, x), lu = cc_px_lum(ur, x);
+			if (lb < 6.0 || lu > lb * 0.985) {
+				continue;
+			}
+			double a = clampf(1.0 - lu / lb, 0.0, 0.92);
+			veil[(size_t)(y - sy0) * (sx1 - sx0) + (x - sx0)] = (unsigned char)lround(a * 255.0);
+			bx0 = x < bx0 ? x : bx0;
+			bx1 = x > bx1 ? x : bx1;
+			by0 = y < by0 ? y : by0;
+			by1 = y > by1 ? y : by1;
+		}
+	}
+	free(mask);
+	if (bx1 >= bx0) {
+		bx1++;
+		by1++;
+		g_lidup.shade = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, bx1 - bx0, by1 - by0);
+		unsigned char *sd = cairo_image_surface_get_data(g_lidup.shade);
+		int ss = cairo_image_surface_get_stride(g_lidup.shade);
+		for (int y = by0; y < by1; y++) {
+			uint32_t *dst = (uint32_t *)(sd + (size_t)(y - by0) * ss);
+			for (int x = bx0; x < bx1; x++) {
+				unsigned a = veil[(size_t)(y - sy0) * (sx1 - sx0) + (x - sx0)];
+				dst[x - bx0] = (uint32_t)a << 24;   /* black, premultiplied */
+			}
+		}
+		cairo_surface_mark_dirty(g_lidup.shade);
+		g_lidup.sx0 = bx0;
+		g_lidup.sy0 = by0;
+		g_lidup.sx1 = bx1;
+		g_lidup.sy1 = by1;
+	}
+	free(veil);
+	g_lidup.ok = true;
+	return true;
+}
+
+/* (which way round a quad's corners go, in binary order: its top seen from in front or
+ * from behind) */
+static double cc_quad_turn(const double x[4], const double y[4])
+{
+	return (x[1] - x[0]) * (y[2] - y[0]) - (y[1] - y[0]) * (x[2] - x[0]);
+}
+
+static void cc_lid_layer(cairo_t *cr, double ox, double oy, double scale, cairo_surface_t *s,
+	int x, int y, double alpha)
+{
+	if (!s || alpha <= 0.0) {
+		return;
+	}
+	cairo_save(cr);
+	cairo_translate(cr, ox, oy);
+	cairo_scale(cr, scale, scale);
+	cairo_set_source_surface(cr, s, x, y);
+	cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_BILINEAR);
+	cairo_paint_with_alpha(cr, alpha);
+	cairo_restore(cr);
+}
+
+static void cc_lid_paint(cairo_t *cr, struct room_render *rr, double ox, double oy,
+	double scale, double aspect, const struct desk_console_state *st, int hover,
+	const struct desk_meters *m, double warm)
+{
+	double open = st ? clampf(st->guard, 0.0, 1.0) : 0.0;
+	if (open <= 0.0005 || !cc_lid_up(rr)) {
+		return;
+	}
+	double sw = rr->w * scale, sh = rr->h * scale;
+	const struct room_cam *cam = &rr->console_cam;
+	static const int UNDER[4] = { CC_PW_OFF, CC_PW_BOOT, CC_PW_OUT, CC_PW_SUSPEND };
+
+	/* what is under it, where it lay, and the faces of the four there */
+	cc_lid_layer(cr, ox, oy, scale, g_lidup.foot, g_lidup.fx0, g_lidup.fy0, 1.0);
+	for (int k = 0; k < 4; k++) {
+		cc_control_paint(cr, rr, ox, oy, scale, aspect, UNDER[k], st, hover, m, warm);
+	}
+	if (open >= 0.999) {
+		/* all the way up: as the second sheet has it, its shadow and all */
+		cc_lid_layer(cr, ox, oy, scale, g_lidup.shade, g_lidup.sx0, g_lidup.sy0, 1.0);
+		cc_lid_layer(cr, ox, oy, scale, g_lidup.lid, g_lidup.lx0, g_lidup.ly0, 1.0);
+		return;
+	}
+
+	double th = open * CC_LID_SWING;
+	/* the shade it stands over: against the hinge, as it comes up between the lamp and
+	 * what is under it; and, near the top, its shadow as the second sheet has it */
+	{
+		double tx[4], ty[4];
+		if (cc_lid_points(cam, 0.0, RM_CC_SKIN + 0.04, aspect, ox, oy, sw, sh, tx, ty)) {
+			cairo_save(cr);
+			cairo_move_to(cr, tx[0], ty[0]);
+			cairo_line_to(cr, tx[1], ty[1]);
+			cairo_line_to(cr, tx[3], ty[3]);
+			cairo_line_to(cr, tx[2], ty[2]);
+			cairo_close_path(cr);
+			cairo_clip(cr);
+			double a = fmax(sin(th), 0.0) * (1.0 - open);
+			cairo_pattern_t *g = cairo_pattern_create_linear((tx[0] + tx[1]) * 0.5,
+				(ty[0] + ty[1]) * 0.5, (tx[2] + tx[3]) * 0.5, (ty[2] + ty[3]) * 0.5);
+			cairo_pattern_add_color_stop_rgba(g, 0.0, 0.02, 0.015, 0.01, 0.30 * a);
+			cairo_pattern_add_color_stop_rgba(g, 0.55, 0.02, 0.015, 0.01, 0.06 * a);
+			cairo_pattern_add_color_stop_rgba(g, 1.0, 0.02, 0.015, 0.01, 0.0);
+			cairo_set_source(cr, g);
+			cairo_paint(cr);
+			cairo_pattern_destroy(g);
+			cairo_restore(cr);
+		}
+		double near = clampf((open - 0.55) / 0.45, 0.0, 1.0);
+		cc_lid_layer(cr, ox, oy, scale, g_lidup.shade, g_lidup.sx0, g_lidup.sy0, near * near);
+	}
+
+	/* the lid: its top from the first sheet while it is the top that faces this way, and past
+	 * upright its underside from the second, laid where its corners have got to */
+	double px[4], py[4], qx[4], qy[4];
+	if (!cc_lid_points(cam, 0.0, CC_LID_N1, aspect, -g_lid.x0, -g_lid.y0, rr->w, rr->h, px, py)
+		|| !cc_lid_points(cam, open, CC_LID_N1, aspect, ox, oy, sw, sh, qx, qy)) {
+		return;
+	}
+	bool top = cc_quad_turn(px, py) * cc_quad_turn(qx, qy) > 0.0;
+	if (!top) {
+		double ax[4], ay[4], bx[4], by[4];
+		cairo_matrix_t mt;
+		if (cc_lid_points(cam, 1.0, CC_LID_N0, aspect, -g_lidup.lx0, -g_lidup.ly0, rr->w,
+			rr->h, ax, ay) && cc_lid_points(cam, open, CC_LID_N0, aspect, ox, oy, sw, sh, bx,
+			by) && cc_affine3(ax, ay, bx, by, &mt)) {
+			cairo_save(cr);
+			cairo_transform(cr, &mt);
+			cairo_set_source_surface(cr, g_lidup.lid, 0, 0);
+			cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_BILINEAR);
+			cairo_paint(cr);
+			cairo_restore(cr);
+		}
+		return;
+	}
+	cairo_surface_t *pic = cc_lid_pic(rr, aspect, st, m, warm);
+	cairo_matrix_t mt;
+	if (!pic || !cc_affine3(px, py, qx, qy, &mt)) {
+		return;
+	}
+	cairo_save(cr);
+	cairo_transform(cr, &mt);
+	cairo_set_source_surface(cr, pic, 0, 0);
+	cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_BILINEAR);
+	cairo_paint(cr);
+	/* turned from the lamp, and the room's light off it, as it comes up */
+	cairo_set_source_rgba(cr, 0.03, 0.02, 0.012, 0.42 * sin(th) * sin(th));
+	cairo_mask_surface(cr, pic, 0, 0);
+	cairo_restore(cr);
+
+	/* its free edge, which you look at the end grain of as it comes up, and the brass lip */
+	double bx[4], by[4];
+	if (th > 0.05 && cc_lid_points(cam, open, CC_LID_N0, aspect, ox, oy, sw, sh, bx, by)) {
+		cairo_save(cr);
+		cairo_move_to(cr, qx[2], qy[2]);
+		cairo_line_to(cr, qx[3], qy[3]);
+		cairo_line_to(cr, bx[3], by[3]);
+		cairo_line_to(cr, bx[2], by[2]);
+		cairo_close_path(cr);
+		cairo_pattern_t *g = cairo_pattern_create_linear((qx[2] + qx[3]) * 0.5,
+			(qy[2] + qy[3]) * 0.5, (bx[2] + bx[3]) * 0.5, (by[2] + by[3]) * 0.5);
+		cairo_pattern_add_color_stop_rgb(g, 0.0, 0.40, 0.25, 0.14);
+		cairo_pattern_add_color_stop_rgb(g, 1.0, 0.20, 0.12, 0.065);
+		cairo_set_source(cr, g);
+		cairo_fill_preserve(cr);
+		cairo_pattern_destroy(g);
+		cairo_set_line_width(cr, fmax(1.0, sh * 0.0012));
+		cairo_set_source_rgba(cr, 0.06, 0.035, 0.015, 0.75);
+		cairo_stroke(cr);
+		/* the lip, along the top of it */
+		double lx0 = qx[2] + (qx[3] - qx[2]) * 0.40, ly0 = qy[2] + (qy[3] - qy[2]) * 0.40;
+		double lx1 = qx[2] + (qx[3] - qx[2]) * 0.60, ly1 = qy[2] + (qy[3] - qy[2]) * 0.60;
+		cairo_move_to(cr, lx0, ly0);
+		cairo_line_to(cr, lx1, ly1);
+		cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+		cairo_set_line_width(cr, fmax(1.6, sh * 0.0042));
+		cairo_set_source_rgb(cr, 0.80, 0.64, 0.34);
+		cairo_stroke(cr);
+		cairo_restore(cr);
+	}
+}
+
+static void cc_lid_box_screen(struct room_render *rr, double ox, double oy, double scale,
+	double aspect, double box[4])
+{
+	double x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+	if (cc_lid_box(rr)) {
+		x0 = ox + g_lid.x0 * scale;
+		y0 = oy + g_lid.y0 * scale;
+		x1 = ox + g_lid.x1 * scale;
+		y1 = oy + g_lid.y1 * scale;
+	}
+	/* and the shadow it throws, up, as the console's other sheet has it */
+	if (cc_lid_up(rr) && g_lidup.shade) {
+		x0 = fmin(x0, ox + g_lidup.sx0 * scale);
+		y0 = fmin(y0, oy + g_lidup.sy0 * scale);
+		x1 = fmax(x1, ox + g_lidup.sx1 * scale);
+		y1 = fmax(y1, oy + g_lidup.sy1 * scale);
+	}
+	/* and wherever it swings to: its top and its underside, all the way up */
+	for (int t = 0; t <= 8; t++) {
+		for (int nn = 0; nn < 2; nn++) {
+			double x[4], y[4];
+			if (!cc_lid_points(&rr->console_cam, t / 8.0, nn ? CC_LID_N1 : CC_LID_N0, aspect, ox,
+				oy, rr->w * scale, rr->h * scale, x, y)) {
+				continue;
+			}
+			for (int k = 0; k < 4; k++) {
+				x0 = fmin(x0, x[k]);
+				y0 = fmin(y0, y[k]);
+				x1 = fmax(x1, x[k]);
+				y1 = fmax(y1, y[k]);
+			}
+		}
+	}
+	box[0] = floor(x0) - 4.0;
+	box[1] = floor(y0) - 4.0;
+	box[2] = ceil(x1) + 4.0 - box[0];
+	box[3] = ceil(y1) + 4.0 - box[1];
 }
 
 /* One piece of the set's live half: a control, the nameplate, the row of
- * lenses, or the glass. The compositor keeps each as a sprite of its own
+ * lenses, or the lid as it swings. The compositor keeps each as a sprite of its own
  * and redraws it only when its key moves; the preview paints them all. */
 static void console_piece_paint(cairo_t *cr, int screen_h, struct room_render *rr,
 	double ox, double oy, double scale, double aspect, int p,
@@ -20588,15 +28482,20 @@ static void console_piece_paint(cairo_t *cr, int screen_h, struct room_render *r
 	double warm)
 {
 	if (p < CC_COUNT) {
+		/* what is under the lid is drawn with it, as it is up (cc_lid_paint), and what is on
+		 * it, as it swings; the lid itself is in the sheet */
+		double open = st ? st->guard : 0.0;
+		if (p == CC_LID || CC[p].on == CC_ON_UNDER || (CC[p].on == CC_ON_LID && open > 0.0005)) {
+			return;
+		}
 		cc_control_paint(cr, rr, ox, oy, scale, aspect, p, st, hover, m, warm);
 	} else if (p == DESK_CCP_PLATE) {
 		cc_nameplate(cr, &rr->console_cam, ox, oy, rr->w * scale, rr->h * scale,
 			1.0, aspect, 1.0);
 	} else if (p == DESK_CCP_LENSES) {
-		cc_lenses_paint(cr, rr, ox, oy, scale, warm, screen_h);
+		cc_lenses_paint(cr, rr, ox, oy, scale, warm, screen_h, st);
 	} else if (p == DESK_CCP_GUARD) {
-		cc_guard(cr, &rr->console_cam, ox, oy, rr->w * scale, rr->h * scale,
-			1.0, aspect, st ? st->guard : 0.0);
+		cc_lid_paint(cr, rr, ox, oy, scale, aspect, st, hover, m, warm);
 	} else if (p == DESK_CCP_ANTENNA) {
 		cc_antenna(cr, rr, ox, oy, scale, aspect, st ? st->antenna : 1.0);
 	}
@@ -20650,17 +28549,6 @@ void desk_console_advance(const struct desk_console_state *st,
 	cc_trace_step(m ? m->cpu : 0.0, st ? st->clock : 0.0);
 }
 
-static uint64_t key_mix(uint64_t h, const void *p, size_t n)
-{
-	const unsigned char *c = p;
-	for (size_t i = 0; i < n; i++) {
-		h = (h ^ c[i]) * 1099511628211ull;
-	}
-	return h;
-}
-#define KEY_ADD(h, v) do { __typeof__(v) key_v_ = (v); \
-	(h) = key_mix((h), &key_v_, sizeof key_v_); } while (0)
-
 uint64_t desk_console_piece_key(int p, const struct desk_console_state *st,
 	int hover, const struct desk_meters *m)
 {
@@ -20668,9 +28556,7 @@ uint64_t desk_console_piece_key(int p, const struct desk_console_state *st,
 	KEY_ADD(h, p);
 	double warm = clampf(st ? st->warm : 1.0, 0.0, 1.0);
 	if (p < CC_COUNT) {
-		const double LAMP_W = 0.26;
-		double lit = clampf((warm - p * (1.0 - LAMP_W) / (CC_COUNT - 1)) / LAMP_W,
-			0.0, 1.0);
+		double lit = cc_lit(warm, p);
 		KEY_ADD(h, lit);
 		KEY_ADD(h, hover == p);
 	}
@@ -20678,6 +28564,8 @@ uint64_t desk_console_piece_key(int p, const struct desk_console_state *st,
 	case CC_CRT:
 		/* the beam sweeps with the clock: a new face every frame */
 		KEY_ADD(h, st ? st->clock : 0.0);
+		KEY_ADD(h, st ? st->screens_said : -1);
+		KEY_ADD(h, st ? st->screens_word : 0.0);
 		KEY_ADD(h, m->cpu);
 		KEY_ADD(h, m->mem);
 		KEY_ADD(h, m->temp_c);
@@ -20718,9 +28606,11 @@ uint64_t desk_console_piece_key(int p, const struct desk_console_state *st,
 	case CC_PW_OFF:
 	case CC_PW_BOOT:
 	case CC_PW_OUT:
+	case CC_PW_SUSPEND:
 		KEY_ADD(h, st ? st->key : 0.0);
 		KEY_ADD(h, st ? st->pressed : -1);
 		KEY_ADD(h, st ? st->dying : 0.0);
+		KEY_ADD(h, st && st->push_which == p ? st->push : 0.0);
 		break;
 	case CC_PW_KEY:
 		KEY_ADD(h, st ? st->key : 0.0);
@@ -20728,12 +28618,40 @@ uint64_t desk_console_piece_key(int p, const struct desk_console_state *st,
 	case CC_LOCK:
 		KEY_ADD(h, st ? st->lock_push : 0.0);
 		break;
+	case CC_SLEEP:
+		KEY_ADD(h, st && st->push_which == p ? st->push : 0.0);
+		break;
+	case CC_AIR:
+	case CC_SAVE:
+	case CC_NIGHT:
+	case CC_DISPLAY:
+		KEY_ADD(h, st && st->push_which == p ? st->push : 0.0);
+		KEY_ADD(h, st && st->air_on);
+		KEY_ADD(h, st && st->save_on);
+		KEY_ADD(h, st && st->night_on);
+		KEY_ADD(h, st && st->save_ok);
+		KEY_ADD(h, st && st->night_ok);
+		KEY_ADD(h, st ? st->screens_mode : 0);
+		KEY_ADD(h, st && st->screens_ok);
+		/* (up, or on its way, it is printed on the lid's own picture) */
+		KEY_ADD(h, st && st->guard > 0.0005);
+		break;
 	case DESK_CCP_LENSES:
 		KEY_ADD(h, warm);
+		KEY_ADD(h, st ? st->key : 0.0);
+		KEY_ADD(h, st ? st->dying : 0.0);
 		break;
-	case DESK_CCP_GUARD:
+	case DESK_CCP_GUARD: {
 		KEY_ADD(h, st ? st->guard : 0.0);
+		KEY_ADD(h, hover);
+		KEY_ADD(h, warm);
+		static const int WITH[8] = { CC_PW_OFF, CC_PW_BOOT, CC_PW_OUT, CC_PW_SUSPEND,
+			CC_AIR, CC_SAVE, CC_NIGHT, CC_DISPLAY };
+		for (int k = 0; k < 8 && st && st->guard > 0.0005; k++) {
+			KEY_ADD(h, desk_console_piece_key(WITH[k], st, hover, m));
+		}
 		break;
+	}
 	case DESK_CCP_ANTENNA:
 		KEY_ADD(h, st ? st->antenna : 1.0);
 		break;
@@ -20743,10 +28661,88 @@ uint64_t desk_console_piece_key(int p, const struct desk_console_state *st,
 	return h;
 }
 
+/* Where the pieces that are not controls are drawn: the nameplate, the row of lenses with the
+ * guarded set's lamp, and the aerial all the way up -- each a box round what they can cover,
+ * on the screen and no further. */
+static void cc_extra_box(struct room_render *rr, double ox, double oy, double scale, int w, int h,
+	int p, double box[4])
+{
+	double aspect = (double)rr->w / (double)(rr->h > 0 ? rr->h : 1);
+	double sw = rr->w * scale, sh = rr->h * scale;
+	struct cc_face panel, tower;
+	cc_faces(&panel, &tower);
+	double x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+	vec3 pts[24];
+	double grow[24];
+	int n = 0;
+	if (p == DESK_CCP_LENSES) {
+		double inner = (RM_CC_X1 - RM_CC_X0) * 0.5 - RM_CC_CHEEK;
+		for (int i = 0; i < 6; i++) {
+			double u = -inner + 0.70 + i * (2.0 * (inner - 0.70) / 5.0);
+			pts[n] = cc_world(&panel, u, 0.17, -panel.half + 0.136, 1.0, aspect);
+			grow[n++] = h * 0.011 * 2.8 + 2.0;
+		}
+		pts[n] = cc_world(&panel, CC_PW_LOCK_U, RM_CC_SKIN + 0.20, CC_PW_LAMP_S, 1.0, aspect);
+		grow[n++] = h * 0.014 * 2.8 + 2.0;
+	} else if (p == DESK_CCP_PLATE) {
+		vec3 q[4];
+		cc_plate_quad(1.0, aspect, q);
+		for (int k = 0; k < 4; k++) {
+			pts[n] = q[k];
+			grow[n++] = 12.0;
+		}
+	} else {
+		/* the aerial: up from its foot as far as it goes, and as thick as its boss */
+		vec3 foot = cc_world(&tower, CC_ANT_U, RM_CC_SKIN + 0.02, CC_ANT_S, 1.0, aspect);
+		double top = 0.34 + 5.0 * 1.10 + 0.11;
+		for (int k = 0; k <= 8; k++) {
+			pts[n] = vadd(foot, v3(0.0, top * k / 8.0, 0.0));
+			grow[n++] = -1.0;   /* (its thickness, measured on the screen below) */
+		}
+	}
+	for (int k = 0; k < n; k++) {
+		double u, v;
+		if (!room_project(&rr->console_cam, pts[k], &u, &v)) {
+			continue;
+		}
+		double x = ox + u * sw, y = oy + v * sh, g = grow[k];
+		if (g < 0.0) {
+			double u2, v2;
+			g = room_project(&rr->console_cam, vadd(pts[k], v3(0.20, 0.0, 0.0)), &u2, &v2)
+				? hypot((u2 - u) * sw, (v2 - v) * sh) + 6.0 : 24.0;
+		}
+		x0 = fmin(x0, x - g);
+		y0 = fmin(y0, y - g);
+		x1 = fmax(x1, x + g);
+		y1 = fmax(y1, y + g);
+	}
+	x0 = fmax(x0, 0.0);
+	y0 = fmax(y0, 0.0);
+	x1 = fmin(x1, (double)w);
+	y1 = fmin(y1, (double)h);
+	box[0] = floor(x0);
+	box[1] = floor(y0);
+	box[2] = x1 > x0 ? ceil(x1) - box[0] : 0.0;
+	box[3] = y1 > y0 ? ceil(y1) - box[1] : 0.0;
+}
+
 bool desk_console_piece_box(int w, int h, int p, double box[4])
 {
 	struct room_render *rr;
 	double ox, oy, scale;
+	if (p == DESK_CCP_GUARD && console_xform(w, h, &rr, &ox, &oy, &scale)) {
+		cc_lid_box_screen(rr, ox, oy, scale, (double)rr->w / (double)(rr->h > 0 ? rr->h : 1),
+			box);
+		return box[2] > 0.0 && box[3] > 0.0;
+	}
+	if ((p == DESK_CCP_PLATE || p == DESK_CCP_LENSES || p == DESK_CCP_ANTENNA)
+		&& console_xform(w, h, &rr, &ox, &oy, &scale)) {
+		/* (2026-11-12) the nameplate, the lenses' glow and the aerial had no box, and so were
+		 * each drawn on a whole screen and looked over for where they had been drawn: on a
+		 * Surface Pro's 2736 by 1824 at High, 25 to 40 ms each, the first time the set came up */
+		cc_extra_box(rr, ox, oy, scale, w, h, p, box);
+		return box[2] > 0.0 && box[3] > 0.0;
+	}
 	if (p >= CC_COUNT || !console_xform(w, h, &rr, &ox, &oy, &scale)) {
 		return false;
 	}
@@ -20770,14 +28766,23 @@ bool desk_console_piece_box(int w, int h, int p, double box[4])
 		x1 = fmax(x1, x);
 		y1 = fmax(y1, y);
 	}
+	/* (pasted onto its decks, it reaches as far as the top of the tallest) */
+	double px0, py0, px1, py1;
+	if (cc_paste_bounds(&rr->console_cam, aspect, ox, oy, rr->w * scale, rr->h * scale, p,
+		&px0, &py0, &px1, &py1)) {
+		x0 = fmin(x0, px0 - 1.0);
+		y0 = fmin(y0, py0 - 1.0);
+		x1 = fmax(x1, px1 + 1.0);
+		y1 = fmax(y1, py1 + 1.0);
+	}
 	if (p == CC_WIFI || p == CC_BT || p == CC_PW_KEY || p == CC_BRIGHT || p == CC_SCREEN) {
 		/* what stands up off the face, wherever it is in its travel,
 		 * and its shadow */
 		struct cc_face panel, tower;
 		cc_faces(&panel, &tower);
-		double hu = p == CC_PW_KEY ? 0.90 : CC[p].hu, hs = CC[p].hs;
+		double hu = p == CC_PW_KEY ? CC[p].hu + 0.30 : CC[p].hu, hs = CC[p].hs;
 		for (int k = 0; k < 8; k++) {
-			vec3 c = cc_world(&panel, CC[p].u + ((k & 1) ? hu : -hu),
+			vec3 c = cc_world(CC[p].tower ? &tower : &panel, CC[p].u + ((k & 1) ? hu : -hu),
 				RM_CC_SKIN + ((k & 4) ? 0.75 : 0.0), CC[p].s + ((k & 2) ? hs : -hs), 1.0,
 				aspect);
 			double u, v;
@@ -23327,12 +31332,29 @@ void desk_draw_post_idle(cairo_t *cr, int screen_w, int screen_h,
  * felt tiles made from noise, pixel by pixel, the first time anything asks
  * for them, which at login was three seconds on a machine of 2010 before
  * the first frame. */
+/* linear light to the screen's (sRGB) */
+static double to_srgb(double c)
+{
+	c = clampf(c, 0.0, 1.0);
+	return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055;
+}
+
 static void room_placeholder(cairo_t *cr, int w, int h)
 {
+	/* the boards, in the desk's own wood: walnut's, as they always were */
+	double mid[3] = { 0.410, 0.255, 0.140 };
+	if (desk_look() != 0) {
+		const struct wood *wd0 = &DESK_WOODS[atomic_load(&g_desk_wood)];
+		vec3 a = stained(vmix(wd0->light, wd0->dark, 0.35), atomic_load(&g_desk_stain));
+		/* (walnut's middle comes out as the colour above: the same way, the rest) */
+		mid[0] = to_srgb(a.x) * 0.79;
+		mid[1] = to_srgb(a.y) * 0.79;
+		mid[2] = to_srgb(a.z) * 0.79;
+	}
 	cairo_pattern_t *wd = cairo_pattern_create_linear(0, 0, w * 0.35, h);
-	cairo_pattern_add_color_stop_rgb(wd, 0.0, 0.330, 0.200, 0.110);
-	cairo_pattern_add_color_stop_rgb(wd, 0.5, 0.410, 0.255, 0.140);
-	cairo_pattern_add_color_stop_rgb(wd, 1.0, 0.300, 0.180, 0.095);
+	cairo_pattern_add_color_stop_rgb(wd, 0.0, mid[0] * 0.805, mid[1] * 0.784, mid[2] * 0.786);
+	cairo_pattern_add_color_stop_rgb(wd, 0.5, mid[0], mid[1], mid[2]);
+	cairo_pattern_add_color_stop_rgb(wd, 1.0, mid[0] * 0.732, mid[1] * 0.706, mid[2] * 0.679);
 	cairo_set_source(cr, wd);
 	cairo_paint(cr);
 	cairo_pattern_destroy(wd);
@@ -23511,6 +31533,12 @@ unsigned desk_console_room(int w, int h)
 	return rr && rr->console ? rr->serial : 0;
 }
 
+unsigned desk_view_room(int w, int h, int view)
+{
+	struct room_render *rr = room_for_view(w, h, view);
+	return rr ? rr->serial : 0;
+}
+
 void desk_scene_warm(int screen_w, int screen_h, bool async)
 {
 	desk_light_desk(screen_w, screen_h);
@@ -23610,6 +31638,59 @@ double desk_night_alpha_at(int w, int h, double light, double x, double y)
 	double t = clampf(hypot(x - n.lx, y - n.ly) / fmax(n.r, 1.0), 0.0, 1.0);
 	double mid = n.a0 * 0.35 + n.a1 * 0.65;
 	return t < 0.5 ? n.a0 + (mid - n.a0) * t * 2.0 : mid + (n.a1 - mid) * (t - 0.5) * 2.0;
+}
+
+void desk_draw_lids(cairo_t *cr, int w, int h, double open)
+{
+	if (w < 8 || h < 8 || open >= 1.0) {
+		return;
+	}
+	open = clampf(open, 0.0, 1.0);
+	/* made a quarter the size, stretched: it is all soft */
+	int sw = w / 4 > 8 ? w / 4 : 8, sh = h / 4 > 8 ? h / 4 : 8;
+	cairo_surface_t *img = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, sw, sh);
+	if (cairo_surface_status(img) != CAIRO_STATUS_SUCCESS) {
+		cairo_surface_destroy(img);
+		return;
+	}
+	cairo_surface_flush(img);
+	unsigned char *px = cairo_image_surface_get_data(img);
+	int stride = cairo_image_surface_get_stride(img);
+	double cx = w * 0.5, cy = h * 0.5;
+	/* how far each lid's edge is drawn back from the middle line: slowly
+	 * at first (half open is a slit), over the corners of the screen wide
+	 * open, and shut with all of its soft edge over the line */
+	double soft = h * (0.03 + 0.10 * open);
+	double up = open * open * h * 1.35 - soft, down = open * open * h * 1.5 - soft;
+	for (int j = 0; j < sh; j++) {
+		uint32_t *row = (uint32_t *)(px + (size_t)j * (size_t)stride);
+		double y = (j + 0.5) * h / sh;
+		for (int i = 0; i < sw; i++) {
+			double x = (i + 0.5) * w / sw;
+			double u = (x - cx) / (w * 0.75), arch = 1.0 - u * u;
+			/* past the edge of the lid it is in (above the middle the upper
+			 * one, below it the lower), in pixels: less than 0 is open */
+			double d = y < cy ? (cy - y) - up * arch : (y - cy) - down * arch * (0.85 + 0.15 * arch);
+			double a = clampf((d + soft) / (2.0 * soft), 0.0, 1.0);
+			a = a * a * (3.0 - 2.0 * a);
+			/* the light coming through near the edge: deep red, then dark */
+			double glow = exp(-fmax(d, 0.0) / (soft * 2.5 + 1.0)) * (0.35 + 0.65 * open);
+			double r = 0.012 + 0.10 * glow, g = 0.006 + 0.025 * glow, b = 0.004 + 0.012 * glow;
+			uint32_t A = (uint32_t)lround(a * 255.0);
+			uint32_t R = (uint32_t)lround(r * a * 255.0), G = (uint32_t)lround(g * a * 255.0),
+				B = (uint32_t)lround(b * a * 255.0);
+			row[i] = A << 24 | R << 16 | G << 8 | B;
+		}
+	}
+	cairo_surface_mark_dirty(img);
+	cairo_save(cr);
+	cairo_scale(cr, (double)w / sw, (double)h / sh);
+	cairo_set_source_surface(cr, img, 0, 0);
+	cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_BILINEAR);
+	cairo_pattern_set_extend(cairo_get_source(cr), CAIRO_EXTEND_PAD);
+	cairo_paint(cr);
+	cairo_restore(cr);
+	cairo_surface_destroy(img);
 }
 
 /* Whether the room for THIS size is traced. Not the same question as
@@ -23791,7 +31872,7 @@ double desk_scene_views_progress(int *view)
 
 static struct desk_clock_state g_clk;
 static const char *const CLK_KEY_NAME[DESK_CLOCK_KEYS] = { "clock|CLOCK", "clock|DAY",
-	"clock|MEDIA", "clock|POWER" };
+	"clock|MEDIA", "clock|PC" };
 
 static double clk_key_x(int i)
 {
@@ -23810,9 +31891,13 @@ void desk_clock_set(const struct desk_clock_state *st)
 
 /* ---- the light ---- */
 
+/* the colour they light: the clock's red, unless what is being drawn with
+ * them is something else's (the viewfinder's green) */
+static double g_led_rgb[3] = { 1.00, 0.22, 0.11 };
+
 static void led_on(cairo_t *cr, double a)
 {
-	cairo_set_source_rgba(cr, 1.00, 0.22, 0.11, a);
+	cairo_set_source_rgba(cr, g_led_rgb[0], g_led_rgb[1], g_led_rgb[2], a);
 }
 
 /* drawing only what shines -- the clock in the dark: the unlit segments
@@ -24061,6 +32146,943 @@ static double seg14_text(cairo_t *cr, const char *s, double x, double y, double 
 		x += w + gap;
 	}
 	return x - x0 - gap;
+}
+
+/* ---- Print: the viewfinder ------------------------------------------
+ *
+ * Print is a look through a camera at the screen (wm.c, snip_*). In the
+ * dark under the picture, the viewfinder's display, where a reflex camera
+ * has it: green figures and marks that show only where they are lit. At
+ * its left, the picture of what the dial is set to, the focus light --
+ * lit when the shutter would take something -- and how big that is, w by
+ * h pixels; at its right, the self-timer's mark and seconds when it is
+ * set, and the frame the film is at. In the middle of what is lit, the
+ * focusing screen's circle. In points (pt pixels each); the display is
+ * laid out in the clock's own sizes, a digit FD_H high, and scaled. */
+
+#define FD_H 36.0       /* a digit: high */
+#define FD_W 20.0       /* wide */
+#define FD_GAP 6.0      /* between two */
+#define FD_PAD 24.0     /* in from the ends of the self-timer's count */
+#define FD_LIGHT 13.0   /* the focus light, across */
+#define FD_BY 14.0      /* the x between the two, across */
+#define FL_H (FD_H + 20.0)   /* the display, high */
+#define FL_END 12.0     /* in from the picture's edges */
+#define FL_MARK 34.0    /* a mark in it, across */
+
+static double finder_scale(double pt)
+{
+	return 12.0 * pt / FD_H;   /* a digit 12 points high */
+}
+
+static double finder_line_scale(double pt)
+{
+	return 14.0 * pt / FD_H;   /* and in the display, 14 */
+}
+
+static int finder_digits(int v)
+{
+	int n = 1;
+	while (v >= 10) {
+		v /= 10;
+		n++;
+	}
+	return n;
+}
+
+/* A lit line along the current path, w across in the units it is drawn
+ * in: its halo first, as for a lit shape. */
+static void led_stroke_path(cairo_t *cr, double w, double a)
+{
+	cairo_save(cr);
+	cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
+	cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+	led_on(cr, 0.16 * a);
+	cairo_set_line_width(cr, w + 3.2);
+	cairo_stroke_preserve(cr);
+	led_on(cr, 0.22 * a);
+	cairo_set_line_width(cr, w + 1.6);
+	cairo_stroke_preserve(cr);
+	led_on(cr, a);
+	cairo_set_line_width(cr, w);
+	cairo_stroke(cr);
+	cairo_restore(cr);
+}
+
+/* The pictures on the camera's dial, and in the display: about (0, 0), a
+ * unit across -- the corners of an area drawn out (0), a sheet of paper,
+ * its corner turned down (1), a screen on its foot (2). A path only. */
+static void finder_mark_path(cairo_t *cr, int i)
+{
+	cairo_new_path(cr);
+	if (i == 0) {
+		const double c[4][2] = { { -0.5, -0.36 }, { 0.5, -0.36 }, { 0.5, 0.36 }, { -0.5, 0.36 } };
+		for (int k = 0; k < 4; k++) {
+			double sx = k == 0 || k == 3 ? 1.0 : -1.0, sy = k < 2 ? 1.0 : -1.0;
+			cairo_move_to(cr, c[k][0] + sx * 0.30, c[k][1]);
+			cairo_line_to(cr, c[k][0], c[k][1]);
+			cairo_line_to(cr, c[k][0], c[k][1] + sy * 0.24);
+		}
+	} else if (i == 1) {
+		cairo_move_to(cr, -0.38, -0.44);
+		cairo_line_to(cr, 0.20, -0.44);
+		cairo_line_to(cr, 0.38, -0.26);
+		cairo_line_to(cr, 0.38, 0.44);
+		cairo_line_to(cr, -0.38, 0.44);
+		cairo_close_path(cr);
+		cairo_move_to(cr, 0.20, -0.44);
+		cairo_line_to(cr, 0.20, -0.26);
+		cairo_line_to(cr, 0.38, -0.26);
+		cairo_move_to(cr, -0.22, -0.10);
+		cairo_line_to(cr, 0.22, -0.10);
+		cairo_move_to(cr, -0.22, 0.12);
+		cairo_line_to(cr, 0.22, 0.12);
+	} else {
+		cairo_rectangle(cr, -0.50, -0.42, 1.0, 0.64);
+		cairo_move_to(cr, 0.0, 0.22);
+		cairo_line_to(cr, 0.0, 0.40);
+		cairo_move_to(cr, -0.22, 0.42);
+		cairo_line_to(cr, 0.22, 0.42);
+	}
+}
+
+/* the self-timer's mark, likewise: a stopwatch */
+static void finder_timer_path(cairo_t *cr)
+{
+	cairo_new_path(cr);
+	cairo_new_sub_path(cr);
+	cairo_arc(cr, 0.0, 0.08, 0.38, 0.0, 2.0 * M_PI);
+	cairo_move_to(cr, 0.0, -0.30);
+	cairo_line_to(cr, 0.0, -0.46);
+	cairo_move_to(cr, -0.13, -0.46);
+	cairo_line_to(cr, 0.13, -0.46);
+	cairo_move_to(cr, 0.0, 0.08);
+	cairo_line_to(cr, 0.17, -0.10);
+}
+
+/* and the film's: a frame of it, the sprocket holes over and under it */
+static void finder_film_path(cairo_t *cr)
+{
+	cairo_new_path(cr);
+	cairo_rectangle(cr, -0.50, -0.38, 1.0, 0.76);
+	cairo_rectangle(cr, -0.28, -0.17, 0.56, 0.34);
+	for (int k = 0; k < 2; k++) {
+		double x = k ? 0.16 : -0.16;
+		cairo_move_to(cr, x - 0.05, -0.28);
+		cairo_line_to(cr, x + 0.05, -0.28);
+		cairo_move_to(cr, x - 0.05, 0.28);
+		cairo_line_to(cr, x + 0.05, 0.28);
+	}
+}
+
+/* and a tape's: a cassette, its two reels and, along its foot, the tape */
+static void finder_tape_path(cairo_t *cr)
+{
+	cairo_new_path(cr);
+	cairo_rectangle(cr, -0.50, -0.36, 1.0, 0.72);
+	for (int k = 0; k < 2; k++) {
+		cairo_new_sub_path(cr);
+		cairo_arc(cr, k ? 0.22 : -0.22, -0.06, 0.12, 0.0, 2.0 * M_PI);
+	}
+	cairo_move_to(cr, -0.32, 0.36);
+	cairo_line_to(cr, -0.24, 0.20);
+	cairo_line_to(cr, 0.24, 0.20);
+	cairo_line_to(cr, 0.32, 0.36);
+}
+
+/* How long a tape has run, as a camcorder shows it: minutes and seconds,
+ * hours before them past the hour, a colon between -- two lit dots. From
+ * x (or, measure, just how wide). */
+#define FD_COLON 12.0
+static double finder_time(cairo_t *cr, int secs, double x, double y, bool measure)
+{
+	int v = secs < 0 ? 0 : secs > 359999 ? 359999 : secs;
+	char g[3][4];
+	int n = 0;
+	if (v >= 3600) {
+		snprintf(g[n++], sizeof g[0], "%d", v / 3600);
+		snprintf(g[n++], sizeof g[0], "%02d", v / 60 % 60);
+	} else {
+		snprintf(g[n++], sizeof g[0], "%d", v / 60);
+	}
+	snprintf(g[n++], sizeof g[0], "%02d", v % 60);
+	double x0 = x;
+	for (int i = 0; i < n; i++) {
+		if (i > 0) {
+			if (!measure) {
+				for (int k = 0; k < 2; k++) {
+					/* (leaning with the digits) */
+					double dy = FD_H * (k ? 0.70 : 0.32);
+					cairo_arc(cr, x + FD_COLON * 0.5 + (FD_H - dy) * 0.10 - 1.0, y + dy,
+						FD_W * 0.12, 0.0, 2.0 * M_PI);
+					led_fill_path(cr, 1.0);
+				}
+			}
+			x += FD_COLON;
+		}
+		int digits = (int)strlen(g[i]);
+		if (!measure) {
+			seg7_text(cr, g[i], x, y, FD_W, FD_H, FD_GAP, 1.0);
+		}
+		x += digits * (FD_W + FD_GAP) - FD_GAP;
+		if (i + 1 < n) {
+			x += FD_GAP;
+		}
+	}
+	return x - x0;
+}
+
+/* a red light, lit: the dot a camera running shows */
+static void finder_rec_dot(cairo_t *cr, double cx, double cy, double r)
+{
+	double was[3] = { g_led_rgb[0], g_led_rgb[1], g_led_rgb[2] };
+	g_led_rgb[0] = 1.00;
+	g_led_rgb[1] = 0.16;
+	g_led_rgb[2] = 0.10;
+	cairo_arc(cr, cx, cy, r, 0.0, 2.0 * M_PI);
+	led_fill_path(cr, 1.0);
+	g_led_rgb[0] = was[0];
+	g_led_rgb[1] = was[1];
+	g_led_rgb[2] = was[2];
+}
+
+/* one of the marks at (x, y) in the display, lit */
+static void finder_line_mark(cairo_t *cr, void (*path)(cairo_t *), int i, double x, double y)
+{
+	cairo_save(cr);
+	cairo_translate(cr, x, y);
+	cairo_scale(cr, FL_MARK, FL_MARK);
+	if (path) {
+		path(cr);
+	} else {
+		finder_mark_path(cr, i);
+	}
+	cairo_restore(cr);
+	led_stroke_path(cr, 3.4, 1.0);
+}
+
+int desk_finder_line_height(double pt)
+{
+	return (int)ceil(FL_H * finder_line_scale(pt));
+}
+
+void desk_draw_finder_line(cairo_t *cr, int width, const struct desk_finder_line *l, double pt)
+{
+	double s = finder_line_scale(pt);
+	double uw = width / s, y = 10.0, my = y + FD_H * 0.5;
+	char num[16];
+	cairo_save(cr);
+	cairo_scale(cr, s, s);
+	double was[3] = { g_led_rgb[0], g_led_rgb[1], g_led_rgb[2] };
+	g_led_rgb[0] = 0.56;
+	g_led_rgb[1] = 1.00;
+	g_led_rgb[2] = 0.32;
+	g_led_lit_only = true;
+	/* at the left: what the dial is at; the focus light and how big */
+	double x = FL_END;
+	finder_line_mark(cr, NULL, l->mode, x + FL_MARK * 0.5, my);
+	x += FL_MARK + 22.0;
+	if (l->ready) {
+		cairo_arc(cr, x + FD_LIGHT * 0.5, my, FD_LIGHT * 0.5, 0, 2 * M_PI);
+		led_fill_path(cr, 1.0);
+		x += FD_LIGHT + 22.0;
+		snprintf(num, sizeof num, "%d", l->w);
+		x += seg7_text(cr, num, x, y, FD_W, FD_H, FD_GAP, 1.0) + 12.0;
+		/* by: a fourteen segment X, half as high */
+		struct seg_box by = { x, y + FD_H * 0.25, FD_BY, FD_H * 0.5, FD_H * 0.05 };
+		seg14_char(cr, &by, 'X', 1.0);
+		x += FD_BY + 12.0;
+		snprintf(num, sizeof num, "%d", l->h);
+		seg7_text(cr, num, x, y, FD_W, FD_H, FD_GAP, 1.0);
+	}
+	/* at the right, from its end: the frame -- or the tape's time, and
+	 * the red dot before it running -- and the self-timer before that */
+	if (l->tape) {
+		x = uw - FL_END - finder_time(cr, l->secs, 0.0, y, true);
+		finder_time(cr, l->secs, x, y, false);
+		if (l->rec) {
+			x -= 14.0 + FD_LIGHT;
+			finder_rec_dot(cr, x + FD_LIGHT * 0.5, my, FD_LIGHT * 0.5);
+		}
+		x -= 14.0 + FL_MARK;
+		finder_line_mark(cr, finder_tape_path, 0, x + FL_MARK * 0.5, my);
+	} else {
+		x = uw - FL_END - (finder_digits(l->frame) * (FD_W + FD_GAP) - FD_GAP);
+		snprintf(num, sizeof num, "%d", l->frame);
+		seg7_text(cr, num, x, y, FD_W, FD_H, FD_GAP, 1.0);
+		x -= 14.0 + FL_MARK;
+		finder_line_mark(cr, finder_film_path, 0, x + FL_MARK * 0.5, my);
+	}
+	if (l->timer > 0) {
+		x -= 40.0 + (finder_digits(l->timer) * (FD_W + FD_GAP) - FD_GAP);
+		snprintf(num, sizeof num, "%d", l->timer);
+		seg7_text(cr, num, x, y, FD_W, FD_H, FD_GAP, 1.0);
+		x -= 14.0 + FL_MARK;
+		finder_line_mark(cr, finder_timer_path, 0, x + FL_MARK * 0.5, my);
+	}
+	g_led_lit_only = false;
+	g_led_rgb[0] = was[0];
+	g_led_rgb[1] = was[1];
+	g_led_rgb[2] = was[2];
+	cairo_restore(cr);
+}
+
+/* the shade's depth at t (0 by the lit area .. 1 a penumbra away): a
+ * step down out of the light at its edge, as a lamp's beam has, and then
+ * on into the dark */
+static double finder_shade(double t)
+{
+	double u = clampf(t, 0.0, 1.0);
+	return 0.32 + 0.68 * u * u * (3.0 - 2.0 * u);
+}
+
+void desk_draw_finder_penumbra(cairo_t *cr, int n, int part)
+{
+	cairo_surface_t *s = cairo_get_target(cr);
+	cairo_surface_flush(s);
+	unsigned char *data = cairo_image_surface_get_data(s);
+	int stride = cairo_image_surface_get_stride(s);
+	int w = cairo_image_surface_get_width(s), h = cairo_image_surface_get_height(s);
+	if (!data || n < 1) {
+		return;
+	}
+	/* a warm black, as the dark between the lamp's light and the room */
+	const double r = 0.070, g = 0.056, bl = 0.040;
+	for (int y = 0; y < h; y++) {
+		uint32_t *row = (uint32_t *)(void *)(data + (size_t)y * (size_t)stride);
+		for (int x = 0; x < w; x++) {
+			double fx = n > 1 ? (double)x / (n - 1) : 0.5, fy = n > 1 ? (double)y / (n - 1) : 0.5;
+			double t;
+			switch (part) {
+			case 0: t = 1.0 - fy; break;                  /* over the top edge */
+			case 1: t = fx; break;                        /* right of it */
+			case 2: t = fy; break;                        /* under it */
+			case 3: t = 1.0 - fx; break;                  /* left of it */
+			case 4: t = hypot(1.0 - fx, 1.0 - fy); break; /* the corners: top left */
+			case 5: t = hypot(fx, 1.0 - fy); break;       /* top right */
+			case 6: t = hypot(fx, fy); break;             /* bottom right */
+			default: t = hypot(1.0 - fx, fy); break;      /* bottom left */
+			}
+			double a = finder_shade(t);
+			row[x] = (unsigned)lround(a * 255.0) << 24 | (unsigned)lround(r * a * 255.0) << 16
+				| (unsigned)lround(g * a * 255.0) << 8 | (unsigned)lround(bl * a * 255.0);
+		}
+	}
+	cairo_surface_mark_dirty(s);
+}
+
+void desk_draw_finder_bevel(cairo_t *cr, int n, int part)
+{
+	cairo_surface_t *s = cairo_get_target(cr);
+	cairo_surface_flush(s);
+	unsigned char *data = cairo_image_surface_get_data(s);
+	int stride = cairo_image_surface_get_stride(s);
+	int w = cairo_image_surface_get_width(s), h = cairo_image_surface_get_height(s);
+	if (!data || n < 2) {
+		return;
+	}
+	for (int y = 0; y < h; y++) {
+		uint32_t *row = (uint32_t *)(void *)(data + (size_t)y * (size_t)stride);
+		for (int x = 0; x < w; x++) {
+			/* t: 0 at the edge of the picture, 1 at the glass's own; round
+			 * the corners, out from the picture's corner, and nothing
+			 * past the glass's rounded edge */
+			double fx = (double)x / (n - 1), fy = (double)y / (n - 1), t;
+			switch (part) {
+			case 0: t = 1.0 - fy; break;
+			case 1: t = fx; break;
+			case 2: t = fy; break;
+			case 3: t = 1.0 - fx; break;
+			case 4: t = hypot(1.0 - fx, 1.0 - fy); break;
+			case 5: t = hypot(fx, 1.0 - fy); break;
+			case 6: t = hypot(fx, fy); break;
+			default: t = hypot(1.0 - fx, fy); break;
+			}
+			double cut = clampf((1.0 - t) * (n - 1) + 0.5, 0.0, 1.0);
+			/* clear glass: hardly a breath of white in it, its outer edge
+			 * a bright line, and where it meets the picture a fine dark
+			 * one */
+			double white = (0.03 + 0.08 * t * t * t
+				+ (t > 0.80 ? (t - 0.80) / 0.20 * 0.55 : 0.0)) * cut;
+			double dark = t < 0.14 ? (1.0 - t / 0.14) * 0.40 : 0.0;
+			/* the dark line over the white */
+			double a = dark + white * (1.0 - dark);
+			unsigned ai = (unsigned)lround(clampf(a, 0.0, 1.0) * 255.0);
+			unsigned vi = (unsigned)lround(clampf(white * (1.0 - dark), 0.0, 1.0) * 255.0);
+			row[x] = ai << 24 | vi << 16 | vi << 8 | vi;
+		}
+	}
+	cairo_surface_mark_dirty(s);
+}
+
+void desk_draw_finder_glint(cairo_t *cr, int w, int h)
+{
+	cairo_surface_t *s = cairo_get_target(cr);
+	cairo_surface_flush(s);
+	unsigned char *data = cairo_image_surface_get_data(s);
+	int stride = cairo_image_surface_get_stride(s);
+	if (!data || w < 2 || h < 2) {
+		return;
+	}
+	bool across = w >= h;   /* lying along x, or along y */
+	for (int y = 0; y < h; y++) {
+		uint32_t *row = (uint32_t *)(void *)(data + (size_t)y * (size_t)stride);
+		for (int x = 0; x < w; x++) {
+			double u = ((across ? x : y) + 0.5) / (across ? w : h) * 2.0 - 1.0;
+			double v = ((across ? y : x) + 0.5) / (across ? h : w) * 2.0 - 1.0;
+			/* long and soft along the edge, thin across it, hottest in the
+			 * middle */
+			double along = cos(fmin(fabs(u), 1.0) * M_PI * 0.5);
+			double a = along * along * exp(-v * v * 5.0) * (0.7 + 0.3 * along);
+			unsigned ai = (unsigned)lround(clampf(a, 0.0, 1.0) * 255.0);
+			row[x] = ai << 24 | ai << 16 | ai << 8 | ai;
+		}
+	}
+	cairo_surface_mark_dirty(s);
+}
+
+/* one channel of src at (x, y), between its pixels */
+static double finder_tap(const unsigned char *src, int sw, int sh, int stride, double x,
+	double y, int shift)
+{
+	x = clampf(x - 0.5, 0.0, sw - 1.001);
+	y = clampf(y - 0.5, 0.0, sh - 1.001);
+	int x0 = (int)x, y0 = (int)y;
+	double fx = x - x0, fy = y - y0;
+	const uint32_t *r0 = (const uint32_t *)(const void *)(src + (size_t)y0 * (size_t)stride);
+	const uint32_t *r1 = (const uint32_t *)(const void *)(src + (size_t)(y0 + 1) * (size_t)stride);
+	double a = (r0[x0] >> shift) & 0xff, b = (r0[x0 + 1] >> shift) & 0xff;
+	double c = (r1[x0] >> shift) & 0xff, d = (r1[x0 + 1] >> shift) & 0xff;
+	return ((a + (b - a) * fx) * (1.0 - fy) + (c + (d - c) * fx) * fy) / 255.0;
+}
+
+void desk_draw_finder_rim(const unsigned char *src, int sw, int sh, int sstride,
+	unsigned char *dst, int dx, int dy, int dw, int dh, int dstride, double b, double r)
+{
+	/* the window: a rounded rectangle the size of the screen */
+	double cx = sw * 0.5, cy = sh * 0.5;
+	r = fmin(r, fmin(cx, cy));
+	b = fmin(b, r);
+	/* the lamp, above and a little to the left, and in front */
+	const double lx = -0.22, ly = -0.80, lz = 0.56;
+	const double hx = lx, hy = ly, hz = lz + 1.0, hl = sqrt(hx * hx + hy * hy + hz * hz);
+	for (int y = 0; y < dh; y++) {
+		uint32_t *row = (uint32_t *)(void *)(dst + (size_t)y * (size_t)dstride);
+		for (int x = 0; x < dw; x++) {
+			double px = dx + x + 0.5, py = dy + y + 0.5;
+			double qx = fabs(px - cx) - (cx - r), qy = fabs(py - cy) - (cy - r);
+			double ox = fmax(qx, 0.0), oy = fmax(qy, 0.0);
+			double sd = hypot(ox, oy) + fmin(fmax(qx, qy), 0.0) - r;
+			double d = -sd;   /* in from the window's edge */
+			if (d >= b) {
+				row[x] = 0;
+				continue;
+			}
+			/* which way is out, here */
+			double nx, ny;
+			if (qx > 0.0 && qy > 0.0) {
+				double l = hypot(ox, oy);
+				nx = ox / l;
+				ny = oy / l;
+			} else if (qx > qy) {
+				nx = 1.0;
+				ny = 0.0;
+			} else {
+				nx = 0.0;
+				ny = 1.0;
+			}
+			nx = px < cx ? -nx : nx;
+			ny = py < cy ? -ny : ny;
+			double dd = fmax(d, 0.0);
+			double u = 1.0 - dd / b;   /* 1 at the edge, 0 where the glass is flat */
+			/* the picture under it, bent in: what is a little way in seen
+			 * at the edge, drawn out -- red a little further than blue */
+			double bend = b * 0.40 * u * u;
+			double rr = finder_tap(src, sw, sh, sstride, px - nx * bend * 1.07,
+				py - ny * bend * 1.07, 16);
+			double gg = finder_tap(src, sw, sh, sstride, px - nx * bend, py - ny * bend, 8);
+			double bb = finder_tap(src, sw, sh, sstride, px - nx * bend * 0.93,
+				py - ny * bend * 0.93, 0);
+			/* the glass's face turning away towards its edge, lit by the
+			 * lamp: a highlight where it faces it, and a little shade
+			 * where it does not */
+			double slope = pow(u, 1.6) * 0.92;
+			double gx = nx * slope, gy = ny * slope, gz = sqrt(fmax(1.0 - slope * slope, 0.0));
+			double lit = gx * lx + gy * ly + gz * lz;
+			double spec = pow(fmax((gx * hx + gy * hy + gz * hz) / hl, 0.0), 60.0) * 0.55;
+			double shade = 1.0 + (lit - lz) * 0.35;
+			/* and its very edge, catching the light (or not) as a line */
+			double edge = 0.0;
+			if (dd < 2.0) {
+				double face = fmax(nx * lx + ny * ly, 0.0);   /* out towards the lamp */
+				edge = (1.0 - dd / 2.0) * (0.18 + 0.32 * face);
+			}
+			double fres = pow(u, 3.0) * 0.10;
+			double add = spec + edge + fres;
+			rr = clampf(rr * shade + add, 0.0, 1.0);
+			gg = clampf(gg * shade + add, 0.0, 1.0);
+			bb = clampf(bb * shade + add, 0.0, 1.0);
+			/* past the edge, the eyecup: black rubber, the edge of the
+			 * window smoothed into it over a pixel */
+			if (sd > -0.5) {
+				double k = clampf(sd + 0.5, 0.0, 1.0);
+				double cup = 0.035 * (1.0 - fmin(sd / (r * 0.6), 1.0) * 0.6);
+				rr = rr * (1.0 - k) + cup * k;
+				gg = gg * (1.0 - k) + cup * 0.95 * k;
+				bb = bb * (1.0 - k) + cup * 0.90 * k;
+			}
+			row[x] = 0xff000000u | (unsigned)lround(rr * 255.0) << 16
+				| (unsigned)lround(gg * 255.0) << 8 | (unsigned)lround(bb * 255.0);
+		}
+	}
+}
+
+int desk_finder_ring_size(double pt)
+{
+	return (int)ceil(52.0 * pt);
+}
+
+void desk_draw_finder_ring(cairo_t *cr, double pt)
+{
+	double c = desk_finder_ring_size(pt) * 0.5;
+	/* the spot, a fine circle; in it the split image, a smaller one cut
+	 * across the middle -- each a light line over a soft dark one, to be
+	 * seen on whatever is under it */
+	for (int pass = 0; pass < 2; pass++) {
+		if (pass == 0) {
+			cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.30);
+			cairo_set_line_width(cr, 2.6 * pt);
+		} else {
+			cairo_set_source_rgba(cr, 1.0, 0.99, 0.95, 0.80);
+			cairo_set_line_width(cr, fmax(1.0 * pt, 1.0));
+		}
+		cairo_new_sub_path(cr);
+		cairo_arc(cr, c, c, 23.0 * pt, 0, 2 * M_PI);
+		cairo_new_sub_path(cr);
+		cairo_arc(cr, c, c, 8.5 * pt, 0, 2 * M_PI);
+		cairo_move_to(cr, c - 8.5 * pt, c);
+		cairo_line_to(cr, c + 8.5 * pt, c);
+		cairo_stroke(cr);
+	}
+}
+
+/* The self-timer counting down, beside what it is to take: on the
+ * viewfinder's black, its red lamp (lit or not, as it blinks) and the
+ * seconds left in red figures. */
+void desk_finder_count_size(double pt, int *bw, int *bh)
+{
+	double s = finder_scale(pt);
+	*bw = (int)ceil((FD_PAD + 26.0 + 16.0 + 2.0 * (FD_W + FD_GAP) - FD_GAP + FD_PAD) * s);
+	*bh = (int)ceil((FD_H + 30.0) * s);
+}
+
+/* the lamp on the viewfinder's black: a red bead, glowing when lit */
+static void finder_lamp(cairo_t *cr, double cx, double cy, bool lit)
+{
+	if (lit) {
+		cairo_pattern_t *g = cairo_pattern_create_radial(cx, cy, 0.0, cx, cy, 26.0);
+		cairo_pattern_add_color_stop_rgba(g, 0.0, 1.0, 0.25, 0.12, 0.55);
+		cairo_pattern_add_color_stop_rgba(g, 1.0, 1.0, 0.20, 0.10, 0.0);
+		cairo_set_source(cr, g);
+		cairo_arc(cr, cx, cy, 26.0, 0, 2 * M_PI);
+		cairo_fill(cr);
+		cairo_pattern_destroy(g);
+	}
+	cairo_arc(cr, cx, cy, 11.0, 0, 2 * M_PI);
+	cairo_pattern_t *g = cairo_pattern_create_radial(cx - 3.0, cy - 3.5, 0.5, cx, cy, 11.0);
+	if (lit) {
+		cairo_pattern_add_color_stop_rgb(g, 0.0, 1.0, 0.85, 0.75);
+		cairo_pattern_add_color_stop_rgb(g, 0.5, 1.0, 0.25, 0.12);
+		cairo_pattern_add_color_stop_rgb(g, 1.0, 0.75, 0.08, 0.05);
+	} else {
+		cairo_pattern_add_color_stop_rgb(g, 0.0, 0.70, 0.40, 0.35);
+		cairo_pattern_add_color_stop_rgb(g, 0.3, 0.38, 0.06, 0.04);
+		cairo_pattern_add_color_stop_rgb(g, 1.0, 0.18, 0.03, 0.02);
+	}
+	cairo_set_source(cr, g);
+	cairo_fill(cr);
+	cairo_pattern_destroy(g);
+}
+
+void desk_draw_finder_count(cairo_t *cr, int left, bool lit, double pt)
+{
+	double s = finder_scale(pt);
+	double uw = FD_PAD + 26.0 + 16.0 + 2.0 * (FD_W + FD_GAP) - FD_GAP + FD_PAD, uh = FD_H + 30.0;
+	cairo_save(cr);
+	cairo_scale(cr, s, s);
+	desk_rounded_path(cr, 0, 0, uw, uh, 12.0);
+	cairo_set_source_rgba(cr, 0.008, 0.010, 0.008, 0.82);
+	cairo_fill(cr);
+	finder_lamp(cr, FD_PAD + 13.0, uh * 0.5, lit);
+	char num[8];
+	snprintf(num, sizeof num, "%2d", left < 0 ? 0 : left > 99 ? 99 : left);
+	g_led_lit_only = true;
+	seg7_text(cr, num, FD_PAD + 26.0 + 16.0, 15.0, FD_W, FD_H, FD_GAP, 1.0);
+	g_led_lit_only = false;
+	cairo_restore(cr);
+}
+
+/* ---- Print: the camera ------------------------------------------------
+ *
+ * A 35 mm reflex camera, black, its top plate satin chrome, seen from
+ * behind and a little above, as it is held up: rendered in Blender
+ * (art/camera/camera.py) into one picture, camera.png, with DEsk's data
+ * (desk_art_find), and where its pieces are in it (camera-map.h, built
+ * in). Here it is laid together as
+ * it is set -- the camera whole, and over it what has moved: the mode
+ * dial's knurling as it turns, and the pictures on the dial's top turning
+ * with it; the power lever, the shutter button, the self-timer's knob and
+ * its shadow wherever the slide is; the frame counter's figure under its
+ * glass; the eyepiece seen through. The picture is read once (on a thread
+ * of the desk's, before it is wanted: desk_finder_camera_load), and the
+ * camera whole is kept scaled for the two sizes it is shown at, the hand's
+ * and the one coming up to the eye, so that what moves is all that is
+ * drawn again. In the camera's own units, DESK_FINDER_CAMERA_W across. */
+
+#include "camera-map.h"
+#include "camera-top.h"
+
+#define CAM_INSET 8     /* a piece laid over the camera, this far in from its edges */
+
+static pthread_once_t g_cam_once = PTHREAD_ONCE_INIT;
+static cairo_surface_t *g_cam;   /* camera.png, read (NULL: it could not be) */
+
+struct cam_read {
+	const unsigned char *at;
+	size_t left;
+};
+
+static cairo_status_t cam_read(void *closure, unsigned char *data, unsigned int length)
+{
+	struct cam_read *r = closure;
+	if (length > r->left) {
+		return CAIRO_STATUS_READ_ERROR;
+	}
+	memcpy(data, r->at, length);
+	r->at += length;
+	r->left -= length;
+	return CAIRO_STATUS_SUCCESS;
+}
+
+/* One of the camera's pictures, read; NULL, and said why, when it could
+ * not be. */
+static cairo_surface_t *cam_picture(const char *file)
+{
+	char path[RF_DIR_LEN + 64];
+	if (!desk_art_find("camera", file, path, sizeof path)) {
+		fprintf(stderr, "desk: the camera's picture is not there (%s)\n", path);
+		return NULL;
+	}
+	cairo_surface_t *img = cairo_image_surface_create_from_png(path);
+	if (cairo_surface_status(img) != CAIRO_STATUS_SUCCESS) {
+		fprintf(stderr, "desk: the camera's picture would not read (%s: %s)\n", path,
+			cairo_status_to_string(cairo_surface_status(img)));
+		cairo_surface_destroy(img);
+		return NULL;
+	}
+	return img;
+}
+
+static void cam_load(void)
+{
+	g_cam = cam_picture("camera.png");
+}
+
+void desk_finder_camera_load(void)
+{
+	pthread_once(&g_cam_once, cam_load);
+}
+
+/* And the camera lying in the drawer (DESK_LOOK_CAMERA): its own picture,
+ * read the first time it is laid there; NULL if it could not be. */
+static pthread_once_t g_cam_top_once = PTHREAD_ONCE_INIT;
+static cairo_surface_t *g_cam_top;
+
+static void cam_top_load(void)
+{
+	g_cam_top = cam_picture("camera-top.png");
+}
+
+static cairo_surface_t *cam_top_lying(double ppu, double turn, double *ax, double *ay)
+{
+	pthread_once(&g_cam_top_once, cam_top_load);
+	cairo_surface_t *pic = g_cam_top;
+	if (!pic) {
+		return NULL;
+	}
+	/* as it was rendered lying there, its body as wide as the terminal
+	 * and a little more */
+	double pw = cairo_image_surface_get_width(pic);
+	double ph = cairo_image_surface_get_height(pic);
+	double k = 2.42 * ppu / CAMERA_TOP_BODY_PX;
+	double diag = hypot(pw, ph) * k + 4.0;
+	cairo_surface_t *img = cairo_image_surface_create(CAIRO_FORMAT_ARGB32,
+		(int)ceil(diag), (int)ceil(diag));
+	cairo_t *cr = cairo_create(img);
+	cairo_translate(cr, diag * 0.5, diag * 0.5);
+	cairo_rotate(cr, turn);
+	cairo_scale(cr, k, k);
+	cairo_translate(cr, -CAMERA_TOP_MID_X, -CAMERA_TOP_MID_Y);
+	cairo_set_source_surface(cr, pic, 0, 0);
+	cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
+	cairo_paint(cr);
+	cairo_destroy(cr);
+	cairo_surface_flush(img);
+	*ax = *ay = diag * 0.5;
+	return img;
+}
+
+static void *cam_load_run(void *arg)
+{
+	(void)arg;
+	thread_to_the_back();
+	desk_finder_camera_load();
+	return NULL;
+}
+
+void desk_finder_camera_preload(void)
+{
+	pthread_attr_t at;
+	pthread_t th;
+	if (pthread_attr_init(&at) != 0) {
+		return;
+	}
+	pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+	if (pthread_create(&th, &at, cam_load_run, NULL) != 0) {
+		/* (read when it is first wanted, then) */
+	}
+	pthread_attr_destroy(&at);
+}
+
+/* One piece of camera.png, laid on the camera at s pixels to the unit:
+ * over what is there, or (instead) in place of it -- all but its edges,
+ * which are as the camera under them is, there for the scaling to read. */
+static void cam_piece(cairo_t *cr, double s, const struct camera_piece *p, double dx,
+	double dy, bool instead)
+{
+	cairo_surface_t *sub = cairo_surface_create_for_rectangle(g_cam, p->ax, p->ay, p->w, p->h);
+	cairo_pattern_t *pat = cairo_pattern_create_for_surface(sub);
+	cairo_pattern_set_extend(pat, CAIRO_EXTEND_PAD);
+	cairo_pattern_set_filter(pat, CAIRO_FILTER_GOOD);
+	cairo_save(cr);
+	cairo_scale(cr, s / CAMERA_PX, s / CAMERA_PX);
+	cairo_translate(cr, p->x + dx, p->y + dy);
+	int in = instead ? CAM_INSET : 0;
+	cairo_rectangle(cr, in, in, p->w - 2 * in, p->h - 2 * in);
+	if (instead) {
+		cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
+	}
+	cairo_set_source(cr, pat);
+	cairo_fill(cr);
+	cairo_restore(cr);
+	cairo_pattern_destroy(pat);
+	cairo_surface_destroy(sub);
+}
+
+/* The camera whole, at s pixels to the unit: scaled once for each of the
+ * last two sizes asked for. */
+static cairo_surface_t *cam_whole(double s)
+{
+	static struct {
+		double s;
+		cairo_surface_t *img;
+	} kept[2];
+	for (int i = 0; i < 2; i++) {
+		if (kept[i].img && kept[i].s == s) {
+			return kept[i].img;
+		}
+	}
+	int w = (int)ceil(DESK_FINDER_CAMERA_W * s), h = (int)ceil(DESK_FINDER_CAMERA_H * s);
+	cairo_surface_t *img = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w > 0 ? w : 1,
+		h > 0 ? h : 1);
+	cairo_t *cr = cairo_create(img);
+	cam_piece(cr, s, &CAMERA_BASE, 0.0, 0.0, false);
+	cairo_destroy(cr);
+	if (kept[1].img) {
+		cairo_surface_destroy(kept[1].img);
+	}
+	kept[1] = kept[0];
+	kept[0].s = s;
+	kept[0].img = img;
+	return img;
+}
+
+/* The tape on its way, t of it from out of sight (0) to in its slot (1):
+ * brought up under the slot's mouth, slowing as it gets there, then
+ * pushed in -- how far under the mouth it is (+), or in past it (-), in
+ * the camera's units. Back the same way, coming out. */
+#define CAM_TAPE_RISE 44.0   /* from this far under the mouth, out of sight */
+
+static double cam_tape_dy(double t)
+{
+	if (t <= DESK_FINDER_TAPE_REACH) {
+		double u = 1.0 - t / DESK_FINDER_TAPE_REACH;
+		return CAM_TAPE_RISE * u * u;
+	}
+	double u = (t - DESK_FINDER_TAPE_REACH) / (1.0 - DESK_FINDER_TAPE_REACH);
+	return -CAMERA_TAPE_PUSH * u * u * (3.0 - 2.0 * u);
+}
+
+/* The pictures on the dial's top -- painted, a little worn -- turned with
+ * it: the one it is set to at the front, by the index mark. */
+static void cam_dial_marks(cairo_t *cr, double s, double dial)
+{
+	double sq = CAMERA_DIAL_RY / CAMERA_DIAL_RX;
+	cairo_save(cr);
+	cairo_scale(cr, s, s);
+	cairo_set_line_cap(cr, CAIRO_LINE_CAP_SQUARE);
+	cairo_set_line_join(cr, CAIRO_LINE_JOIN_MITER);
+	for (int i = 0; i < 3; i++) {
+		double a = (i - dial) * CAMERA_DIAL_STEP;
+		cairo_save(cr);
+		cairo_translate(cr, CAMERA_DIAL_X + sin(a) * CAMERA_DIAL_MARK_R,
+			CAMERA_DIAL_Y + cos(a) * CAMERA_DIAL_MARK_R * sq);
+		cairo_scale(cr, 1.0, sq);
+		cairo_rotate(cr, -a);
+		cairo_scale(cr, CAMERA_DIAL_MARK, CAMERA_DIAL_MARK);
+		cairo_set_line_width(cr, 0.10);
+		finder_mark_path(cr, i);
+		cairo_set_source_rgba(cr, 0.90, 0.90, 0.86, 0.88);
+		cairo_stroke(cr);
+		cairo_restore(cr);
+	}
+	cairo_restore(cr);
+}
+
+/* The figure in the frame counter's window: printed on the disc under it,
+ * as flat as the top plate is seen. */
+static void cam_count(cairo_t *cr, double s, int count)
+{
+	char num[8];
+	snprintf(num, sizeof num, "%d", count < 0 ? 0 : count % 100);
+	double sq = CAMERA_COUNT_RY / CAMERA_COUNT_RX;
+	cairo_save(cr);
+	cairo_scale(cr, s, s);
+	cairo_translate(cr, CAMERA_COUNT_X, CAMERA_COUNT_Y);
+	cairo_scale(cr, 1.0, sq);
+	cairo_arc(cr, 0.0, 0.0, CAMERA_COUNT_RX, 0.0, 2.0 * M_PI);
+	cairo_clip(cr);
+	desk_font_select(cr, DESK_FONT_ENGRAVE, num, true, false);
+	cairo_set_font_size(cr, CAMERA_COUNT_RX * 0.95);
+	cairo_text_extents_t te;
+	cairo_text_extents(cr, num, &te);
+	cairo_move_to(cr, -te.x_bearing - te.width * 0.5, -te.y_bearing - te.height * 0.5);
+	cairo_set_source_rgba(cr, 0.93, 0.92, 0.88, 0.92);
+	cairo_show_text(cr, num);
+	cairo_restore(cr);
+}
+
+void desk_draw_finder_camera(cairo_t *cr, double s, const struct desk_finder_camera *c)
+{
+	desk_finder_camera_load();
+	if (!g_cam || s <= 0.0) {
+		return;
+	}
+	/* laid together on its own, the pieces in place of what they replace,
+	 * and then over whatever it is drawn on */
+	cairo_save(cr);
+	cairo_rectangle(cr, 0.0, 0.0, DESK_FINDER_CAMERA_W * s, DESK_FINDER_CAMERA_H * s);
+	cairo_clip(cr);
+	cairo_push_group(cr);
+	cairo_set_source_surface(cr, cam_whole(s), 0.0, 0.0);
+	cairo_paint(cr);
+	/* the dial: its knurling as far round a knurl as it has turned, and
+	 * its pictures */
+	double turn = c->dial * CAMERA_DIAL_STEP * CAMERA_KNURLS / (2.0 * M_PI);
+	int q = (int)lround((turn - floor(turn)) * 4.0) % 4;
+	if (q > 0) {
+		cam_piece(cr, s, &CAMERA_KNURL[q - 1], 0.0, 0.0, true);
+	}
+	cam_dial_marks(cr, s, c->dial);
+	/* the shutter button down, or the power lever on its way over */
+	int down = (int)lround(clampf(c->press, 0.0, 1.0) * 3.0);
+	int on = (int)lround(clampf(c->power, 0.0, 1.0) * 4.0);
+	if (down > 0) {
+		cam_piece(cr, s, &CAMERA_PRESS[down - 1], 0.0, 0.0, true);
+	} else if (on < 4) {
+		cam_piece(cr, s, &CAMERA_POWER[on], 0.0, 0.0, true);
+	}
+	/* the self-timer's knob where the slide is */
+	cam_piece(cr, s, &CAMERA_KNOB, (c->timer - 1.0) * CAMERA_KNOB_STEP * CAMERA_PX, 0.0,
+		false);
+	/* the frame counter: its figure, its glass over it */
+	cam_count(cr, s, c->count);
+	cam_piece(cr, s, &CAMERA_DOME, 0.0, 0.0, false);
+	/* the tape: all the way in, as it was rendered there, its shadow and
+	 * all; or on its way -- what of it is in the slot out of sight over
+	 * the slot's edge, the slot's flap pushed in ahead of it */
+	if (c->tape >= 1.0) {
+		cam_piece(cr, s, &CAMERA_TAPE_IN, 0.0, 0.0, true);
+	} else if (c->tape > 0.0) {
+		double dy = cam_tape_dy(c->tape);
+		if (dy < 0.0) {
+			cam_piece(cr, s, &CAMERA_SLOT, 0.0, 0.0, true);
+		}
+		cairo_save(cr);
+		cairo_rectangle(cr, 0.0, CAMERA_TAPE_CLIP * s, DESK_FINDER_CAMERA_W * s,
+			DESK_FINDER_CAMERA_H * s);
+		cairo_clip(cr);
+		cam_piece(cr, s, &CAMERA_TAPE, 0.0, dy * CAMERA_PX, false);
+		cairo_restore(cr);
+	}
+	if (c->see_through) {
+		cam_piece(cr, s, &CAMERA_SEE, 0.0, 0.0, true);
+	}
+	cairo_pop_group_to_source(cr);
+	cairo_paint(cr);
+	cairo_restore(cr);
+}
+
+enum desk_finder_part desk_finder_camera_at(double x, double y)
+{
+	/* the dial, its top and its drum */
+	double my = (CAMERA_DIAL_Y + CAMERA_DIAL_FOOT) * 0.5;
+	double dx = (x - CAMERA_DIAL_X) / (CAMERA_DIAL_RX + 4.0);
+	double dy = (y - my) / ((CAMERA_DIAL_FOOT - CAMERA_DIAL_Y) * 0.5 + CAMERA_DIAL_RY + 4.0);
+	if (dx * dx + dy * dy <= 1.0) {
+		return DESK_FINDER_DIAL;
+	}
+	/* the self-timer's slide, and its marks over it */
+	if (x >= CAMERA_KNOB_X - 12.0 && x <= CAMERA_KNOB_X + 2.0 * CAMERA_KNOB_STEP + 12.0
+		&& y >= CAMERA_KNOB_Y - 20.0 && y <= CAMERA_KNOB_Y + 10.0) {
+		return DESK_FINDER_TIMER;
+	}
+	/* the shutter button, and round it the power lever */
+	dx = (x - CAMERA_SHUT_X) / (CAMERA_SHUT_R + 2.0);
+	dy = (y - (CAMERA_SHUT_Y + 4.0)) / 10.0;
+	if (dx * dx + dy * dy <= 1.0) {
+		return DESK_FINDER_SHUTTER;
+	}
+	dx = (x - CAMERA_SHUT_X) / CAMERA_COLLAR_R;
+	dy = (y - CAMERA_COLLAR_Y) / 17.0;
+	if (dx * dx + dy * dy <= 1.0) {
+		return DESK_FINDER_POWER;
+	}
+	/* the tape's slot, the tape in it, its eject mark */
+	if (x >= CAMERA_SLOT_X0 && x <= CAMERA_SLOT_X1 && y >= CAMERA_SLOT_Y0 && y <= CAMERA_SLOT_Y1) {
+		return DESK_FINDER_TAPE;
+	}
+	if (x >= CAMERA_LEFT && x <= CAMERA_RIGHT && y >= CAMERA_PLATE_FAR - 4.0 && y <= 360.0) {
+		return DESK_FINDER_BODY;
+	}
+	if (x >= 228.0 && x <= 372.0 && y >= CAMERA_ROOF && y < CAMERA_PLATE_FAR) {
+		return DESK_FINDER_BODY;
+	}
+	return DESK_FINDER_NOTHING;
+}
+
+void desk_finder_camera_dial(double *x, double *y)
+{
+	*x = CAMERA_DIAL_X;
+	*y = CAMERA_DIAL_Y;
+}
+
+void desk_finder_camera_eyepiece(double *x, double *y, double *w, double *h)
+{
+	*x = CAMERA_EYE_X;
+	*y = CAMERA_EYE_Y;
+	*w = CAMERA_EYE_W;
+	*h = CAMERA_EYE_H;
 }
 
 /* ---- the dot matrix ---- */
@@ -25117,90 +34139,164 @@ static void clk_watts(char *out, size_t n, double w)
 	}
 }
 
-/* A figure with a small label over it and a unit after it. */
-static void clk_reading(cairo_t *cr, double x, double y, const char *label, const char *value,
-	const char *unit, double lit)
+/* A rate as the display writes it: up to three figures, and what of. */
+static void clk_rate(char *out, size_t n, const char **unit, double bps)
 {
-	dots_text(cr, label, x, y, 1.35, -1, lit * 0.8);
-	double wd = seg7_text(cr, value, x, y + 13.0, 12.5, 24.0, 4.0, lit);
-	dots_text(cr, unit, x + wd + 5.0, y + 27.0, 1.35, -1, lit * 0.9);
+	static const char *const UNIT[] = { "B/S", "KB/S", "MB/S", "GB/S" };
+	int u = 0;
+	while (bps >= 999.5 && u < 3) {
+		bps /= 1000.0;
+		u++;
+	}
+	*unit = UNIT[u];
+	if (bps < 0.0) {
+		snprintf(out, n, "---");
+	} else if (bps < 9.95 && u > 0) {
+		snprintf(out, n, "%.1f", bps);
+	} else {
+		snprintf(out, n, "%.0f", bps);
+	}
 }
 
-static void clk_page_power(cairo_t *cr, double lit)
+/* A column of the PC page: its name over it, and a figure under that with
+ * what it is of after it. */
+static void clk_column(cairo_t *cr, double x, double y, const char *label, const char *value,
+	const char *unit, double lit)
 {
+	dots_text(cr, label, x, y + 5.0, 1.15, -1, lit * 0.8);
+	double wd = seg7_text(cr, value, x, y + 15.0, 10.0, 20.0, 3.0, lit);
+	dots_text(cr, unit, x + wd + 4.0, y + 27.0, 1.2, -1, lit * 0.9);
+}
+
+/* One way of the line: an arrow, down or up, and how fast. */
+static void clk_net_way(cairo_t *cr, double x, double y, bool in, double bps, double lit)
+{
+	if (in) {
+		cairo_move_to(cr, x, y + 3.0);
+		cairo_line_to(cr, x + 6.0, y + 3.0);
+		cairo_line_to(cr, x + 3.0, y + 8.5);
+	} else {
+		cairo_move_to(cr, x, y + 8.5);
+		cairo_line_to(cr, x + 6.0, y + 8.5);
+		cairo_line_to(cr, x + 3.0, y + 3.0);
+	}
+	cairo_close_path(cr);
+	led_fill_path(cr, lit * 0.9);
+	char v[8];
+	const char *unit;
+	clk_rate(v, sizeof v, &unit, bps);
+	double wd = seg7_text(cr, v, x + 10.0, y, 7.0, 11.0, 2.0, lit);
+	dots_text(cr, unit, x + 10.0 + wd + 4.0, y + 4.0, 1.0, -1, lit * 0.85);
+}
+
+/* The machine, in five columns: the battery (or the wall), what it draws,
+ * how busy the processor is, how full the memory is, and the line, down
+ * and up. A rate needs two reads; until there are two it is dashes. */
+#define PC_LINE 40.0   /* the bars, or a first line of small print */
+#define PC_FOOT 50.0   /* the small print under each */
+static void clk_page_pc(cairo_t *cr, double lit)
+{
+	static const double COL[] = { 8.0, 74.0, 146.0, 210.0, 278.0, 348.0 };
 	double x = CLK_WX, y = CLK_WY;
 	const struct desk_supply *s = &g_clk.supply;
+	const struct desk_meters *m = &g_clk.pc;
+	char v[16], t[32];
+	/* the rules between them */
+	for (int i = 1; i < 5; i++) {
+		double rx = x + COL[i] - 4.0;
+		cairo_rectangle(cr, rx - 0.5, y + 7.0, 1.0, CLK_WH - 14.0);
+	}
+	led_ghost(cr);
+	cairo_fill(cr);
+
+	/* the battery, or the wall */
+	double cx = x + COL[0], cw = COL[1] - COL[0] - 8.0;
 	if (s->have_battery) {
-		/* the battery, filled as far as it is */
-		double bx = x + 12.0, by = y + 16.0, bw = 52.0, bh = 30.0;
-		cairo_save(cr);
-		desk_rounded_path(cr, bx, by, bw, bh, 3.0);
-		cairo_rectangle(cr, bx + bw, by + bh * 0.32, 4.0, bh * 0.36);
-		led_on(cr, lit * 0.9);
-		cairo_set_line_width(cr, 1.6);
-		cairo_stroke(cr);
-		cairo_restore(cr);
-		cairo_rectangle(cr, bx + 3.5, by + 3.5, (bw - 7.0) * fmin(fmax(s->battery, 0.0), 1.0),
-			bh - 7.0);
-		led_fill_path(cr, lit);
-		if (s->charging) {
-			/* the bolt */
-			cairo_move_to(cr, bx + bw * 0.56, by + 4.0);
-			cairo_line_to(cr, bx + bw * 0.38, by + bh * 0.56);
-			cairo_line_to(cr, bx + bw * 0.52, by + bh * 0.56);
-			cairo_line_to(cr, bx + bw * 0.44, by + bh - 4.0);
-			cairo_line_to(cr, bx + bw * 0.66, by + bh * 0.42);
-			cairo_line_to(cr, bx + bw * 0.52, by + bh * 0.42);
-			cairo_close_path(cr);
-			cairo_set_source_rgba(cr, 0.05, 0.01, 0.01, 0.9);
-			cairo_fill(cr);
-		}
-		char pct[8];
-		snprintf(pct, sizeof pct, "%3d", (int)lround(s->battery * 100.0));
-		double wd = seg7_text(cr, pct, x + 76.0, y + 12.0, 21.0, 38.0, 5.0, lit);
-		dots_text(cr, "%", x + 76.0 + wd + 4.0, y + 36.0, 1.8, -1, lit);
-		/* and to the right, what it is doing */
-		double rx = x + 214.0;
-		const char *state = s->charging ? "CHG" : s->discharging ? "BAT" : s->full ? "FULL" : "AC";
-		seg14_text(cr, state, rx, y + 6.0, 11.0, 18.0, 3.0, lit);
-		char w[16], tbuf[16];
-		clk_watts(w, sizeof w, s->batt_w);
+		snprintf(v, sizeof v, "%3d", (int)lround(s->battery * 100.0));
+		clk_column(cr, cx, y, "BATT", v, "%", lit);
+		clk_blocks(cr, cx, y + PC_LINE, cw, 5.0, 8, fmin(fmax(s->battery, 0.0), 1.0), lit,
+			false);
+		char hm[24] = "";
 		if (s->hours >= 0.0 && s->hours < 100.0) {
-			int hm = (int)lround(s->hours * 60.0);
-			snprintf(tbuf, sizeof tbuf, "%d:%02d", hm / 60, hm % 60);
-		} else {
-			snprintf(tbuf, sizeof tbuf, "--:--");
+			int mins = (int)lround(s->hours * 60.0);
+			snprintf(hm, sizeof hm, " %d:%02d", mins / 60, mins % 60);
 		}
-		dots_text(cr, s->charging ? "TO FULL" : "LEFT", rx + 70.0, y + 7.0, 1.3, -1, lit * 0.8);
-		dots_text(cr, tbuf, rx + 70.0, y + 17.0, 1.5, -1, lit);
-		double ww = seg7_text(cr, w, rx, y + 32.0, 11.0, 22.0, 3.5, lit);
-		dots_text(cr, "W", rx + ww + 4.0, y + 45.0, 1.4, -1, lit * 0.9);
-		if (g_clk.avg_w >= 0.0) {
-			char a[24];
-			snprintf(a, sizeof a, "AVG %.1fW", g_clk.avg_w);
-			dots_text(cr, a, rx + 72.0, y + 46.0, 1.2, -1, lit * 0.8);
-		}
-		return;
-	}
-	/* Off the wall: what the machine draws, if anything measures it. */
-	seg14_text(cr, "AC", x + 10.0, y + 12.0, 20.0, 34.0, 5.0, lit);
-	char now[16], avg[16], hour[16];
-	clk_watts(now, sizeof now, s->draw_w);
-	clk_watts(avg, sizeof avg, g_clk.avg_w);
-	clk_watts(hour, sizeof hour, g_clk.hour_wh);
-	double cx = x + 70.0;
-	clk_reading(cr, cx, y + 5.0, "NOW", now, "W", lit);
-	clk_reading(cr, cx + 96.0, y + 5.0, "AVG", avg, "W", lit);
-	clk_reading(cr, cx + 192.0, y + 5.0, g_clk.hour_span < 0.999 ? "1H SO FAR" : "LAST 1H",
-		hour, "WH", lit);
-	if (s->draw_w < 0.0) {
-		dots_text(cr, "NOTHING HERE MEASURES THE POWER", x + CLK_WW * 0.5, y + 51.0, 1.15, 0,
-			lit * 0.75);
+		snprintf(t, sizeof t, "%s%s", s->charging ? "CHG" : s->discharging ? "BAT" : s->full
+			? "FULL" : "AC", s->charging || s->discharging ? hm : "");
 	} else {
-		char src[40];
-		snprintf(src, sizeof src, "MEASURED: %s", s->source);
-		dots_text(cr, src, x + CLK_WW * 0.5, y + 51.0, 1.15, 0, lit * 0.75);
+		dots_text(cr, "BATT", cx, y + 5.0, 1.15, -1, lit * 0.8);
+		seg14_text(cr, "AC", cx, y + 15.0, 11.0, 20.0, 3.0, lit);
+		dots_text(cr, "NONE", cx, y + PC_LINE, 1.0, -1, lit * 0.6);
+		/* off the wall, what went in the last hour, where it is measured */
+		char wh[16];
+		clk_watts(wh, sizeof wh, g_clk.hour_wh);
+		snprintf(t, sizeof t, "1H %sWH", wh);
+		if (g_clk.hour_wh < 0.0) {
+			t[0] = '\0';
+		}
 	}
+	dots_text(cr, t, cx, y + PC_FOOT, 1.0, -1, lit * 0.85);
+
+	/* what it draws */
+	cx = x + COL[1];
+	clk_watts(v, sizeof v, s->draw_w);
+	clk_column(cr, cx, y, "POWER", v, s->draw_w >= 1000.0 ? "KW" : "W", lit);
+	if (g_clk.avg_w >= 0.0) {
+		snprintf(t, sizeof t, "AVG %.1fW", g_clk.avg_w);
+		dots_text(cr, t, cx, y + PC_LINE, 1.0, -1, lit * 0.8);
+	}
+	if (s->draw_w >= 0.0) {
+		snprintf(t, sizeof t, "BY %s", s->source);
+	} else {
+		snprintf(t, sizeof t, "UNMEASURED");
+	}
+	dots_text(cr, t, cx, y + PC_FOOT, 1.0, -1, lit * 0.7);
+
+	/* the processor */
+	cx = x + COL[2];
+	cw = COL[3] - COL[2] - 8.0;
+	if (g_clk.pc_rates) {
+		snprintf(v, sizeof v, "%3d", (int)lround(m->cpu * 100.0));
+	} else {
+		snprintf(v, sizeof v, "---");
+	}
+	clk_column(cr, cx, y, "CPU", v, "%", lit);
+	clk_blocks(cr, cx, y + PC_LINE, cw, 5.0, 8, g_clk.pc_rates ? m->cpu : 0.0, lit, false);
+	if (m->temp_c > -100.0) {
+		snprintf(t, sizeof t, "TEMP %dC", (int)lround(m->temp_c));
+	} else {
+		snprintf(t, sizeof t, "LOAD %.2f", m->load);
+	}
+	dots_text(cr, t, cx, y + PC_FOOT, 1.0, -1, lit * 0.8);
+
+	/* the memory */
+	cx = x + COL[3];
+	cw = COL[4] - COL[3] - 8.0;
+	snprintf(v, sizeof v, "%3d", (int)lround(m->mem * 100.0));
+	clk_column(cr, cx, y, "RAM", v, "%", lit);
+	clk_blocks(cr, cx, y + PC_LINE, cw, 5.0, 8, m->mem, lit, false);
+	if (m->mem_total_gb > 0.0) {
+		int dp = m->mem_total_gb < 100.0 ? 1 : 0;
+		snprintf(t, sizeof t, "%.*f/%.*fG", dp, m->mem_gb, dp, m->mem_total_gb);
+		dots_text(cr, t, cx, y + PC_FOOT, 1.0, -1, lit * 0.8);
+	}
+
+	/* the line: down, up, and what it goes over */
+	cx = x + COL[4];
+	dots_text(cr, "NET", cx, y + 5.0, 1.15, -1, lit * 0.8);
+	bool rates = g_clk.pc_rates && m->net_if[0];
+	clk_net_way(cr, cx, y + 15.0, true, rates ? m->net_in : -1.0, lit);
+	clk_net_way(cr, cx, y + 29.0, false, rates ? m->net_out : -1.0, lit);
+	if (!m->net_if[0]) {
+		snprintf(t, sizeof t, "NO LINE");
+	} else if (!m->net_up) {
+		snprintf(t, sizeof t, "DOWN");
+	} else if (m->net_wireless) {
+		snprintf(t, sizeof t, "WIFI %d%%", (int)lround(m->net_signal * 100.0));
+	} else {
+		snprintf(t, sizeof t, "CABLE");
+	}
+	dots_text(cr, t, cx, y + PC_FOOT, 1.0, -1, lit * 0.8);
 }
 
 /* ---- the keys ---- */
@@ -25400,6 +34496,44 @@ static void clk_page_show(cairo_t *cr, double lit)
 	}
 }
 
+/* Print's camera recording, in place of the time, as a recorder's own
+ * display shows it: the red dot that says it is running, the tape's mark,
+ * how long it has run in the time's own big figures; and the time, small,
+ * at the right. */
+static void clk_page_rec(cairo_t *cr, const struct tm *tmv, double lit)
+{
+	double x = CLK_WX, y = CLK_WY, dh = 44.0, ty = y + (CLK_WH - dh) * 0.5;
+	finder_rec_dot(cr, x + 20.0, y + CLK_WH * 0.5, 8.0);
+	cairo_save(cr);
+	cairo_translate(cr, x + 52.0, y + CLK_WH * 0.5);
+	cairo_scale(cr, 30.0, 30.0);
+	finder_tape_path(cr);
+	cairo_restore(cr);
+	led_stroke_path(cr, 1.8, lit);
+	cairo_save(cr);
+	cairo_translate(cr, x + 84.0, ty);
+	cairo_scale(cr, dh / FD_H, dh / FD_H);
+	finder_time(cr, g_clk.rec, 0.0, 0.0, false);
+	cairo_restore(cr);
+	char hhmm[8];
+	int hour = tmv->tm_hour;
+	if (g_clock_12h) {
+		hour = hour % 12 ? hour % 12 : 12;
+	}
+	snprintf(hhmm, sizeof hhmm, "%2d%02d", hour, tmv->tm_min);
+	double sh = 18.0, sw = 9.5, sx = x + CLK_WW - 12.0 - 4.0 * (sw + 3.0) - 6.0;
+	for (int i = 0; i < 4; i++) {
+		struct seg_box sb = { sx + i * (sw + 3.0) + (i >= 2 ? 6.0 : 0.0), ty + dh - sh, sw, sh,
+			sh * 0.10 };
+		seg7_digit(cr, &sb, hhmm[i] == ' ' ? -1 : hhmm[i] - '0', lit * 0.8);
+	}
+	for (int k = 0; k < 2; k++) {
+		cairo_arc(cr, sx + 2.0 * (sw + 3.0) + 1.5, ty + dh - sh * (k ? 0.30 : 0.70), 1.2, 0,
+			2.0 * M_PI);
+		led_fill_path(cr, lit * 0.8);
+	}
+}
+
 static void gadget_clock(cairo_t *cr, double w, double h, time_t now)
 {
 	struct tm tmv;
@@ -25431,11 +34565,15 @@ static void gadget_clock(cairo_t *cr, double w, double h, time_t now)
 	case DESK_CLOCK_MEDIA:
 		clk_page_media(cr, lit);
 		break;
-	case DESK_CLOCK_POWER:
-		clk_page_power(cr, lit);
+	case DESK_CLOCK_PC:
+		clk_page_pc(cr, lit);
 		break;
 	default:
-		clk_page_time(cr, &tmv, lit);
+		if (g_clk.rec >= 0) {
+			clk_page_rec(cr, &tmv, lit);
+		} else {
+			clk_page_time(cr, &tmv, lit);
+		}
 		break;
 	}
 	cairo_restore(cr);
@@ -25481,7 +34619,7 @@ uint64_t desk_clock_key(time_t now)
 		 * battery's blink), and the camera and microphone lamps */
 		/* in 2D no seconds: drawn again once a minute, not every second */
 		int sec = desk_gfx_level() == DESK_GFX_2D ? 0 : tmv.tm_sec;
-		int hms[4] = { tmv.tm_hour * 60 + tmv.tm_min, sec, g_clk.camera, g_clk.mic };
+		int hms[5] = { tmv.tm_hour * 60 + tmv.tm_min, sec, g_clk.camera, g_clk.mic, g_clk.rec };
 		CLK_MIX(hms, sizeof hms);
 		const struct desk_supply *s = &g_clk.supply;
 		int b[5] = { s->have_battery, (int)lround(s->battery * 100.0), s->charging,
@@ -25506,16 +34644,27 @@ uint64_t desk_clock_key(time_t now)
 		CLK_MIX(md->artist, strlen(md->artist));
 		CLK_MIX(md->player, strlen(md->player));
 	}
-	if (g_clk.mode == DESK_CLOCK_POWER) {
+	if (g_clk.mode == DESK_CLOCK_PC) {
 		const struct desk_supply *s = &g_clk.supply;
 		int p[9] = { s->have_battery, (int)lround(s->battery * 1000.0), s->charging,
-			s->discharging, s->full, (int)lround(s->batt_w * 10.0),
-			(int)lround(s->hours * 60.0), (int)lround(s->draw_w * 10.0),
-			(int)lround(g_clk.avg_w * 10.0) };
+			s->discharging, s->full, (int)lround(s->hours * 60.0),
+			(int)lround(s->draw_w * 10.0), (int)lround(g_clk.avg_w * 10.0),
+			(int)lround(g_clk.hour_wh * 10.0) };
 		CLK_MIX(p, sizeof p);
-		int hw = (int)lround(g_clk.hour_wh * 10.0);
-		CLK_MIX(&hw, sizeof hw);
 		CLK_MIX(s->source, strlen(s->source));
+		/* as written: a rate that moves in its fourth figure draws nothing */
+		const struct desk_meters *m = &g_clk.pc;
+		char t[96];
+		snprintf(t, sizeof t, "%d|%.0f|%.0f|%.1f|%.1f|%.0f|%.2f|%s|%d|%d|%.0f",
+			g_clk.pc_rates, m->cpu * 100.0, m->mem * 100.0, m->mem_gb, m->mem_total_gb,
+			m->temp_c, m->load, m->net_if, m->net_up, m->net_wireless, m->net_signal * 100.0);
+		CLK_MIX(t, strlen(t));
+		for (int k = 0; k < 2; k++) {
+			const char *unit;
+			clk_rate(t, sizeof t, &unit, k ? m->net_out : m->net_in);
+			CLK_MIX(t, strlen(t));
+			CLK_MIX(unit, strlen(unit));
+		}
 	}
 #undef CLK_MIX
 	return h | 1u;
@@ -25607,6 +34756,807 @@ static bool clk_face_matrix(int w, int h, double drawer_open, cairo_matrix_t *m)
 		xf.rr->w * xf.scale, xf.rr->h * xf.scale, m) != 0;
 }
 
+/* ---- the things on the desk, rendered -----------------------------
+ *
+ * The clock's case, the post box and the Control Panel, stowed, are not
+ * traced with the desk: each is a picture rendered once, in Blender
+ * (art/case.py, with art/clock/clock.py, art/post/post.py and
+ * art/console/console.py), the same thing in the same light through the
+ * same camera, with what the tracer has no time for -- Bakelite marbled
+ * right through, enamel chipped to the iron, brass tarnished where nobody
+ * touches it, walnut with a grain, the light the desk throws back into each
+ * -- and its shadow on the desk with it. They are laid over the desk's sheet, and what is printed
+ * on them is printed over them. Only the moves, and the views they end in,
+ * trace them still.
+ *
+ * How much of a thing's front and side shows, how the lamp falls on it and
+ * where its shadow goes follow the shape of the screen, and -- for the two
+ * at the back corners, which move out with the corners of a wider desk --
+ * the width of the desk; so each is rendered for a dozen shapes, and for some widths,
+ * and the ones either side of this screen are mixed. Each picture is laid
+ * a piece at a time, a piece to a plane of the thing -- its top, its front,
+ * its side, the desk at its foot -- each plane through where four of its
+ * corners were seen when it was rendered (through the camera of the room it
+ * was rendered for, room_cam_plan_at) and are seen now: a plane seen from
+ * one place is the same plane seen from another, through a homography.
+ * Cairo lays a picture through a matrix, not a homography, so each piece
+ * is laid in cells, small enough that one matrix is within a tenth of a
+ * pixel of it. A piece has the part of the frame its outline covers, less
+ * what the pieces before it have, in whole pixels -- a pixel half one
+ * piece's and half the next's would let the desk under it show through --
+ * and the last, the desk, has the rest. The room is traced as wide as the
+ * machine affords, and the pictures go to the screen's own pixels, laid
+ * once for where they land and kept.
+ *
+ * Each thing's pictures are PNGs one after another in a file of DEsk's data
+ * (art/<thing>/<thing>-case.bin, installed in share/desk/<thing>), where
+ * each is is in its .h, built in; read out of it a picture at a time, the
+ * ones this shape of screen wants. */
+
+#define ROOM_CASE_PIECES 12
+
+struct room_case_bake {
+	double aspect, hx;      /* the shape of screen, and the desk's half width */
+	unsigned off, len;      /* its picture, a PNG, in the .bin */
+	int w, h;
+	double u0, v0, u1, v1;  /* where that is in the room's frame */
+};
+
+#include "clock-case.h"
+#include "post-case.h"
+#include "console-case.h"
+
+/* A piece of a thing's picture: the plane it is laid by -- four corners on
+ * it -- and the outline of the part of the frame it has: its corners in
+ * order round it, or a hull round them; none for the rest, which is the
+ * last piece's. */
+struct case_piece {
+	vec3 q[4];
+	int n;
+	bool hull;
+	vec3 p[8];
+};
+
+struct room_case {
+	const struct room_case_bake *bake;
+	int n_aspect, n_hx;     /* in rows of n_aspect shapes, a row to a desk */
+	const char *kind, *file, *what;   /* where its pictures are, and what it is */
+	bool gone;              /* they are not there, or would not read: not looked for again */
+	/* its pieces, for a screen this shape over a desk this wide */
+	int (*pieces)(double aspect, double hx, struct case_piece *pc);
+	/* each picture, read out of the .bin when it is wanted and let go when
+	 * another shape of screen wants others; and the pictures as last laid,
+	 * in the target's pixels, and what for */
+	cairo_surface_t **pic;
+	cairo_surface_t *img;
+	int x, y;
+	double key[14];
+};
+
+static void case_quad(struct case_piece *pc, vec3 a, vec3 b, vec3 c, vec3 d)
+{
+	pc->q[0] = a;
+	pc->q[1] = b;
+	pc->q[2] = c;
+	pc->q[3] = d;
+}
+
+/* The clock: its top, its front, the desk at its foot. Where it stands is
+ * gadget_z's, for this screen rather than the room the globals were last
+ * left at. */
+static int clock_case_pieces(double aspect, double hx, struct case_piece *pc)
+{
+	const struct room_gadget *g = &ROOM_GADGETS[DESK_GADGET_CLOCK];
+	double a = fmax(aspect, 0.2);
+	double gz = RM_ZN - 2.0 * hx / a + (RM_FOV_X_V * 0.5 / a) * g->h + g->z;
+	double x0 = g->x - g->hx, x1 = g->x + g->hx, zb = gz - g->hz, zf = gz + g->hz;
+	pc[0] = (struct case_piece){ .n = 4,
+		.p = { v3(x0, g->h, zb), v3(x1, g->h, zb), v3(x1, g->h, zf), v3(x0, g->h, zf) } };
+	memcpy(pc[0].q, pc[0].p, sizeof pc[0].q);
+	pc[1] = (struct case_piece){ .n = 4,
+		.p = { v3(x0, g->h, zf), v3(x1, g->h, zf), v3(x1, 0.0, zf), v3(x0, 0.0, zf) } };
+	memcpy(pc[1].q, pc[1].p, sizeof pc[1].q);
+	pc[2] = (struct case_piece){ .n = 0 };
+	case_quad(&pc[2], v3(x0 - 2.0, 0.0, zb), v3(x1 + 2.0, 0.0, zb),
+		v3(x1 + 2.0, 0.0, zf + 2.0), v3(x0 - 2.0, 0.0, zf + 2.0));
+	return 3;
+}
+
+/* Where the post box stands for a screen this shape over a desk this wide:
+ * RM_PB_CX and RM_PB_CZ, without the room's globals. */
+static void pb_place_at(double aspect, double hx, double *cx, double *cz)
+{
+	double a = fmax(aspect, 0.2);
+	*cx = RM_PB_X0 + (hx - RM_HX_MIN);
+	*cz = RM_ZN - 2.0 * hx / a + RM_PB_TOP_DZ + RM_PB_TOP_GAP
+		+ (RM_FOV_X_V * 0.5 / a) * RM_PB_TOP_Y;
+}
+
+/* pb_cap_to_world, for a box standing at cx, cz */
+static vec3 pb_cap_at(double cx, double cz, double u, double n, double s)
+{
+	vec3 q = rot_x(v3(u, n, s), RM_PB_TILT);
+	return vadd(q, v3(cx, RM_PB_SHOULDER + RM_PB_CAP_T * 0.5, cz));
+}
+
+/* The post box: its cap; the door's face; its left side, which the eye, to
+ * the left of it, sees; and the desk. */
+static int post_case_pieces(double aspect, double hx, struct case_piece *pc)
+{
+	double cx, cz;
+	pb_place_at(aspect, hx, &cx, &cz);
+	const double ux = RM_PB_HX + 0.14, un = RM_PB_CAP_T * 0.5, us = RM_PB_HZ + 0.14;
+	double xl = cx - RM_PB_HX, xr = cx + RM_PB_HX;
+	double zf = cz + RM_PB_HZ, zd = zf + 0.10, zb = cz - RM_PB_HZ;
+	double y0 = RM_PB_PLINTH, y1 = RM_PB_SHOULDER;
+	/* the cap: laid by its top, and the whole of it a hull round its
+	 * corners */
+	pc[0] = (struct case_piece){ .n = 8, .hull = true };
+	case_quad(&pc[0], pb_cap_at(cx, cz, -ux, un, -us), pb_cap_at(cx, cz, ux, un, -us),
+		pb_cap_at(cx, cz, ux, un, us), pb_cap_at(cx, cz, -ux, un, us));
+	for (int k = 0; k < 8; k++) {
+		pc[0].p[k] = pb_cap_at(cx, cz, (k & 1) ? ux : -ux, (k & 2) ? un : -un,
+			(k & 4) ? us : -us);
+	}
+	/* the front, laid by the door's face */
+	pc[1] = (struct case_piece){ .n = 4,
+		.p = { v3(xl, y1, zf), v3(xr, y1, zf), v3(xr, y0, zf), v3(xl, y0, zf) } };
+	case_quad(&pc[1], v3(xl, y1, zd), v3(xr, y1, zd), v3(xr, y0, zd), v3(xl, y0, zd));
+	/* the side */
+	pc[2] = (struct case_piece){ .n = 4,
+		.p = { v3(xl, y0, zf), v3(xl, y1, zf), v3(xl, y1, zb), v3(xl, y0, zb) } };
+	memcpy(pc[2].q, pc[2].p, sizeof pc[2].q);
+	/* the desk */
+	pc[3] = (struct case_piece){ .n = 0 };
+	case_quad(&pc[3], v3(xl - 2.0, 0.0, zb), v3(xr + 2.0, 0.0, zb),
+		v3(xr + 2.0, 0.0, zf + 2.0), v3(xl - 2.0, 0.0, zf + 2.0));
+	return 4;
+}
+
+/* A point on the Control Panel's operating panel, in its frame (across it,
+ * out of it, up it), for a set from x0 to x1 carried dz: cc_world, without
+ * the room's globals. */
+static vec3 cc_panel_at(double x0, double x1, double dz, double u, double n, double s)
+{
+	struct cc_face f;
+	cc_face_build(RM_CC_PY0, RM_CC_PZ0, RM_CC_PY1, RM_CC_PZ1, &f);
+	f.o.x = (x0 + x1) * 0.5;
+	return vadd(cc_to_world(&f, u, n, s), v3(0.0, 0.0, dz));
+}
+
+/* The Control Panel, stowed: its cheeks -- the right one's side, which the
+ * eye, to the right of it, sees; both fronts and both tops; and the inside
+ * of the left one, over the panel -- its panel, the ledge in front and the
+ * plinth, and the desk. */
+static int console_case_pieces(double aspect, double hx, struct case_piece *pc)
+{
+	double g = hx - RM_HX_MIN;
+	double x0 = RM_CC_X0_0 - g, x1 = RM_CC_X1_0 - g, dz = -cc_stow_for(aspect, hx);
+	double xc0 = x0 + RM_CC_CHEEK, xc1 = x1 - RM_CC_CHEEK;
+	double inner = (x1 - x0) * 0.5 - RM_CC_CHEEK;
+	double zf = RM_CC_PZ0 + dz, zb = RM_CC_PZ1 + dz;
+	double y0 = RM_CC_PLINTH, y1 = RM_CC_PY1;
+	struct cc_face f;
+	cc_face_build(RM_CC_PY0, RM_CC_PZ0, RM_CC_PY1, RM_CC_PZ1, &f);
+	/* the cheeks: the right one's side, its front and top, the left one's
+	 * front and top */
+	const vec3 face[5][4] = {
+		{ v3(x1, y0, zf), v3(x1, y1, zf), v3(x1, y1, zb), v3(x1, y0, zb) },
+		{ v3(xc1, y0, zf), v3(x1, y0, zf), v3(x1, y1, zf), v3(xc1, y1, zf) },
+		{ v3(xc1, y1, zf), v3(x1, y1, zf), v3(x1, y1, zb), v3(xc1, y1, zb) },
+		{ v3(x0, y0, zf), v3(xc0, y0, zf), v3(xc0, y1, zf), v3(x0, y1, zf) },
+		{ v3(x0, y1, zf), v3(xc0, y1, zf), v3(xc0, y1, zb), v3(x0, y1, zb) },
+	};
+	for (int k = 0; k < 5; k++) {
+		pc[k] = (struct case_piece){ .n = 4 };
+		memcpy(pc[k].q, face[k], sizeof face[k]);
+		memcpy(pc[k].p, face[k], sizeof face[k]);
+	}
+	/* the left one's inside, as much of it as stands over the panel: from
+	 * where the panel's skin meets its front to where it meets its top */
+	double sf = (RM_CC_PZ0 - f.o.z - f.an.z * RM_CC_SKIN) / f.as.z;
+	double st = (y1 - f.o.y - f.an.y * RM_CC_SKIN) / f.as.y;
+	pc[5] = (struct case_piece){ .n = 3, .p = { cc_panel_at(x0, x1, dz, -inner, RM_CC_SKIN, sf),
+		v3(xc0, y1, zf), cc_panel_at(x0, x1, dz, -inner, RM_CC_SKIN, st) } };
+	case_quad(&pc[5], v3(xc0, y0, zf), v3(xc0, y1, zf), v3(xc0, y1, zb), v3(xc0, y0, zb));
+	/* the panel, its skin from lip to top */
+	pc[6] = (struct case_piece){ .n = 4 };
+	case_quad(&pc[6], cc_panel_at(x0, x1, dz, -inner, RM_CC_SKIN, -f.half),
+		cc_panel_at(x0, x1, dz, inner, RM_CC_SKIN, -f.half),
+		cc_panel_at(x0, x1, dz, inner, RM_CC_SKIN, f.half),
+		cc_panel_at(x0, x1, dz, -inner, RM_CC_SKIN, f.half));
+	memcpy(pc[6].p, pc[6].q, sizeof pc[6].q);
+	/* the ledge, and the plinth: each laid by its top, a hull round its
+	 * corners */
+	double lx0 = RM_CC_PLATE_X0_0 - g + 0.10, lx1 = RM_CC_LEDGE_X1_0 - g;
+	double lz0 = RM_CC_PZ0 + RM_CC_LEDGE + dz, lz1 = RM_CC_PLINTH_Z0 - 0.20 + dz;
+	double px0 = x0 + 0.10, px1 = x1 - 0.10;
+	double pz0 = RM_CC_PLINTH_Z0 + dz, pz1 = RM_CC_ZB + 0.30 + dz;
+	pc[7] = (struct case_piece){ .n = 8, .hull = true };
+	pc[8] = (struct case_piece){ .n = 8, .hull = true };
+	case_quad(&pc[7], v3(lx0, y0, lz1), v3(lx1, y0, lz1), v3(lx1, y0, lz0), v3(lx0, y0, lz0));
+	case_quad(&pc[8], v3(px0, y0, pz1), v3(px1, y0, pz1), v3(px1, y0, pz0), v3(px0, y0, pz0));
+	for (int k = 0; k < 8; k++) {
+		double y = (k & 2) ? y0 : 0.0;
+		pc[7].p[k] = v3((k & 1) ? lx1 : lx0, y, (k & 4) ? lz1 : lz0);
+		pc[8].p[k] = v3((k & 1) ? px1 : px0, y, (k & 4) ? pz1 : pz0);
+	}
+	/* and the desk */
+	pc[9] = (struct case_piece){ .n = 0 };
+	case_quad(&pc[9], v3(x0 - 3.0, 0.0, zb), v3(x1 + 2.0, 0.0, zb),
+		v3(x1 + 2.0, 0.0, lz0 + 2.0), v3(x0 - 3.0, 0.0, lz0 + 2.0));
+	return 10;
+}
+
+static cairo_surface_t *g_clock_case_pic[CLOCK_CASE_ASPECTS * CLOCK_CASE_HXS];
+static cairo_surface_t *g_post_case_pic[POST_CASE_ASPECTS * POST_CASE_HXS];
+static cairo_surface_t *g_console_case_pic[CONSOLE_CASE_ASPECTS * CONSOLE_CASE_HXS];
+
+static struct room_case g_cases[] = {
+	{ CLOCK_CASE, CLOCK_CASE_ASPECTS, CLOCK_CASE_HXS, "clock", "clock-case.bin",
+		"the clock's", false, clock_case_pieces, g_clock_case_pic, NULL, 0, 0, { 0 } },
+	{ POST_CASE, POST_CASE_ASPECTS, POST_CASE_HXS, "post", "post-case.bin",
+		"the post box's", false, post_case_pieces, g_post_case_pic, NULL, 0, 0, { 0 } },
+	{ CONSOLE_CASE, CONSOLE_CASE_ASPECTS, CONSOLE_CASE_HXS, "console", "console-case.bin",
+		"the console's", false, console_case_pieces, g_console_case_pic, NULL, 0, 0, { 0 } },
+};
+#define ROOM_CASES ((int)(sizeof g_cases / sizeof g_cases[0]))
+static pthread_mutex_t g_case_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* How the pictures of one thing are laid: the ones mixed and how much of
+ * each; for each piece of each, the homography from the target's pixels to
+ * the picture's; each piece's outline in the target's pixels, and the
+ * pixels each piece and all of it cover. */
+struct case_plan {
+	int n, which[4];
+	double weight[4];
+	int pieces;
+	double to_pic[4][ROOM_CASE_PIECES][9];
+	int outn[ROOM_CASE_PIECES];
+	double out[ROOM_CASE_PIECES][8][2];
+	int box[ROOM_CASE_PIECES][4];
+	int x0, y0, x1, y1;
+};
+
+/* Along one row of what a thing was rendered for -- the shapes, or the
+ * desks, every `stride`th -- where v is: the one at or below it, and how
+ * far on to the next, as a ratio (1.5 is as far from 1.25 as 1.8 from
+ * 1.5); not at all, nor all the way, when it is next to one. */
+static int case_step(const struct room_case_bake *b, int n, int stride, bool desk, double v,
+	double *t)
+{
+	int i = 0;
+	while (i + 1 < n && (desk ? b[(i + 1) * stride].hx : b[(i + 1) * stride].aspect) <= v) {
+		i++;
+	}
+	*t = 0.0;
+	double lo = desk ? b[i * stride].hx : b[i * stride].aspect;
+	if (i + 1 < n && v > lo) {
+		double hi = desk ? b[(i + 1) * stride].hx : b[(i + 1) * stride].aspect;
+		*t = log(v / lo) / log(hi / lo);
+	}
+	*t = *t < 0.01 ? 0.0 : *t > 0.99 ? 1.0 : *t;
+	return i;
+}
+
+/* The pictures a screen this shape over a desk this wide is mixed from:
+ * up to the four round it, by how far between them it is each way. */
+static int case_pick(const struct room_case *o, double aspect, double hx, int which[4],
+	double weight[4])
+{
+	double ta, th;
+	int i = case_step(o->bake, o->n_aspect, 1, false, aspect, &ta);
+	int j = case_step(o->bake, o->n_hx, o->n_aspect, true, hx, &th);
+	int n = 0;
+	for (int dj = 0; dj < 2; dj++) {
+		for (int di = 0; di < 2; di++) {
+			double w = (di ? ta : 1.0 - ta) * (dj ? th : 1.0 - th);
+			if (w > 0.0) {
+				which[n] = (j + dj) * o->n_aspect + i + di;
+				weight[n++] = w;
+			}
+		}
+	}
+	return n;
+}
+
+/* The convex hull of n points (at most eight), round in order, in place;
+ * how many are on it. */
+static int case_hull(double p[8][2], int n)
+{
+	for (int i = 1; i < n; i++) {
+		for (int j = i; j > 0 && (p[j][0] < p[j - 1][0]
+				|| (!(p[j][0] > p[j - 1][0]) && p[j][1] < p[j - 1][1])); j--) {
+			double t0 = p[j][0], t1 = p[j][1];
+			p[j][0] = p[j - 1][0];
+			p[j][1] = p[j - 1][1];
+			p[j - 1][0] = t0;
+			p[j - 1][1] = t1;
+		}
+	}
+	if (n < 3) {
+		return n;
+	}
+	double h[16][2];
+	int k = 0;
+	for (int pass = 0; pass < 2; pass++) {
+		int start = k;
+		for (int c = 0; c < n; c++) {
+			const double *q = p[pass ? n - 1 - c : c];
+			while (k >= start + 2 && (h[k - 1][0] - h[k - 2][0]) * (q[1] - h[k - 2][1])
+				- (h[k - 1][1] - h[k - 2][1]) * (q[0] - h[k - 2][0]) <= 0.0) {
+				k--;
+			}
+			h[k][0] = q[0];
+			h[k][1] = q[1];
+			k++;
+		}
+		k--;   /* each run's last is the next one's first */
+	}
+	for (int i = 0; i < k; i++) {
+		p[i][0] = h[i][0];
+		p[i][1] = h[i][1];
+	}
+	return k;
+}
+
+/* 3x3, row by row: c = a b */
+static void m3_mul(const double a[9], const double b[9], double c[9])
+{
+	double r[9];
+	for (int i = 0; i < 3; i++) {
+		for (int j = 0; j < 3; j++) {
+			r[i * 3 + j] = a[i * 3] * b[j] + a[i * 3 + 1] * b[3 + j] + a[i * 3 + 2] * b[6 + j];
+		}
+	}
+	memcpy(c, r, sizeof r);
+}
+
+/* its inverse, up to a scale (which a homography does not mind); false
+ * when there is none */
+static bool m3_inv(const double m[9], double r[9])
+{
+	r[0] = m[4] * m[8] - m[5] * m[7];
+	r[1] = m[2] * m[7] - m[1] * m[8];
+	r[2] = m[1] * m[5] - m[2] * m[4];
+	r[3] = m[5] * m[6] - m[3] * m[8];
+	r[4] = m[0] * m[8] - m[2] * m[6];
+	r[5] = m[2] * m[3] - m[0] * m[5];
+	r[6] = m[3] * m[7] - m[4] * m[6];
+	r[7] = m[1] * m[6] - m[0] * m[7];
+	r[8] = m[0] * m[4] - m[1] * m[3];
+	double det = m[0] * r[0] + m[1] * r[3] + m[2] * r[6];
+	return fabs(det) > 1e-300;
+}
+
+/* The homography from the unit square to the quad q (corners round in
+ * order from the one at 0, 0). */
+static bool m3_square(const double q[4][2], double m[9])
+{
+	double sx = q[0][0] - q[1][0] + q[2][0] - q[3][0];
+	double sy = q[0][1] - q[1][1] + q[2][1] - q[3][1];
+	double dx1 = q[1][0] - q[2][0], dx2 = q[3][0] - q[2][0];
+	double dy1 = q[1][1] - q[2][1], dy2 = q[3][1] - q[2][1];
+	double den = dx1 * dy2 - dx2 * dy1;
+	if (fabs(den) < 1e-18) {
+		return false;
+	}
+	double g = (sx * dy2 - dx2 * sy) / den, h = (dx1 * sy - sx * dy1) / den;
+	m[0] = q[1][0] - q[0][0] + g * q[1][0];
+	m[1] = q[3][0] - q[0][0] + h * q[3][0];
+	m[2] = q[0][0];
+	m[3] = q[1][1] - q[0][1] + g * q[1][1];
+	m[4] = q[3][1] - q[0][1] + h * q[3][1];
+	m[5] = q[0][1];
+	m[6] = g;
+	m[7] = h;
+	m[8] = 1.0;
+	return true;
+}
+
+static bool case_project4(const struct room_cam *c, const vec3 p[4], double q[4][2])
+{
+	for (int i = 0; i < 4; i++) {
+		if (!room_project(c, p[i], &q[i][0], &q[i][1])) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool case_plan(const struct room_case *o, const struct room_render *rr, double ox,
+	double oy, double sw, double sh, const cairo_matrix_t *ctm, struct case_plan *p,
+	double key[14])
+{
+	const struct room_cam *c = &rr->cam;
+	if (c->pitch != 0.0 || c->fov_y <= 0.0) {
+		return false;
+	}
+	double a = c->fov_x / c->fov_y;
+	/* the desk's half width, from where the frame has its far edge */
+	double hx = (RM_ZN - c->z0) * a * 0.5;
+	struct case_piece pc[ROOM_CASE_PIECES];
+	int np = o->pieces(a, hx, pc);
+	p->pieces = np;
+	p->x0 = p->y0 = INT_MAX;
+	p->x1 = p->y1 = INT_MIN;
+	/* this frame to the target's pixels */
+	const double to_dev[9] = {
+		ctm->xx * sw, ctm->xy * sh, ctm->xx * ox + ctm->xy * oy + ctm->x0,
+		ctm->yx * sw, ctm->yy * sh, ctm->yx * ox + ctm->yy * oy + ctm->y0,
+		0.0, 0.0, 1.0,
+	};
+	double now[ROOM_CASE_PIECES][9];
+	for (int k = 0; k < np; k++) {
+		/* the outline, in the target's pixels */
+		double pts[8][2] = { { 0.0 } };
+		for (int i = 0; i < pc[k].n; i++) {
+			double u, v;
+			if (!room_project(c, pc[k].p[i], &u, &v)) {
+				return false;
+			}
+			pts[i][0] = ox + u * sw;
+			pts[i][1] = oy + v * sh;
+			cairo_matrix_transform_point(ctm, &pts[i][0], &pts[i][1]);
+		}
+		p->outn[k] = pc[k].hull ? case_hull(pts, pc[k].n) : pc[k].n;
+		memcpy(p->out[k], pts, sizeof pts);
+		/* and the plane, as it is seen now */
+		double q[4][2];
+		if (!case_project4(c, pc[k].q, q) || !m3_square(q, now[k])) {
+			return false;
+		}
+	}
+
+	p->n = case_pick(o, a, hx, p->which, p->weight);
+	for (int k = 0; k < np; k++) {
+		p->box[k][0] = p->box[k][1] = INT_MAX;
+		p->box[k][2] = p->box[k][3] = INT_MIN;
+	}
+	for (int s = 0; s < p->n; s++) {
+		const struct room_case_bake *b = &o->bake[p->which[s]];
+		/* the room it was rendered in, and where its picture is there */
+		struct room_cam bc;
+		room_cam_plan_at(b->aspect, b->hx, &bc);
+		struct case_piece then[ROOM_CASE_PIECES];
+		if (o->pieces(b->aspect, b->hx, then) != np) {
+			return false;
+		}
+		const double from_pic[9] = {
+			(b->u1 - b->u0) / b->w, 0.0, b->u0,
+			0.0, (b->v1 - b->v0) / b->h, b->v0,
+			0.0, 0.0, 1.0,
+		};
+		for (int k = 0; k < np; k++) {
+			double q[4][2], sq[9], inv[9], m[9];
+			if (!case_project4(&bc, then[k].q, q) || !m3_square(q, sq) || !m3_inv(sq, inv)) {
+				return false;
+			}
+			/* its pixels to its frame, to the square, to this frame, to
+			 * the target's pixels; and back */
+			m3_mul(inv, from_pic, m);
+			m3_mul(now[k], m, m);
+			m3_mul(to_dev, m, m);
+			/* (an inverse up to a scale can be up to a negative one: the
+			 * picture is in front, so its w is positive) */
+			if (m[6] * b->w * 0.5 + m[7] * b->h * 0.5 + m[8] < 0.0) {
+				for (int i = 0; i < 9; i++) {
+					m[i] = -m[i];
+				}
+			}
+			if (!m3_inv(m, p->to_pic[s][k])) {
+				return false;
+			}
+			/* what of the target it can reach: the picture, laid this
+			 * way, and no further than its outline */
+			double bx0 = INFINITY, by0 = INFINITY, bx1 = -INFINITY, by1 = -INFINITY;
+			for (int c4 = 0; c4 < 4; c4++) {
+				double x = (c4 & 1) ? b->w : 0.0, y = (c4 & 2) ? b->h : 0.0;
+				double w = m[6] * x + m[7] * y + m[8];
+				if (w <= 0.0) {
+					return false;
+				}
+				double dx = (m[0] * x + m[1] * y + m[2]) / w;
+				double dy = (m[3] * x + m[4] * y + m[5]) / w;
+				bx0 = fmin(bx0, dx);
+				by0 = fmin(by0, dy);
+				bx1 = fmax(bx1, dx);
+				by1 = fmax(by1, dy);
+			}
+			if (p->outn[k] >= 3) {
+				double ox0 = INFINITY, oy0 = INFINITY, ox1 = -INFINITY, oy1 = -INFINITY;
+				for (int i = 0; i < p->outn[k]; i++) {
+					ox0 = fmin(ox0, p->out[k][i][0]);
+					oy0 = fmin(oy0, p->out[k][i][1]);
+					ox1 = fmax(ox1, p->out[k][i][0]);
+					oy1 = fmax(oy1, p->out[k][i][1]);
+				}
+				bx0 = fmax(bx0, ox0);
+				by0 = fmax(by0, oy0);
+				bx1 = fmin(bx1, ox1);
+				by1 = fmin(by1, oy1);
+			}
+			if (bx1 <= bx0 || by1 <= by0) {
+				continue;
+			}
+			int *bk = p->box[k];
+			bk[0] = (int)floor(bx0) - 1 < bk[0] ? (int)floor(bx0) - 1 : bk[0];
+			bk[1] = (int)floor(by0) - 1 < bk[1] ? (int)floor(by0) - 1 : bk[1];
+			bk[2] = (int)ceil(bx1) + 1 > bk[2] ? (int)ceil(bx1) + 1 : bk[2];
+			bk[3] = (int)ceil(by1) + 1 > bk[3] ? (int)ceil(by1) + 1 : bk[3];
+		}
+	}
+	for (int k = 0; k < np; k++) {
+		if (p->box[k][2] > p->box[k][0] && p->box[k][3] > p->box[k][1]) {
+			p->x0 = p->box[k][0] < p->x0 ? p->box[k][0] : p->x0;
+			p->y0 = p->box[k][1] < p->y0 ? p->box[k][1] : p->y0;
+			p->x1 = p->box[k][2] > p->x1 ? p->box[k][2] : p->x1;
+			p->y1 = p->box[k][3] > p->y1 ? p->box[k][3] : p->y1;
+		}
+	}
+	if (p->n == 0 || p->x1 <= p->x0 || p->y1 <= p->y0) {
+		return false;
+	}
+	if (key) {
+		double k14[14] = { ctm->xx, ctm->yx, ctm->xy, ctm->yy, ctm->x0, ctm->y0,
+			ox, oy, sw, sh, a, hx, (double)rr->w, (double)rr->h };
+		memcpy(key, k14, sizeof k14);
+	}
+	return true;
+}
+
+/* The pictures the plan mixes, read out of the .bin, and the others let
+ * go. */
+static bool case_pics(struct room_case *o, const int *which, int n)
+{
+	int count = o->n_aspect * o->n_hx;
+	for (int i = 0; i < count; i++) {
+		bool want = false;
+		for (int s = 0; s < n; s++) {
+			want |= which[s] == i;
+		}
+		if (!want && o->pic[i]) {
+			cairo_surface_destroy(o->pic[i]);
+			o->pic[i] = NULL;
+		}
+	}
+	if (o->gone) {
+		return false;
+	}
+	bool all = true;
+	int fd = -1;
+	for (int s = 0; s < n && all; s++) {
+		const struct room_case_bake *b = &o->bake[which[s]];
+		if (o->pic[which[s]]) {
+			continue;
+		}
+		if (fd < 0) {
+			char path[RF_DIR_LEN + 64];
+			if (!desk_art_find(o->kind, o->file, path, sizeof path)
+				|| (fd = open(path, O_RDONLY | O_CLOEXEC)) < 0) {
+				room_log("%s pictures are not there (%s)", o->what, path);
+				o->gone = true;
+				return false;
+			}
+		}
+		unsigned char *png = malloc(b->len);
+		struct cam_read r = { png, b->len };
+		cairo_surface_t *pic = NULL;
+		if (png && pread(fd, png, b->len, (off_t)b->off) == (ssize_t)b->len) {
+			pic = cairo_image_surface_create_from_png_stream(cam_read, &r);
+		}
+		free(png);
+		if (!pic || cairo_surface_status(pic) != CAIRO_STATUS_SUCCESS
+			|| cairo_image_surface_get_width(pic) != b->w
+			|| cairo_image_surface_get_height(pic) != b->h) {
+			room_log("%s pictures would not read (%s, the one at %u)", o->what, o->file,
+				b->off);
+			o->gone = true;
+			if (pic) {
+				cairo_surface_destroy(pic);
+			}
+			all = false;
+			continue;
+		}
+		o->pic[which[s]] = pic;
+	}
+	if (fd >= 0) {
+		close(fd);
+	}
+	return all;
+}
+
+/* The pictures a screen this shape over a desk this wide wants, read ahead
+ * -- by the thread making its room, before there is a desk to draw -- so
+ * that the desk's first frame does not wait for them to be read. */
+static void room_cases_ready(double aspect, double hx)
+{
+	pthread_mutex_lock(&g_case_lock);
+	for (int i = 0; i < ROOM_CASES; i++) {
+		int which[4];
+		double weight[4];
+		int n = case_pick(&g_cases[i], fmax(aspect, 0.2), hx, which, weight);
+		case_pics(&g_cases[i], which, n);
+	}
+	pthread_mutex_unlock(&g_case_lock);
+}
+
+static void case_outline(cairo_t *cr, const struct case_plan *p, int k)
+{
+	cairo_move_to(cr, p->out[k][0][0], p->out[k][0][1]);
+	for (int i = 1; i < p->outn[k]; i++) {
+		cairo_line_to(cr, p->out[k][i][0], p->out[k][i][1]);
+	}
+	cairo_close_path(cr);
+}
+
+/* where the target's pixel x, y is in the picture, through h */
+static void case_hmap(const double h[9], double x, double y, double *u, double *v)
+{
+	double w = h[6] * x + h[7] * y + h[8];
+	*u = (h[0] * x + h[1] * y + h[2]) / w;
+	*v = (h[3] * x + h[4] * y + h[5]) / w;
+}
+
+/* The picture into the cell x0, y0 - x1, y1 of the target, through h: by
+ * the one matrix that is h at three of its corners, where that is within a
+ * tenth of a pixel of h at the fourth and the middle -- else the cell in
+ * two, and each the same way. */
+static void case_cells(cairo_t *ic, cairo_surface_t *pic, const double h[9], double alpha,
+	int x0, int y0, int x1, int y1, int depth)
+{
+	double ua, va, ub, vb, uc, vc, ud, vd, um, vm;
+	case_hmap(h, x0, y0, &ua, &va);
+	case_hmap(h, x1, y0, &ub, &vb);
+	case_hmap(h, x0, y1, &uc, &vc);
+	case_hmap(h, x1, y1, &ud, &vd);
+	case_hmap(h, (x0 + x1) * 0.5, (y0 + y1) * 0.5, &um, &vm);
+	double w = x1 - x0, hh = y1 - y0;
+	/* how far off the matrix is, in the picture's pixels, and those in the
+	 * target's */
+	double off = fmax(hypot(ub + uc - ua - ud, vb + vc - va - vd),
+		hypot((ub + uc) * 0.5 - um, (vb + vc) * 0.5 - vm));
+	double grain = fmax(hypot(ub - ua, vb - va) / w, hypot(uc - ua, vc - va) / hh);
+	if (off > 0.1 * grain && depth < 10 && (w > 2.0 || hh > 2.0)) {
+		if (w >= hh) {
+			int xm = (x0 + x1) / 2;
+			case_cells(ic, pic, h, alpha, x0, y0, xm, y1, depth + 1);
+			case_cells(ic, pic, h, alpha, xm, y0, x1, y1, depth + 1);
+		} else {
+			int ym = (y0 + y1) / 2;
+			case_cells(ic, pic, h, alpha, x0, y0, x1, ym, depth + 1);
+			case_cells(ic, pic, h, alpha, x0, ym, x1, y1, depth + 1);
+		}
+		return;
+	}
+	cairo_matrix_t m;
+	double xx = (ub - ua) / w, yx = (vb - va) / w, xy = (uc - ua) / hh, yy = (vc - va) / hh;
+	cairo_matrix_init(&m, xx, yx, xy, yy, ua - xx * x0 - xy * y0, va - yx * x0 - yy * y0);
+	cairo_pattern_t *pat = cairo_pattern_create_for_surface(pic);
+	cairo_pattern_set_matrix(pat, &m);
+	cairo_pattern_set_filter(pat, CAIRO_FILTER_GOOD);
+	cairo_save(ic);
+	cairo_rectangle(ic, x0, y0, w, hh);
+	cairo_clip(ic);
+	cairo_set_source(ic, pat);
+	cairo_paint_with_alpha(ic, alpha);
+	cairo_restore(ic);
+	cairo_pattern_destroy(pat);
+}
+
+/* The picture laid for this plan: piece by piece, each picture mixed in by
+ * its weight -- premultiplied, the mix is a sum. */
+static cairo_surface_t *case_lay(struct room_case *o, const struct case_plan *p)
+{
+	int w = p->x1 - p->x0, h = p->y1 - p->y0;
+	if (w > 8192 || h > 8192 || !case_pics(o, p->which, p->n)) {
+		return NULL;
+	}
+	cairo_surface_t *img = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+	cairo_t *ic = cairo_create(img);
+	cairo_set_operator(ic, CAIRO_OPERATOR_ADD);
+	cairo_set_antialias(ic, CAIRO_ANTIALIAS_NONE);
+	/* in the target's pixels */
+	cairo_translate(ic, -p->x0, -p->y0);
+	for (int k = 0; k < p->pieces; k++) {
+		bool rest = k == p->pieces - 1;
+		const int *bk = rest ? (const int[4]){ p->x0, p->y0, p->x1, p->y1 } : p->box[k];
+		if ((p->outn[k] < 3 && !rest) || bk[2] <= bk[0] || bk[3] <= bk[1]) {
+			continue;
+		}
+		cairo_save(ic);
+		/* its outline, less those before it; the last, all but theirs */
+		cairo_set_fill_rule(ic, CAIRO_FILL_RULE_EVEN_ODD);
+		for (int j = 0; j < k; j++) {
+			if (p->outn[j] >= 3) {
+				cairo_rectangle(ic, p->x0 - 1, p->y0 - 1, w + 2, h + 2);
+				case_outline(ic, p, j);
+				cairo_clip(ic);
+			}
+		}
+		if (!rest) {
+			case_outline(ic, p, k);
+			cairo_clip(ic);
+		}
+		for (int s = 0; s < p->n; s++) {
+			case_cells(ic, o->pic[p->which[s]], p->to_pic[s][k], p->weight[s],
+				bk[0], bk[1], bk[2], bk[3], 0);
+		}
+		cairo_restore(ic);
+	}
+	cairo_destroy(ic);
+	cairo_surface_flush(img);
+	return img;
+}
+
+static void case_paint(struct room_case *o, cairo_t *cr, const struct room_xf *xf)
+{
+	cairo_matrix_t ctm;
+	cairo_get_matrix(cr, &ctm);
+	struct case_plan p;
+	double key[14];
+	if (!case_plan(o, xf->rr, xf->ox, xf->oy, xf->rr->w * xf->scale,
+			xf->rr->h * xf->scale, &ctm, &p, key)) {
+		return;
+	}
+	pthread_mutex_lock(&g_case_lock);
+	if (!o->img || memcmp(key, o->key, sizeof key) != 0) {
+		if (o->img) {
+			cairo_surface_destroy(o->img);
+		}
+		o->img = case_lay(o, &p);
+		o->x = p.x0;
+		o->y = p.y0;
+		memcpy(o->key, key, sizeof key);
+	}
+	if (o->img) {
+		cairo_save(cr);
+		cairo_identity_matrix(cr);
+		cairo_set_source_surface(cr, o->img, o->x, o->y);
+		cairo_paint(cr);
+		cairo_restore(cr);
+	}
+	pthread_mutex_unlock(&g_case_lock);
+}
+
+/* All of them, on the desk as xf has it. */
+static void room_cases_paint(cairo_t *cr, const struct room_xf *xf)
+{
+	for (int i = 0; i < ROOM_CASES; i++) {
+		case_paint(&g_cases[i], cr, xf);
+	}
+}
+
+/* What of a w x h screen they cover, the drawer shut. */
+static bool room_cases_box(int w, int h, double box[4])
+{
+	struct room_xf xf;
+	if (!room_xform(w, h, 0.0, &xf)) {
+		return false;
+	}
+	cairo_matrix_t one;
+	cairo_matrix_init_identity(&one);
+	double x0 = INFINITY, y0 = INFINITY, x1 = -INFINITY, y1 = -INFINITY;
+	for (int i = 0; i < ROOM_CASES; i++) {
+		struct case_plan p;
+		if (case_plan(&g_cases[i], xf.rr, xf.ox, xf.oy, xf.rr->w * xf.scale,
+				xf.rr->h * xf.scale, &one, &p, NULL)) {
+			x0 = fmin(x0, p.x0 - 1.0);
+			y0 = fmin(y0, p.y0 - 1.0);
+			x1 = fmax(x1, p.x1 + 1.0);
+			y1 = fmax(y1, p.y1 + 1.0);
+		}
+	}
+	if (x1 <= x0 || y1 <= y0) {
+		return false;
+	}
+	box[0] = x0;
+	box[1] = y0;
+	box[2] = x1 - x0;
+	box[3] = y1 - y0;
+	return true;
+}
+
 static bool clk_face_point(int w, int h, double px, double py, double drawer_open,
 	double *fx, double *fy)
 {
@@ -25688,14 +35638,9 @@ bool desk_clock_pick(int w, int h, double px, double py, double drawer_open,
 	return true;
 }
 
-bool desk_overlay_box(int which, int w, int h, double box[4])
+/* The clock's face, and the light that spills from its keys. */
+static bool clk_face_box(int w, int h, double box[4])
 {
-	if (which == DESK_OVL_SLIPS) {
-		return slips_box(w, h, box);
-	}
-	if (which != DESK_OVL_CLOCK) {
-		return false;
-	}
 	cairo_matrix_t m;
 	if (!clk_face_matrix(w, h, 0.0, &m)) {
 		return false;
@@ -25717,9 +35662,29 @@ bool desk_overlay_box(int which, int w, int h, double box[4])
 	return true;
 }
 
+static bool mat_box(int w, int h, double box[4]);
+static bool sheet_box(int w, int h, double box[4]);
+
+bool desk_overlay_box(int which, int w, int h, double box[4])
+{
+	if (which == DESK_OVL_MAT) {
+		return mat_box(w, h, box);
+	}
+	if (which == DESK_OVL_MAT_SHEET) {
+		return sheet_box(w, h, box);
+	}
+	if (which == DESK_OVL_SLIPS) {
+		return slips_box(w, h, box);
+	}
+	if (which == DESK_OVL_CASES) {
+		return room_cases_box(w, h, box);
+	}
+	return which == DESK_OVL_CLOCK && clk_face_box(w, h, box);
+}
+
 bool desk_clock_glow_box(int w, int h, double box[4])
 {
-	if (!desk_overlay_box(DESK_OVL_CLOCK, w, h, box)) {
+	if (!clk_face_box(w, h, box)) {
 		return false;
 	}
 	/* and the red it throws round it */
@@ -30718,8 +40683,9 @@ static void desk_gadget_face(cairo_t *cr, const struct room_xf *xf, int i, time_
 	 * multiplying into the face itself turns its transparent parts
 	 * opaque, because multiply still unions the alpha -- so the clock
 	 * came back as a white card. Letting the face through at less than
-	 * full strength dims it towards the traced body underneath, which
-	 * is already lit correctly. */
+	 * full strength dims it towards the body underneath, which is
+	 * already lit correctly -- the clock's, a picture of it laid under
+	 * this one (DESK_OVL_CASES). */
 	double lit = room_lamp_at(v3(g->x, g->h, gadget_z(g)));
 	gadget_face_paint(cr, g, i, &rr->cam, xf->ox, xf->oy,
 		rr->w * xf->scale, rr->h * xf->scale, now,
@@ -30761,6 +40727,2179 @@ void desk_draw_gadgets(cairo_t *cr, int w, int h, time_t now, double drawer_open
 	}
 }
 
+/* ---- the desk mat -------------------------------------------------
+ *
+ * A sprite of its own (DESK_OVL_MAT) over the baked room and under everything
+ * else, so a new mat is a redraw and not a new room. */
+
+static const struct {
+	const char *name;
+	int kind;
+	float rgb[3];
+} MAT_PRESETS[] = {
+	{ "green", DESK_MAT_COLOR, { 0.12f, 0.29f, 0.20f } },
+	{ "navy", DESK_MAT_COLOR, { 0.10f, 0.16f, 0.30f } },
+	{ "burgundy", DESK_MAT_COLOR, { 0.36f, 0.09f, 0.13f } },
+	{ "charcoal", DESK_MAT_COLOR, { 0.16f, 0.16f, 0.17f } },
+	{ "cream", DESK_MAT_COLOR, { 0.80f, 0.75f, 0.62f } },
+	/* green morocco, as a writing desk's; and office linoleum, grey-green */
+	{ "leather", DESK_MAT_LEATHER, { 0.20f, 0.36f, 0.24f } },
+	{ "linoleum", DESK_MAT_LINOLEUM, { 0.50f, 0.55f, 0.46f } },
+};
+
+bool desk_mat_preset(const char *name, struct desk_mat *out)
+{
+	if (!name || !out) {
+		return false;
+	}
+	for (size_t i = 0; i < sizeof MAT_PRESETS / sizeof MAT_PRESETS[0]; i++) {
+		if (!strcasecmp(name, MAT_PRESETS[i].name)) {
+			out->kind = MAT_PRESETS[i].kind;
+			memcpy(out->rgb, MAT_PRESETS[i].rgb, sizeof out->rgb);
+			return true;
+		}
+	}
+	if (name[0] == '#' && strlen(name) == 7) {
+		for (int i = 1; i < 7; i++) {
+			if (!isxdigit((unsigned char)name[i])) {
+				return false;
+			}
+		}
+		unsigned v = (unsigned)strtoul(name + 1, NULL, 16);
+		out->kind = DESK_MAT_COLOR;
+		out->rgb[0] = (float)((v >> 16) & 0xff) / 255.0f;
+		out->rgb[1] = (float)((v >> 8) & 0xff) / 255.0f;
+		out->rgb[2] = (float)(v & 0xff) / 255.0f;
+		return true;
+	}
+	return false;
+}
+
+static pthread_mutex_t g_mat_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct desk_mat g_mat = { .size = DESK_MAT_MEDIUM };
+static uint64_t g_mat_gen = 1;          /* changes when what is shown does */
+static uint64_t g_sheet_gen = 1;        /* and when a clear sheet itself would look otherwise */
+static cairo_surface_t *g_mat_pic;      /* the photo read for g_mat_pic_path */
+static char g_mat_pic_path[512];        /* ...even when it could not be read: not tried twice */
+static bool g_mat_busy;                 /* the thread reading it is running */
+
+/* The path is whatever shell.conf says and its file may have been sent, so
+ * only a regular file of picture size is read, and a PNG only if its header
+ * says a picture's worth of pixels. A photo is shrunk to MAT_PIC_MAX. */
+#define MAT_PIC_MAX 2400
+#define MAT_FILE_MAX (64L << 20)
+#define MAT_PIC_PIXELS (48L << 20)
+/* A PNG is read in the compositor only up to this many pixels (16 MB once
+ * decoded); a larger one goes to the converter, a process of its own. */
+#define MAT_PNG_DIRECT (4L << 20)
+
+static cairo_surface_t *mat_pic_shrunk(cairo_surface_t *s)
+{
+	int pw = cairo_image_surface_get_width(s), ph = cairo_image_surface_get_height(s);
+	if (cairo_surface_status(s) != CAIRO_STATUS_SUCCESS || pw < 1 || ph < 1) {
+		cairo_surface_destroy(s);
+		return NULL;
+	}
+	if (pw <= MAT_PIC_MAX && ph <= MAT_PIC_MAX) {
+		return s;
+	}
+	double k = (double)MAT_PIC_MAX / (pw > ph ? pw : ph);
+	cairo_surface_t *d = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, (int)ceil(pw * k),
+		(int)ceil(ph * k));
+	if (cairo_surface_status(d) == CAIRO_STATUS_SUCCESS) {
+		cairo_t *cr = cairo_create(d);
+		cairo_scale(cr, k, k);
+		cairo_set_source_surface(cr, s, 0, 0);
+		cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_BEST);
+		cairo_paint(cr);
+		cairo_destroy(cr);
+	} else {
+		cairo_surface_destroy(d);
+		d = NULL;
+	}
+	cairo_surface_destroy(s);
+	return d;
+}
+
+/* The pixels a PNG says it has in its first 24 bytes, head: 0 if it is not one. */
+static unsigned long mat_png_pixels(const unsigned char head[24])
+{
+	if (memcmp(head, "\x89PNG\r\n\x1a\n", 8)) {
+		return 0;
+	}
+	unsigned long pw = (unsigned long)head[16] << 24 | (unsigned long)head[17] << 16
+		| (unsigned long)head[18] << 8 | head[19];
+	unsigned long ph = (unsigned long)head[20] << 24 | (unsigned long)head[21] << 16
+		| (unsigned long)head[22] << 8 | head[23];
+	return pw > 65535 || ph > 65535 ? 0 : pw * ph;
+}
+
+/* A PNG whose first 24 bytes are head, read through fn, if it has no more than
+ * max pixels: cairo allocates for the whole picture the moment it starts. */
+static cairo_surface_t *mat_png_decode(const unsigned char head[24], long max,
+	cairo_read_func_t fn, void *closure)
+{
+	unsigned long px = mat_png_pixels(head);
+	if (px == 0 || px > (unsigned long)max) {
+		return NULL;
+	}
+	cairo_surface_t *s = cairo_image_surface_create_from_png_stream(fn, closure);
+	return s ? mat_pic_shrunk(s) : NULL;
+}
+
+static cairo_status_t mat_fd_read(void *closure, unsigned char *data, unsigned int length)
+{
+	while (length > 0) {
+		ssize_t r = read(*(int *)closure, data, length);
+		if (r < 0 && errno == EINTR) {
+			continue;
+		}
+		if (r <= 0) {
+			return CAIRO_STATUS_READ_ERROR;
+		}
+		data += r;
+		length -= (unsigned int)r;
+	}
+	return CAIRO_STATUS_SUCCESS;
+}
+
+struct mat_mem {
+	const unsigned char *p;
+	size_t n, at;
+};
+
+static cairo_status_t mat_mem_read(void *closure, unsigned char *data, unsigned int length)
+{
+	struct mat_mem *m = closure;
+	if (length > m->n - m->at) {
+		return CAIRO_STATUS_READ_ERROR;
+	}
+	memcpy(data, m->p + m->at, length);
+	m->at += length;
+	return CAIRO_STATUS_SUCCESS;
+}
+
+/* A PNG file, if it is small enough to read here (else *big says it is for the
+ * converter). Opened without waiting, since a named pipe would never end, and
+ * read from that one descriptor, so what was checked is what is read. */
+static cairo_surface_t *mat_png_file(const char *path, bool *big)
+{
+	int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+	if (fd < 0) {
+		return NULL;
+	}
+	struct stat st;
+	unsigned char head[24];
+	cairo_surface_t *s = NULL;
+	if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 24
+		&& st.st_size <= MAT_FILE_MAX && pread(fd, head, sizeof head, 0) == (ssize_t)sizeof head) {
+		unsigned long px = mat_png_pixels(head);
+		*big = px > MAT_PNG_DIRECT && px <= MAT_PIC_PIXELS;
+		s = mat_png_decode(head, MAT_PNG_DIRECT, mat_fd_read, &fd);
+	}
+	close(fd);
+	return s;
+}
+
+/* What argv prints to stdout, up to MAT_FILE_MAX, and whether it exited 0.
+ * Its input and its words go nowhere. Nothing is kept on disk. */
+static unsigned char *mat_run(char *const argv[], size_t *len)
+{
+	int fd[2];
+	if (pipe(fd) != 0) {
+		return NULL;
+	}
+	fcntl(fd[0], F_SETFD, FD_CLOEXEC);
+	fcntl(fd[1], F_SETFD, FD_CLOEXEC);   /* the child has its stdout, the dup of it */
+	posix_spawn_file_actions_t fa;
+	posix_spawn_file_actions_init(&fa);
+	posix_spawn_file_actions_addopen(&fa, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+	posix_spawn_file_actions_adddup2(&fa, fd[1], STDOUT_FILENO);
+	posix_spawn_file_actions_addopen(&fa, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
+	pid_t pid;
+	int err = posix_spawnp(&pid, argv[0], &fa, NULL, argv, environ);
+	posix_spawn_file_actions_destroy(&fa);
+	close(fd[1]);
+	if (err != 0) {
+		close(fd[0]);
+		return NULL;
+	}
+	unsigned char *buf = malloc(MAT_FILE_MAX);
+	size_t got = 0;
+	ssize_t r = 0;
+	while (buf && got < MAT_FILE_MAX && (r = read(fd[0], buf + got, MAT_FILE_MAX - got)) != 0) {
+		if (r < 0 && errno == EINTR) {
+			continue;
+		}
+		if (r < 0) {
+			break;
+		}
+		got += (size_t)r;
+	}
+	bool whole = r == 0;   /* all of it, not cut short by the limit or an error */
+	close(fd[0]);
+	int status = 0;
+	pid_t w;
+	while ((w = waitpid(pid, &status, 0)) < 0 && errno == EINTR) {
+		;
+	}
+	if (!buf || !whole || w != pid || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+		free(buf);
+		return NULL;
+	}
+	*len = got;
+	return buf;
+}
+
+/* The photo at path (absolute): a small PNG as it is. Anything else, a large
+ * PNG too, is made into a PNG of the size wanted by gdk-pixbuf's thumbnailer,
+ * which only decodes pictures, or else by
+ * ImageMagick, which goes by what is inside a file and runs what that asks
+ * for, so it is given only a name it knows and told the decoder to use. */
+static cairo_surface_t *mat_pic_read(const char *path)
+{
+	const char *dot = strrchr(path, '.');
+	struct stat st;
+	if (path[0] != '/' || strlen(path) > 400 || !dot) {
+		return NULL;
+	}
+	if (!strcasecmp(dot, ".png")) {
+		bool big = false;
+		cairo_surface_t *png = mat_png_file(path, &big);
+		if (png || !big) {
+			return png;
+		}
+	}
+	if (stat(path, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size > MAT_FILE_MAX) {
+		return NULL;
+	}
+	static const char *const CODERS[][2] = { { ".png", "png" }, { ".jpg", "jpeg" }, { ".jpeg", "jpeg" },
+		{ ".webp", "webp" }, { ".gif", "gif" }, { ".bmp", "bmp" }, { ".tif", "tiff" },
+		{ ".tiff", "tiff" } };
+	const char *coder = NULL;
+	for (size_t i = 0; i < sizeof CODERS / sizeof CODERS[0]; i++) {
+		coder = !strcasecmp(dot, CODERS[i][0]) ? CODERS[i][1] : coder;
+	}
+	char size[16], area[16], in[460];
+	snprintf(size, sizeof size, "%d", MAT_PIC_MAX);
+	snprintf(area, sizeof area, "%ldMP", MAT_PIC_PIXELS >> 20);
+	snprintf(in, sizeof in, "%s:%s[0]", coder ? coder : "", path);
+	char *const pixbuf[] = { "/usr/bin/gdk-pixbuf-thumbnailer", "-s", size, (char *)path,
+		"/dev/stdout", NULL };
+	char *const magick[] = { "/usr/bin/magick", "-limit", "memory", "512MiB", "-limit", "map",
+		"512MiB", "-limit", "disk", "0", "-limit", "area", area, in, "-auto-orient",
+		"-resize", size, "PNG:-", NULL };
+	bool have_pixbuf = access(pixbuf[0], X_OK) == 0;
+	if (!have_pixbuf && (!coder || access(magick[0], X_OK) != 0)) {
+		return NULL;
+	}
+	/* a minute at most: timeout(1) in front of either */
+	char *argv[24] = { "timeout", "30" };
+	char *const *tool = have_pixbuf ? pixbuf : magick;
+	for (int i = 0; tool[i] && i < 21; i++) {
+		argv[i + 2] = tool[i];
+	}
+	size_t n = 0;
+	unsigned char *png = mat_run(argv, &n);
+	if (!png) {
+		return NULL;
+	}
+	struct mat_mem m = { png, n, 0 };
+	cairo_surface_t *s = n > 24 ? mat_png_decode(png, (long)MAT_PIC_MAX * MAT_PIC_MAX,
+		mat_mem_read, &m) : NULL;
+	free(png);
+	return s;
+}
+
+/* The picture a mat lays all over it, or "": a photo mat's, and a clear
+ * mat's when it has one picture under all of it. */
+static const char *mat_photo_of(const struct desk_mat *m)
+{
+	bool whole = m->kind == DESK_MAT_PHOTO
+		|| (m->kind == DESK_MAT_CLEAR && m->under == DESK_MAT_UNDER_WHOLE);
+	return whole ? m->photo : "";
+}
+
+/* Reads the photo shell.conf names, and then the next if that changed meanwhile. */
+static void *mat_pic_thread(void *arg)
+{
+	(void)arg;
+	for (;;) {
+		char want[512];
+		pthread_mutex_lock(&g_mat_lock);
+		snprintf(want, sizeof want, "%s", mat_photo_of(&g_mat));
+		if (!want[0] || !strcmp(want, g_mat_pic_path)) {
+			g_mat_busy = false;
+			pthread_mutex_unlock(&g_mat_lock);
+			return NULL;
+		}
+		pthread_mutex_unlock(&g_mat_lock);
+		cairo_surface_t *s = mat_pic_read(want);
+		if (!s) {
+			fprintf(stderr, "desk: mat: cannot read %s\n", want);
+		}
+		pthread_mutex_lock(&g_mat_lock);
+		if (g_mat_pic) {
+			cairo_surface_destroy(g_mat_pic);
+		}
+		g_mat_pic = s;
+		snprintf(g_mat_pic_path, sizeof g_mat_pic_path, "%s", want);
+		g_mat_gen++;
+		pthread_mutex_unlock(&g_mat_lock);
+	}
+}
+
+/* With g_mat_busy just set. */
+static void mat_pic_start(void)
+{
+	pthread_t th;
+	if (pthread_create(&th, NULL, mat_pic_thread, NULL) == 0) {
+		pthread_detach(th);
+		return;
+	}
+	pthread_mutex_lock(&g_mat_lock);
+	g_mat_busy = false;
+	pthread_mutex_unlock(&g_mat_lock);
+}
+
+bool desk_set_mat(const struct desk_mat *m)
+{
+	if (!m) {
+		return false;
+	}
+	pthread_mutex_lock(&g_mat_lock);
+	bool same = g_mat.kind == m->kind && g_mat.size == m->size
+		&& !memcmp(g_mat.rgb, m->rgb, sizeof g_mat.rgb)
+		&& (m->kind != DESK_MAT_CLEAR || g_mat.under == m->under)
+		&& !strcmp(mat_photo_of(&g_mat), mat_photo_of(m));
+	bool photo = mat_photo_of(m)[0] != '\0';
+	/* one that could not be read is tried again when the settings are applied again */
+	bool start = photo && !g_mat_busy
+		&& (same ? !g_mat_pic && !strcmp(g_mat_pic_path, m->photo)
+			: strcmp(m->photo, g_mat_pic_path) != 0);
+	if (!same) {
+		g_mat = *m;
+		g_mat.photo[sizeof g_mat.photo - 1] = '\0';
+		g_mat_gen++;
+		g_sheet_gen++;
+	}
+	if (!photo && g_mat_pic) {
+		cairo_surface_destroy(g_mat_pic);
+		g_mat_pic = NULL;
+		g_mat_pic_path[0] = '\0';
+	}
+	if (start) {
+		g_mat_pic_path[0] = '\0';
+		g_mat_busy = true;
+	}
+	pthread_mutex_unlock(&g_mat_lock);
+	if (start) {
+		mat_pic_start();
+	}
+	return !same;
+}
+
+/* How far the mat lies unrolled (desk_mat_unroll): 1, flat. */
+static double g_unroll = 1.0;
+
+static uint64_t mat_key(void)
+{
+	pthread_mutex_lock(&g_mat_lock);
+	uint64_t k = g_mat_gen ^ (uint64_t)lround(g_unroll * 4096.0) << 44;
+	pthread_mutex_unlock(&g_mat_lock);
+	return k;
+}
+
+/* Where the mat lies (x, y, w, h): centred, near the front edge, and never up
+ * to the console, clock and post box. Its size is in points, as the windows'
+ * are, so a larger screen shows more desk, not a larger mat: the sizes are
+ * a few places on the way from the least (0) to all the open desk (1), and
+ * it is never more than that. */
+#define MAT_OPEN_W 0.92   /* the open desk, as a share of the screen */
+#define MAT_OPEN_H 0.82
+static void mat_rect(int w, int h, double size, double r[4])
+{
+	static const double AT[] = { 0.0, DESK_MAT_SMALL, DESK_MAT_MEDIUM, DESK_MAT_LARGE };
+	static const double PW[] = { 480.0, 600.0, 900.0, 1160.0 };   /* points across, and */
+	static const double PH[] = { 320.0, 380.0, 530.0, 650.0 };    /* deep */
+	size = isfinite(size) ? clampf(size, 0.0, 1.0) : DESK_MAT_MEDIUM;
+	double k = desk_px_per_pt(w), ow = w * MAT_OPEN_W, oh = h * MAT_OPEN_H, mw, mh;
+	if (size >= AT[3]) {
+		double t = (size - AT[3]) / (1.0 - AT[3]);
+		mw = PW[3] * k + (ow - PW[3] * k) * t;
+		mh = PH[3] * k + (oh - PH[3] * k) * t;
+	} else {
+		int i = size < AT[1] ? 0 : size < AT[2] ? 1 : 2;
+		double t = (size - AT[i]) / (AT[i + 1] - AT[i]);
+		mw = (PW[i] + (PW[i + 1] - PW[i]) * t) * k;
+		mh = (PH[i] + (PH[i + 1] - PH[i]) * t) * k;
+	}
+	r[2] = fmin(mw, ow);
+	r[3] = fmin(mh, oh);
+	r[0] = (w - r[2]) * 0.5;
+	r[1] = h * 0.96 - r[3];
+}
+
+/* How big a mat lies: a clear one is all the open desk, whatever it says. */
+static double mat_size_of(const struct desk_mat *m)
+{
+	return m->kind == DESK_MAT_CLEAR ? DESK_MAT_FULL : m->size;
+}
+
+/* The mat's lift off the boards, in pixels: a thick felt blotter. */
+static double mat_lift(int w)
+{
+	return fmax(2.0, 4.0 * desk_px_per_pt(w));
+}
+
+static void under_box(int w, int h, const struct desk_mat *m, double box[4]);
+
+/* it and the shadow it throws, or false when there is no mat */
+static bool mat_box(int w, int h, double box[4])
+{
+	pthread_mutex_lock(&g_mat_lock);
+	struct desk_mat m = g_mat;
+	pthread_mutex_unlock(&g_mat_lock);
+	int kind = m.kind;
+	double size = mat_size_of(&m);
+	if (kind == DESK_MAT_NONE) {
+		return false;
+	}
+	if (kind == DESK_MAT_CLEAR) {
+		under_box(w, h, &m, box);
+		return true;
+	}
+	double r[4], pad = 32.0 * desk_px_per_pt(w);
+	mat_rect(w, h, size, r);
+	box[0] = floor(r[0] - pad);
+	box[1] = floor(r[1] - pad);
+	box[2] = ceil(r[0] + r[2] + pad) - box[0];
+	box[3] = ceil(r[1] + r[3] + pad) - box[1];
+	return true;
+}
+
+bool desk_mat_size_parse(const char *s, double *out)
+{
+	if (!s || !out) {
+		return false;
+	}
+	if (!strcasecmp(s, "small")) {
+		*out = DESK_MAT_SMALL;
+	} else if (!strcasecmp(s, "medium")) {
+		*out = DESK_MAT_MEDIUM;
+	} else if (!strcasecmp(s, "large")) {
+		*out = DESK_MAT_LARGE;
+	} else if (!strcasecmp(s, "full")) {
+		*out = DESK_MAT_FULL;
+	} else {
+		char *end = NULL;
+		double v = strtod(s, &end);
+		if (end == s || strcmp(end, "%") || !isfinite(v) || v < 0.0 || v > 100.0) {
+			return false;
+		}
+		*out = v / 100.0;
+	}
+	return true;
+}
+
+/* How much of the lamp reaches each part of the desk, from the baked room
+ * drawn small, so that the grain averages out and the pool of the lamp, the
+ * dark toward the corners and the shadows at the back are left; against its
+ * brightest. The mat is darkened by it, as the boards are. Made again only
+ * for another room or size, and only from the compositor's thread (or
+ * desk-preview's), so it needs no lock. */
+#define MAT_LIGHT_W 16
+#define MAT_LIGHT_H 10
+static cairo_surface_t *g_mat_light;
+static unsigned g_mat_light_room;
+static int g_mat_light_w, g_mat_light_h;
+
+static cairo_surface_t *mat_light(int w, int h)
+{
+	unsigned room = desk_room_shown(w, h);
+	if (!room) {
+		return NULL;   /* no room yet: evenly lit, and drawn again when there is */
+	}
+	if (g_mat_light && g_mat_light_room == room && g_mat_light_w == w && g_mat_light_h == h) {
+		return g_mat_light;
+	}
+	/* a quarter of the size is plenty to average from, and a sixteenth of the pixels */
+	cairo_surface_t *full = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, (w + 3) / 4,
+		(h + 3) / 4);
+	cairo_t *fc = cairo_create(full);
+	cairo_scale(fc, 0.25, 0.25);
+	desk_draw_room(fc, w, h, 0.0);
+	cairo_destroy(fc);
+	cairo_surface_t *small = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, MAT_LIGHT_W,
+		MAT_LIGHT_H);
+	cairo_t *sc = cairo_create(small);
+	cairo_scale(sc, (double)MAT_LIGHT_W / ((w + 3) / 4), (double)MAT_LIGHT_H / ((h + 3) / 4));
+	cairo_set_source_surface(sc, full, 0, 0);
+	cairo_pattern_set_filter(cairo_get_source(sc), CAIRO_FILTER_GOOD);
+	cairo_paint(sc);
+	cairo_destroy(sc);
+	cairo_surface_destroy(full);
+	cairo_surface_flush(small);
+
+	double lum[MAT_LIGHT_W * MAT_LIGHT_H], ref = 0.02;
+	const unsigned char *px = cairo_image_surface_get_data(small);
+	int stride = cairo_image_surface_get_stride(small);
+	for (int y = 0; y < MAT_LIGHT_H; y++) {
+		const uint32_t *row = (const uint32_t *)(px + (size_t)y * stride);
+		for (int x = 0; x < MAT_LIGHT_W; x++) {
+			uint32_t c = row[x];
+			lum[y * MAT_LIGHT_W + x] = (0.30 * ((c >> 16) & 0xff) + 0.59 * ((c >> 8) & 0xff)
+				+ 0.11 * (c & 0xff)) / 255.0;
+			ref = fmax(ref, lum[y * MAT_LIGHT_W + x]);
+		}
+	}
+	cairo_surface_t *map = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, MAT_LIGHT_W,
+		MAT_LIGHT_H);
+	unsigned char *mp = cairo_image_surface_get_data(map);
+	int ms = cairo_image_surface_get_stride(map);
+	for (int y = 0; y < MAT_LIGHT_H; y++) {
+		uint32_t *row = (uint32_t *)(mp + (size_t)y * ms);
+		for (int x = 0; x < MAT_LIGHT_W; x++) {
+			/* a felt is lit more evenly than boards are: not all the way */
+			double f = clampf(lum[y * MAT_LIGHT_W + x] / ref, 0.0, 1.0);
+			f = 1.0 - 0.85 * (1.0 - f);
+			uint32_t g = (uint32_t)lround(f * 255.0);
+			row[x] = 0xff000000u | (g << 16) | (g << 8) | g;
+		}
+	}
+	cairo_surface_mark_dirty(map);
+	cairo_surface_destroy(small);
+	if (g_mat_light) {
+		cairo_surface_destroy(g_mat_light);
+	}
+	g_mat_light = map;
+	g_mat_light_room = room;
+	g_mat_light_w = w;
+	g_mat_light_h = h;
+	return map;
+}
+
+/* what the thread of the stitching is: light on a dark mat, dark on a
+ * light one */
+static void mat_thread(const float rgb[3], double out[3])
+{
+	double lum = 0.30 * rgb[0] + 0.59 * rgb[1] + 0.11 * rgb[2];
+	if (lum < 0.45) {
+		out[0] = 0.86;
+		out[1] = 0.76;
+		out[2] = 0.54;
+	} else {
+		out[0] = 0.30;
+		out[1] = 0.21;
+		out[2] = 0.12;
+	}
+}
+
+static void clear_under_paint(cairo_t *cr, int w, int h, const struct desk_mat *m, cairo_surface_t *pic);
+
+/* The mat lying flat. */
+static void mat_paint_flat(cairo_t *cr, int w, int h)
+{
+	struct desk_mat m;
+	cairo_surface_t *pic = NULL;
+	pthread_mutex_lock(&g_mat_lock);
+	m = g_mat;
+	if (mat_photo_of(&m)[0] && g_mat_pic && !strcmp(g_mat_pic_path, m.photo)) {
+		pic = cairo_surface_reference(g_mat_pic);
+	}
+	pthread_mutex_unlock(&g_mat_lock);
+	if (m.kind == DESK_MAT_NONE) {
+		return;
+	}
+	if (m.kind == DESK_MAT_CLEAR) {
+		clear_under_paint(cr, w, h, &m, pic);
+		if (pic) {
+			cairo_surface_destroy(pic);
+		}
+		return;
+	}
+	double r[4], k = desk_px_per_pt(w);
+	mat_rect(w, h, m.size, r);
+	/* felt's corners well rounded; leather's turned over a board, less;
+	 * linoleum cut from the roll */
+	double x = r[0], y = r[1], mw = r[2], mh = r[3];
+	double rad = (m.kind == DESK_MAT_LEATHER ? 7.0 : m.kind == DESK_MAT_LINOLEUM ? 2.5 : 12.0) * k;
+	double lift = mat_lift(w);
+
+	/* Its shadow, as the windows' are: each edge leans away from the lamp by what
+	 * a mat this thick throws there. Hard where it touches, soft beyond. */
+	double lx, rx, ty, by, along;
+	shadow_dir(x, y + mh * 0.5, lift, &lx, &along);
+	shadow_dir(x + mw, y + mh * 0.5, lift, &rx, &along);
+	shadow_dir(x + mw * 0.5, y, lift, &along, &ty);
+	shadow_dir(x + mw * 0.5, y + mh, lift, &along, &by);
+	const int cast = 10;
+	for (int i = cast; i >= 1; i--) {
+		double g = 3.0 * lift * i / cast;
+		desk_rounded_path(cr, x + fmin(lx, 0.0) - g, y + fmin(ty, 0.0) - g,
+			mw + fmax(rx, 0.0) - fmin(lx, 0.0) + 2 * g,
+			mh + fmax(by, 0.0) - fmin(ty, 0.0) + 2 * g, rad + g);
+		cairo_set_source_rgba(cr, 0.04, 0.025, 0.012, 0.030);
+		cairo_fill(cr);
+	}
+	const int touch = 6;
+	for (int i = touch; i >= 1; i--) {
+		double g = 1.1 * lift * i / touch;
+		desk_rounded_path(cr, x + lx * 0.5 - g, y + ty * 0.5 - g,
+			mw + (rx - lx) * 0.5 + 2 * g, mh + (by - ty) * 0.5 + 2 * g, rad + g);
+		cairo_set_source_rgba(cr, 0.03, 0.018, 0.008, 0.085);
+		cairo_fill(cr);
+	}
+
+	cairo_save(cr);
+	desk_rounded_path(cr, x, y, mw, mh, rad);
+	cairo_clip(cr);
+	if (pic) {
+		/* cut to fill it, from the middle of the picture */
+		double pw = cairo_image_surface_get_width(pic), ph = cairo_image_surface_get_height(pic);
+		double k = fmax(mw / pw, mh / ph);
+		cairo_save(cr);
+		cairo_translate(cr, x + (mw - pw * k) * 0.5, y + (mh - ph * k) * 0.5);
+		cairo_scale(cr, k, k);
+		cairo_set_source_surface(cr, pic, 0, 0);
+		cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_BEST);
+		cairo_paint(cr);
+		cairo_restore(cr);
+	} else {
+		cairo_set_source_rgb(cr, m.rgb[0], m.rgb[1], m.rgb[2]);
+		cairo_paint(cr);
+		if (m.kind == DESK_MAT_LEATHER) {
+			/* its pebbles, at the size they are; rubbed paler in the middle,
+			 * where the hands and the paper go; and a little shine */
+			cairo_pattern_t *pat = tile_pattern(cr, pebble_tile(), 0.5 * k, 0.5 * k, CAIRO_FILTER_GOOD);
+			cairo_set_source(cr, pat);
+			cairo_paint(cr);
+			cairo_pattern_destroy(pat);
+			cairo_pattern_t *rub = cairo_pattern_create_radial(x + mw * 0.5, y + mh * 0.62, 0.0,
+				x + mw * 0.5, y + mh * 0.62, fmax(mw, mh) * 0.55);
+			cairo_pattern_add_color_stop_rgba(rub, 0.0, 0.80, 0.88, 0.72, 0.16);
+			cairo_pattern_add_color_stop_rgba(rub, 1.0, 0.80, 0.88, 0.72, 0.0);
+			cairo_set_source(cr, rub);
+			cairo_paint(cr);
+			cairo_pattern_destroy(rub);
+			overlay_grain(cr, x, y, mw, mh, 0.6);
+		} else if (m.kind == DESK_MAT_LINOLEUM) {
+			/* marbled along the roll, and gritty, matt */
+			cairo_pattern_t *pat = tile_pattern(cr, marble_tile(), 0.7 * k, 0.7 * k, CAIRO_FILTER_GOOD);
+			cairo_set_source(cr, pat);
+			cairo_paint(cr);
+			cairo_pattern_destroy(pat);
+			overlay_grain(cr, x, y, mw, mh, 0.8);
+		} else {
+			/* felt: a nap you can see, and nothing shiny */
+			overlay_grain(cr, x, y, mw, mh, 1.6);
+		}
+	}
+	/* the lamp on it: the baked room's own light, over the whole mat */
+	cairo_surface_t *lit = mat_light(w, h);
+	if (lit) {
+		cairo_set_operator(cr, CAIRO_OPERATOR_MULTIPLY);
+		cairo_set_source_surface(cr, lit, 0, 0);
+		cairo_pattern_t *lp = cairo_get_source(cr);
+		cairo_pattern_set_filter(lp, CAIRO_FILTER_BILINEAR);
+		cairo_pattern_set_extend(lp, CAIRO_EXTEND_PAD);
+		cairo_matrix_t mt;
+		cairo_matrix_init_scale(&mt, (double)MAT_LIGHT_W / w, (double)MAT_LIGHT_H / h);
+		cairo_pattern_set_matrix(lp, &mt);
+		cairo_paint(cr);
+		cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+	}
+	cairo_restore(cr);
+
+	/* its edge, rounded over: bright where it faces the lamp, dark away
+	 * from it */
+	double tx2 = 0.0, ty2 = 0.0, tz2 = 0.0;
+	lamp_toward(x + mw * 0.5, y + mh * 0.5, &tx2, &ty2, &tz2);
+	double hn = hypot(tx2, ty2);
+	double dxl = hn > 1e-6 ? tx2 / hn : -0.6, dyl = hn > 1e-6 ? ty2 / hn : -0.8;
+	double R = 0.5 * hypot(mw, mh);
+	cairo_pattern_t *edge = cairo_pattern_create_linear(x + mw * 0.5 + dxl * R,
+		y + mh * 0.5 + dyl * R, x + mw * 0.5 - dxl * R, y + mh * 0.5 - dyl * R);
+	cairo_pattern_add_color_stop_rgba(edge, 0.0, 1.0, 0.94, 0.80, 0.30);
+	cairo_pattern_add_color_stop_rgba(edge, 0.5, 1.0, 0.94, 0.80, 0.0);
+	cairo_pattern_add_color_stop_rgba(edge, 1.0, 0.0, 0.0, 0.0, 0.45);
+	desk_rounded_path(cr, x + 0.5, y + 0.5, mw - 1.0, mh - 1.0, rad);
+	cairo_set_source(cr, edge);
+	cairo_set_line_width(cr, fmax(1.0, 2.0 * k));
+	cairo_stroke(cr);
+	cairo_pattern_destroy(edge);
+
+	if (m.kind == DESK_MAT_LEATHER && !pic) {
+		/* tooled round in gold, a little in from the edge, and a blind line
+		 * pressed inside it */
+		double in = 11.0 * k, ir = fmax(rad - in * 0.5, 2.0);
+		desk_rounded_path(cr, x + in + 4.0 * k, y + in + 4.0 * k, mw - 2 * in - 8.0 * k,
+			mh - 2 * in - 8.0 * k, ir);
+		cairo_set_source_rgba(cr, 0.0, 0.02, 0.0, 0.30);
+		cairo_set_line_width(cr, fmax(1.0, 1.2 * k));
+		cairo_stroke(cr);
+		desk_rounded_path(cr, x + in, y + in + 0.8, mw - 2 * in, mh - 2 * in, ir);
+		cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.35);
+		cairo_set_line_width(cr, fmax(1.4, 2.0 * k));
+		cairo_stroke(cr);
+		desk_rounded_path(cr, x + in, y + in, mw - 2 * in, mh - 2 * in, ir);
+		cairo_set_source_rgb(cr, 0.78, 0.60, 0.27);
+		cairo_set_line_width(cr, fmax(1.2, 1.7 * k));
+		cairo_stroke(cr);
+		desk_rounded_path(cr, x + in - 0.3, y + in - 0.4, mw - 2 * in, mh - 2 * in, ir);
+		cairo_set_source_rgba(cr, 1.0, 0.92, 0.66, 0.45);
+		cairo_set_line_width(cr, fmax(0.6, 0.6 * k));
+		cairo_stroke(cr);
+		if (pic) {
+			cairo_surface_destroy(pic);
+		}
+		return;
+	}
+	if (m.kind == DESK_MAT_LINOLEUM) {
+		/* cut square from the roll: nothing round its edge but the edge */
+		if (pic) {
+			cairo_surface_destroy(pic);
+		}
+		return;
+	}
+	/* and stitched round, a little in from the edge: each stitch with the
+	 * shadow of the thread on the cloth under it */
+	double thread[3];
+	mat_thread(m.rgb, thread);
+	double in = 14.0 * k, sw = fmax(1.4, 2.7 * k);
+	double dash[2] = { 9.5 * k, 6.0 * k };
+	desk_rounded_path(cr, x + in, y + in, mw - 2 * in, mh - 2 * in, fmax(rad * 0.55, 2.0));
+	cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+	cairo_set_dash(cr, dash, 2, 0.0);
+	cairo_save(cr);
+	cairo_translate(cr, 0.5, 0.9);
+	cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.38);
+	cairo_set_line_width(cr, sw + 0.5);
+	cairo_stroke_preserve(cr);
+	cairo_restore(cr);
+	cairo_set_source_rgb(cr, thread[0], thread[1], thread[2]);
+	cairo_set_line_width(cr, sw);
+	cairo_stroke_preserve(cr);
+	cairo_save(cr);
+	cairo_translate(cr, -0.25, -0.4);
+	cairo_set_source_rgba(cr, 1.0, 0.97, 0.88, 0.28);
+	cairo_set_line_width(cr, sw * 0.4);
+	cairo_stroke(cr);
+	cairo_restore(cr);
+	cairo_set_dash(cr, NULL, 0, 0.0);
+	cairo_set_line_cap(cr, CAIRO_LINE_CAP_BUTT);
+	if (pic) {
+		cairo_surface_destroy(pic);
+	}
+}
+
+/* ---- the mat rolled out, and up -----------------------------------
+ *
+ * A mat is laid as one is on a real desk: set down rolled up at the back of
+ * it and unrolled toward you; and taken away rolled up again (wm.c drives
+ * it, desk_mat_unroll). What lies flat is the mat as it will lie, drawn once
+ * and kept while it rolls; the roll is the rest of it wound round, face out,
+ * lit from the lamp behind it and throwing its shadow forward. Felt, leather,
+ * linoleum and a photo mat roll; a clear sheet is laid at once. */
+
+#define MAT_THICK_PT 2.6      /* as thick as a mat is, wound */
+#define MAT_CORE_PT 5.0       /* and what it is wound round to start with */
+
+static cairo_surface_t *g_flat_mat;   /* the mat flat, while it rolls: for this look, size, room */
+static uint64_t g_flat_gen;
+static int g_flat_w, g_flat_h;
+static unsigned g_flat_room;
+
+bool desk_mat_rolls(const struct desk_mat *m)
+{
+	return m && (m->kind == DESK_MAT_COLOR || m->kind == DESK_MAT_LEATHER
+		|| m->kind == DESK_MAT_LINOLEUM || m->kind == DESK_MAT_PHOTO);
+}
+
+void desk_mat_unroll(double t)
+{
+	t = isfinite(t) ? clampf(t, 0.0, 1.0) : 1.0;
+	pthread_mutex_lock(&g_mat_lock);
+	g_unroll = t;
+	pthread_mutex_unlock(&g_mat_lock);
+	if (t >= 1.0 && g_flat_mat) {
+		cairo_surface_destroy(g_flat_mat);
+		g_flat_mat = NULL;
+	}
+}
+
+static void mat_paint(cairo_t *cr, int w, int h)
+{
+	pthread_mutex_lock(&g_mat_lock);
+	double t = g_unroll;
+	struct desk_mat m = g_mat;
+	uint64_t gen = g_mat_gen;
+	pthread_mutex_unlock(&g_mat_lock);
+	if (t >= 0.9995 || !desk_mat_rolls(&m)) {
+		mat_paint_flat(cr, w, h);
+		return;
+	}
+	unsigned room = desk_room_shown(w, h);
+	if (!g_flat_mat || g_flat_gen != gen || g_flat_w != w || g_flat_h != h || g_flat_room != room) {
+		if (g_flat_mat) {
+			cairo_surface_destroy(g_flat_mat);
+		}
+		g_flat_mat = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+		cairo_t *fc = cairo_create(g_flat_mat);
+		mat_paint_flat(fc, w, h);
+		cairo_destroy(fc);
+		g_flat_gen = gen;
+		g_flat_w = w;
+		g_flat_h = h;
+		g_flat_room = room;
+	}
+	double r[4], k = desk_px_per_pt(w);
+	mat_rect(w, h, m.size, r);
+	double x = r[0], y = r[1], mw = r[2], mh = r[3];
+	/* laid this far from the back; the rest wound round as thick as it is,
+	 * the roll resting on the desk where the laid part ends */
+	double laid = mh * t, core = MAT_CORE_PT * k;
+	double R = sqrt((mh - laid) * MAT_THICK_PT * k / M_PI + core * core);
+	double c = y + laid;
+	/* (set down, or taken up, in the first moment) */
+	double seen = clampf(t / 0.03, 0.0, 1.0);
+	cairo_save(cr);
+	cairo_rectangle(cr, 0, 0, w, c);
+	cairo_clip(cr);
+	cairo_set_source_surface(cr, g_flat_mat, 0, 0);
+	cairo_paint(cr);
+	cairo_restore(cr);
+	/* its shadow on the desk in front of it */
+	cairo_pattern_t *sh = cairo_pattern_create_linear(0.0, c, 0.0, c + R * 1.9);
+	cairo_pattern_add_color_stop_rgba(sh, 0.0, 0.03, 0.018, 0.008, 0.46 * seen);
+	cairo_pattern_add_color_stop_rgba(sh, 1.0, 0.03, 0.018, 0.008, 0.0);
+	cairo_rectangle(cr, x - 2.0 * k, c, mw + 6.0 * k, R * 1.9);
+	cairo_set_source(cr, sh);
+	cairo_fill(cr);
+	cairo_pattern_destroy(sh);
+	/* the roll: from the back of it over the top to the front, the mat that
+	 * is still to come, round it */
+	cairo_save(cr);
+	cairo_rectangle(cr, x, c - R, mw, 2.0 * R);
+	cairo_clip(cr);
+	const int N = 28;
+	for (int i = 0; i < N; i++) {
+		double a0 = -M_PI * 0.5 + M_PI * i / N, a1 = -M_PI * 0.5 + M_PI * (i + 1) / N;
+		double y0 = c + R * sin(a0), y1 = c + R * sin(a1);
+		double s0 = c + R * (a0 + M_PI), s1 = c + R * (a1 + M_PI);
+		/* (past its front edge, round again from its back: what is wound) */
+		s0 = y + fmod(s0 - y, mh);
+		s1 = s0 + R * (a1 - a0);
+		cairo_save(cr);
+		cairo_rectangle(cr, x, y0, mw, y1 - y0 + 0.6);
+		cairo_clip(cr);
+		cairo_translate(cr, 0.0, y0);
+		cairo_scale(cr, 1.0, (y1 - y0) / (s1 - s0));
+		cairo_translate(cr, 0.0, -s0);
+		cairo_set_source_surface(cr, g_flat_mat, 0, 0);
+		cairo_paint_with_alpha(cr, seen);
+		cairo_restore(cr);
+	}
+	/* lit as it turns: the lamp behind it and above, so its back and top
+	 * take the light, and its front, under, falls into shade */
+	cairo_pattern_t *lit = cairo_pattern_create_linear(0.0, c - R, 0.0, c + R);
+	for (int j = 0; j <= 8; j++) {
+		double a = -M_PI * 0.5 + M_PI * j / 8.0;
+		double off = (sin(a) + 1.0) * 0.5;
+		double l = cos(a + 0.45);
+		if (l > 0.55) {
+			cairo_pattern_add_color_stop_rgba(lit, off, 1.0, 0.95, 0.85, 0.24 * (l - 0.55) / 0.45 * seen);
+		} else {
+			cairo_pattern_add_color_stop_rgba(lit, off, 0.0, 0.0, 0.0, 0.62 * (0.55 - l) / 1.55 * seen);
+		}
+	}
+	cairo_rectangle(cr, x, c - R, mw, 2.0 * R);
+	cairo_set_source(cr, lit);
+	cairo_fill(cr);
+	cairo_pattern_destroy(lit);
+	/* its ends, the turns showing as lines */
+	cairo_set_line_width(cr, fmax(1.0, 1.2 * k));
+	cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.35 * seen);
+	for (int e = 0; e < 2; e++) {
+		double ex = e ? x + mw - 0.6 : x + 0.6;
+		cairo_move_to(cr, ex, c - R);
+		cairo_line_to(cr, ex, c + R);
+	}
+	cairo_stroke(cr);
+	cairo_restore(cr);
+}
+
+/* ---- the clear mat, and what is slipped under it ----------------------
+ *
+ * A sheet of clear vinyl over all the open desk, as an office desk has under
+ * its glass: the boards are seen through it a shade darker, the lamp lies in
+ * it, and its edge, as thick as the sheet, catches the light. Under it lies
+ * one picture over all of it, or prints, each where it was laid and turned
+ * as it was. They are moved with the mat lifted (thing-mat.c); laid down,
+ * nothing moves them. Like the mat, it is all one sprite (DESK_OVL_MAT),
+ * drawn again only when what is under it, or the room, has changed. */
+
+#define CLEAR_RADIUS_PT 6.0    /* its corners, rounded */
+#define CLEAR_EDGE_PT 2.4      /* the bevel round its edge: the sheet is about this thick */
+#define CLEAR_LIFT_PT 1.2      /* lying on the desk, it stands this far off it at its edge */
+#define CLEAR_LIFTED_PT 12.0   /* and lifted, to put something under it */
+#define PAPER_LIFT_PT 0.7      /* a print pressed flat under it */
+#define PAPER_BORDER 0.045     /* a print's white margin, against its shorter side */
+#define PAPER_READ_MAX 2048    /* a print is read no bigger than this across */
+
+/* What each paper's print is as read: kept beside the papers, under g_mat_lock. */
+struct mat_print {
+	char name[96];           /* what was read: the paper's name, once it has been */
+	cairo_surface_t *pic;    /* NULL: not yet, or it could not be (failed) */
+	int px;                  /* the longer side it was read at */
+	bool failed;
+};
+static struct desk_mat_paper g_papers[DESK_MAT_PAPERS_MAX];
+static struct mat_print g_prints[DESK_MAT_PAPERS_MAX];
+static int g_npapers;
+static bool g_papers_busy;       /* the thread reading prints is running */
+static double g_papers_k;        /* pixels to the point where the mat was last painted (0: not yet) */
+static int g_mat_corner = -1;    /* the corner the sheet is turned up at, or -1 */
+static double g_mat_cut;         /* and how far, in points along each edge */
+static bool g_mat_lifted;        /* lifted off what is under it */
+static int g_mat_held = -1;
+static struct stat g_papers_st;  /* the papers' file as it was last read, or written */
+static bool g_papers_known;      /* whether it has been looked for at all */
+
+void desk_mat_prints_dir(char *out, size_t n)
+{
+	const char *data = getenv("XDG_DATA_HOME");
+	const char *home = getenv("HOME");
+	if (data && *data) {
+		snprintf(out, n, "%s/desk/mat", data);
+	} else if (home && *home) {
+		snprintf(out, n, "%s/.local/share/desk/mat", home);
+	} else {
+		out[0] = '\0';
+	}
+}
+
+void desk_mat_papers_file(char *out, size_t n)
+{
+	const char *cfg = getenv("XDG_CONFIG_HOME");
+	const char *home = getenv("HOME");
+	if (cfg && *cfg) {
+		snprintf(out, n, "%s/desk/desk-mat", cfg);
+	} else if (home && *home) {
+		snprintf(out, n, "%s/.config/desk/desk-mat", home);
+	} else {
+		out[0] = '\0';
+	}
+}
+
+/* A print's name as the file may say it: a file in the prints' folder, and
+ * only there. */
+static bool paper_name_ok(const char *s)
+{
+	size_t n = strlen(s);
+	if (n == 0 || n >= sizeof g_papers[0].name || s[0] == '.') {
+		return false;
+	}
+	for (size_t i = 0; i < n; i++) {
+		unsigned char c = (unsigned char)s[i];
+		if (c == '/' || c < 0x20 || c == 0x7f) {
+			return false;
+		}
+	}
+	return true;
+}
+
+/* How big a print is, from its PNG's head; 3 by 2, as a photograph is,
+ * until it can be read. */
+static void paper_size_read(struct desk_mat_paper *p)
+{
+	char dir[400], path[512];
+	p->pw = 3;
+	p->ph = 2;
+	desk_mat_prints_dir(dir, sizeof dir);
+	if (!dir[0] || !paper_name_ok(p->name)) {
+		return;
+	}
+	snprintf(path, sizeof path, "%s/%s", dir, p->name);
+	int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+	if (fd < 0) {
+		return;
+	}
+	struct stat st;
+	unsigned char head[24];
+	if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode)
+		&& pread(fd, head, sizeof head, 0) == (ssize_t)sizeof head && mat_png_pixels(head) > 0) {
+		p->pw = head[16] << 24 | head[17] << 16 | head[18] << 8 | head[19];
+		p->ph = head[20] << 24 | head[21] << 16 | head[22] << 8 | head[23];
+	}
+	close(fd);
+}
+
+/* A paper as the file and the hand may give it: on the mat, of a size a
+ * print can be. */
+static void paper_tidy(struct desk_mat_paper *p)
+{
+	p->x = isfinite(p->x) ? clampf(p->x, -4000.0, 4000.0) : 0.0;
+	p->y = isfinite(p->y) ? clampf(p->y, -4000.0, 4000.0) : 0.0;
+	p->w = isfinite(p->w) ? clampf(p->w, DESK_MAT_PAPER_MIN_PT, DESK_MAT_PAPER_MAX_PT) : 240.0;
+	p->turn = isfinite(p->turn) ? fmod(p->turn, 360.0) : 0.0;
+	if (p->pw < 1 || p->ph < 1) {
+		p->pw = 3;
+		p->ph = 2;
+	}
+}
+
+/* Where a paper lies: its middle, and half its width and height before it is
+ * turned, on a screen k pixels to the point with the mat at r. */
+static void paper_place_in(const double r[4], double k, const struct desk_mat_paper *p, double *cx,
+	double *cy, double *hw, double *hh)
+{
+	*cx = r[0] + r[2] * 0.5 + p->x * k;
+	*cy = r[1] + r[3] * 0.5 + p->y * k;
+	*hw = p->w * k * 0.5;
+	*hh = *hw * (double)p->ph / (double)p->pw;
+}
+
+bool desk_mat_paper_place(int w, int h, const struct desk_mat_paper *p, double *cx, double *cy,
+	double *hw, double *hh)
+{
+	if (!p || w < 8 || h < 8) {
+		return false;
+	}
+	double r[4];
+	mat_rect(w, h, DESK_MAT_FULL, r);
+	paper_place_in(r, desk_px_per_pt(w), p, cx, cy, hw, hh);
+	return true;
+}
+
+bool desk_mat_rect(int w, int h, double r[4])
+{
+	pthread_mutex_lock(&g_mat_lock);
+	int kind = g_mat.kind;
+	double size = mat_size_of(&g_mat);
+	pthread_mutex_unlock(&g_mat_lock);
+	if (kind == DESK_MAT_NONE || w < 8 || h < 8) {
+		return false;
+	}
+	mat_rect(w, h, size, r);
+	return true;
+}
+
+int desk_mat_at(int w, int h, double x, double y)
+{
+	pthread_mutex_lock(&g_mat_lock);
+	int kind = g_mat.kind;
+	double size = mat_size_of(&g_mat), t = g_unroll;
+	pthread_mutex_unlock(&g_mat_lock);
+	if (kind == DESK_MAT_NONE || w < 8 || h < 8) {
+		return DESK_MAT_NONE;
+	}
+	double r[4];
+	mat_rect(w, h, size, r);
+	/* (one being unrolled lies from the back as far as it has come) */
+	double far = kind == DESK_MAT_CLEAR ? r[3] : r[3] * t;
+	return x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + far ? kind : DESK_MAT_NONE;
+}
+
+int desk_mat_paper_at(int w, int h, double x, double y)
+{
+	struct desk_mat_paper p[DESK_MAT_PAPERS_MAX];
+	int n = desk_mat_papers(p, DESK_MAT_PAPERS_MAX);
+	for (int i = n - 1; i >= 0; i--) {
+		double cx, cy, hw, hh;
+		if (!desk_mat_paper_place(w, h, &p[i], &cx, &cy, &hw, &hh)) {
+			return -1;
+		}
+		/* into the paper's own terms, turned back */
+		double t = p[i].turn * M_PI / 180.0, dx = x - cx, dy = y - cy;
+		double u = dx * cos(t) + dy * sin(t), v = -dx * sin(t) + dy * cos(t);
+		if (fabs(u) <= hw && fabs(v) <= hh) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+int desk_mat_papers(struct desk_mat_paper *out, int max)
+{
+	pthread_mutex_lock(&g_mat_lock);
+	int n = g_mat.kind == DESK_MAT_CLEAR && g_mat.under == DESK_MAT_UNDER_FREE ? g_npapers : 0;
+	n = n < max ? n : max;
+	memcpy(out, g_papers, sizeof *out * (size_t)n);
+	pthread_mutex_unlock(&g_mat_lock);
+	return n;
+}
+
+/* The papers lie like this now, the prints already read kept for them. */
+static void papers_put(const struct desk_mat_paper *p, int n)
+{
+	struct mat_print had[DESK_MAT_PAPERS_MAX];
+	bool kept[DESK_MAT_PAPERS_MAX] = { false };
+	n = n < 0 ? 0 : n > DESK_MAT_PAPERS_MAX ? DESK_MAT_PAPERS_MAX : n;
+	pthread_mutex_lock(&g_mat_lock);
+	int was = g_npapers;
+	memcpy(had, g_prints, sizeof had);
+	for (int i = 0; i < n; i++) {
+		g_papers[i] = p[i];
+		paper_tidy(&g_papers[i]);
+		memset(&g_prints[i], 0, sizeof g_prints[i]);
+		for (int j = 0; j < was; j++) {
+			if (!kept[j] && !strcmp(had[j].name, p[i].name)) {
+				g_prints[i] = had[j];
+				kept[j] = true;
+				break;
+			}
+		}
+	}
+	for (int j = 0; j < was; j++) {
+		if (!kept[j] && had[j].pic) {
+			cairo_surface_destroy(had[j].pic);
+		}
+	}
+	for (int i = n; i < DESK_MAT_PAPERS_MAX; i++) {
+		memset(&g_prints[i], 0, sizeof g_prints[i]);
+	}
+	g_npapers = n;
+	if (g_mat_held >= n) {
+		g_mat_held = -1;
+	}
+	g_mat_gen++;
+	pthread_mutex_unlock(&g_mat_lock);
+}
+
+/* Written whole, to a file beside it and then over it, so that a desk-mat
+ * reading it never sees half of it. */
+static void papers_write(const struct desk_mat_paper *p, int n)
+{
+	char path[512], tmp[540];
+	desk_mat_papers_file(path, sizeof path);
+	if (!path[0]) {
+		return;
+	}
+	char *slash = strrchr(path, '/');
+	if (slash) {
+		*slash = '\0';
+		mkdir(path, 0700);
+		*slash = '/';
+	}
+	snprintf(tmp, sizeof tmp, "%s.%d.tmp", path, (int)getpid());
+	FILE *f = fopen(tmp, "we");
+	if (!f) {
+		fprintf(stderr, "desk: mat: cannot write %s: %s\n", tmp, strerror(errno));
+		return;
+	}
+	fprintf(f, "# The pictures under the clear mat, the bottom one first (desk-mat, docs/CONFIGURATION.md):\n"
+		"# paper = PRINT X Y WIDTH TURN -- its middle X, Y points from the mat's, WIDTH points\n"
+		"# across, turned TURN degrees clockwise. The prints are in $XDG_DATA_HOME/desk/mat.\n");
+	for (int i = 0; i < n; i++) {
+		fprintf(f, "paper = %s %.1f %.1f %.1f %.1f\n", p[i].name, p[i].x, p[i].y, p[i].w, p[i].turn);
+	}
+	bool ok = fflush(f) == 0 && fsync(fileno(f)) == 0;
+	ok = fclose(f) == 0 && ok;
+	if (!ok || rename(tmp, path) != 0) {
+		fprintf(stderr, "desk: mat: cannot write %s: %s\n", path, strerror(errno));
+		unlink(tmp);
+		return;
+	}
+	struct stat st;
+	if (stat(path, &st) == 0) {
+		pthread_mutex_lock(&g_mat_lock);
+		g_papers_st = st;
+		g_papers_known = true;
+		pthread_mutex_unlock(&g_mat_lock);
+	}
+}
+
+void desk_mat_papers_set(const struct desk_mat_paper *p, int n, bool save)
+{
+	papers_put(p, n);
+	if (save) {
+		papers_write(p, n);
+	}
+}
+
+bool desk_mat_papers_poll(void)
+{
+	char path[512];
+	desk_mat_papers_file(path, sizeof path);
+	if (!path[0]) {
+		return false;
+	}
+	struct stat st;
+	bool there = stat(path, &st) == 0 && S_ISREG(st.st_mode);
+	pthread_mutex_lock(&g_mat_lock);
+	bool known = g_papers_known, had = g_npapers > 0;
+	bool same = known && there && st.st_mtim.tv_sec == g_papers_st.st_mtim.tv_sec
+		&& st.st_mtim.tv_nsec == g_papers_st.st_mtim.tv_nsec && st.st_size == g_papers_st.st_size
+		&& st.st_ino == g_papers_st.st_ino;
+	if (!there) {
+		memset(&g_papers_st, 0, sizeof g_papers_st);
+	}
+	g_papers_known = true;
+	pthread_mutex_unlock(&g_mat_lock);
+	if (same || (!there && known && !had) || (!there && !known)) {
+		return false;
+	}
+	struct desk_mat_paper p[DESK_MAT_PAPERS_MAX] = { 0 };
+	int n = 0;
+	FILE *f = there ? fopen(path, "re") : NULL;
+	if (f) {
+		char line[512];
+		while (n < DESK_MAT_PAPERS_MAX && fgets(line, sizeof line, f)) {
+			struct desk_mat_paper q = { 0 };
+			if (sscanf(line, " paper = %95s %lf %lf %lf %lf", q.name, &q.x, &q.y, &q.w, &q.turn) == 5
+				&& paper_name_ok(q.name)) {
+				paper_size_read(&q);
+				paper_tidy(&q);
+				p[n++] = q;
+			}
+		}
+		fclose(f);
+	}
+	papers_put(p, n);
+	pthread_mutex_lock(&g_mat_lock);
+	if (there) {
+		g_papers_st = st;
+	}
+	pthread_mutex_unlock(&g_mat_lock);
+	return true;
+}
+
+/* The longer side a paper's print is wanted at, on the screen last painted:
+ * a little more than it is seen at, so that a paper made a little larger
+ * is not read again for it. */
+static int paper_want_px(const struct desk_mat_paper *p)
+{
+	double side = p->w * fmax(1.0, (double)p->ph / (double)p->pw);
+	int px = (int)ceil(side * (g_papers_k > 0.0 ? g_papers_k : 1.0) * 1.15);
+	return px < 64 ? 64 : px > PAPER_READ_MAX ? PAPER_READ_MAX : px;
+}
+
+/* A paper whose print is not read, or was read much too small or too large
+ * for how it is seen now: -1, none. */
+static int papers_next(void)
+{
+	if (g_papers_k <= 0.0 || g_mat.kind != DESK_MAT_CLEAR || g_mat.under != DESK_MAT_UNDER_FREE) {
+		return -1;
+	}
+	for (int i = 0; i < g_npapers; i++) {
+		const struct mat_print *q = &g_prints[i];
+		if (q->failed) {
+			continue;
+		}
+		int want = paper_want_px(&g_papers[i]);
+		int own = g_papers[i].pw > g_papers[i].ph ? g_papers[i].pw : g_papers[i].ph;
+		int most = own > 8 && own < want ? own : want;
+		if (!q->pic || q->px < most * 0.85 || (q->px > want * 2.5 && q->px > 256)) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+/* s, made no larger than px on its longer side */
+static cairo_surface_t *paper_shrunk(cairo_surface_t *s, int px)
+{
+	int pw = cairo_image_surface_get_width(s), ph = cairo_image_surface_get_height(s);
+	if (pw <= px && ph <= px) {
+		return s;
+	}
+	double k = (double)px / (pw > ph ? pw : ph);
+	cairo_surface_t *d = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, (int)ceil(pw * k),
+		(int)ceil(ph * k));
+	if (cairo_surface_status(d) != CAIRO_STATUS_SUCCESS) {
+		cairo_surface_destroy(d);
+		return s;
+	}
+	cairo_t *cr = cairo_create(d);
+	cairo_scale(cr, k, k);
+	cairo_set_source_surface(cr, s, 0, 0);
+	cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_BEST);
+	cairo_paint(cr);
+	cairo_destroy(cr);
+	cairo_surface_destroy(s);
+	return d;
+}
+
+/* Reads the prints the papers want, one after another, until none does. */
+static void *papers_thread(void *arg)
+{
+	(void)arg;
+	for (;;) {
+		char name[96], dir[400], path[512];
+		pthread_mutex_lock(&g_mat_lock);
+		int i = papers_next();
+		if (i < 0) {
+			g_papers_busy = false;
+			pthread_mutex_unlock(&g_mat_lock);
+			return NULL;
+		}
+		snprintf(name, sizeof name, "%s", g_papers[i].name);
+		int want = paper_want_px(&g_papers[i]);
+		pthread_mutex_unlock(&g_mat_lock);
+
+		desk_mat_prints_dir(dir, sizeof dir);
+		snprintf(path, sizeof path, "%s/%s", dir, name);
+		/* the prints are desk-mat's PNGs, read as a photo is (mat_pic_read) */
+		cairo_surface_t *s = dir[0] && paper_name_ok(name) ? mat_pic_read(path) : NULL;
+		s = s ? paper_shrunk(s, want) : NULL;
+		if (!s) {
+			fprintf(stderr, "desk: mat: cannot read the print %s\n", path);
+		}
+		pthread_mutex_lock(&g_mat_lock);
+		/* to every paper of that print, wherever the hand has put it meanwhile */
+		for (int j = 0; j < g_npapers; j++) {
+			struct mat_print *q = &g_prints[j];
+			if (strcmp(g_papers[j].name, name)) {
+				continue;
+			}
+			snprintf(q->name, sizeof q->name, "%s", name);
+			if (q->pic) {
+				cairo_surface_destroy(q->pic);
+				q->pic = NULL;
+			}
+			if (s) {
+				q->pic = cairo_surface_reference(s);
+				int sw = cairo_image_surface_get_width(s), sh = cairo_image_surface_get_height(s);
+				q->px = sw > sh ? sw : sh;
+				if (g_papers[j].pw == 3 && g_papers[j].ph == 2) {
+					g_papers[j].pw = sw;   /* a print whose head said nothing */
+					g_papers[j].ph = sh;
+				}
+			} else {
+				q->failed = true;
+			}
+		}
+		g_mat_gen++;
+		pthread_mutex_unlock(&g_mat_lock);
+		if (s) {
+			cairo_surface_destroy(s);
+		}
+	}
+}
+
+/* With g_mat_lock held: the thread started if a print wants reading. */
+static bool papers_wake_locked(void)
+{
+	if (g_papers_busy || papers_next() < 0) {
+		return false;
+	}
+	g_papers_busy = true;
+	return true;
+}
+
+static void papers_start(void)
+{
+	pthread_t th;
+	if (pthread_create(&th, NULL, papers_thread, NULL) == 0) {
+		pthread_detach(th);
+		return;
+	}
+	pthread_mutex_lock(&g_mat_lock);
+	g_papers_busy = false;
+	pthread_mutex_unlock(&g_mat_lock);
+}
+
+void desk_mat_lift(int corner, double cut, bool lifted, int held)
+{
+	corner = corner < 0 || corner > 3 ? -1 : corner;
+	cut = corner < 0 || !isfinite(cut) ? 0.0 : clampf(cut, 0.0, 400.0);
+	pthread_mutex_lock(&g_mat_lock);
+	if (corner != g_mat_corner || cut != g_mat_cut || lifted != g_mat_lifted) {
+		g_mat_corner = corner;
+		g_mat_cut = cut;
+		g_mat_lifted = lifted;
+		g_sheet_gen++;
+	}
+	if (held != g_mat_held) {
+		g_mat_held = held;
+		g_mat_gen++;   /* what is under it, without what is in the hand */
+	}
+	pthread_mutex_unlock(&g_mat_lock);
+}
+
+bool desk_mat_clear(int *under)
+{
+	pthread_mutex_lock(&g_mat_lock);
+	bool clear = g_mat.kind == DESK_MAT_CLEAR;
+	if (under) {
+		*under = g_mat.under;
+	}
+	pthread_mutex_unlock(&g_mat_lock);
+	return clear;
+}
+
+/* A corner of the sheet r, as desk_mat_lift has them, and the ways along
+ * its two edges from it: toward the corner before it, and after it, going
+ * round clockwise on the screen. */
+static void sheet_corner(const double r[4], int c, double *px, double *py, double a[2], double b[2])
+{
+	static const int CX[4] = { 0, 1, 1, 0 }, CY[4] = { 0, 0, 1, 1 };
+	int prev = (c + 3) % 4, next = (c + 1) % 4;
+	*px = r[0] + r[2] * CX[c];
+	*py = r[1] + r[3] * CY[c];
+	a[0] = CX[prev] - CX[c];
+	a[1] = CY[prev] - CY[c];
+	b[0] = CX[next] - CX[c];
+	b[1] = CY[next] - CY[c];
+}
+
+int desk_mat_corner_at(int w, int h, double x, double y, double reach)
+{
+	if (!desk_mat_clear(NULL) || w < 8 || h < 8) {
+		return -1;
+	}
+	double r[4], k = desk_px_per_pt(w);
+	mat_rect(w, h, DESK_MAT_FULL, r);
+	for (int c = 0; c < 4; c++) {
+		double px, py, a[2], b[2];
+		sheet_corner(r, c, &px, &py, a, b);
+		/* on the sheet, within reach of its corner along both edges */
+		double u = (x - px) * a[0] + (y - py) * a[1], v = (x - px) * b[0] + (y - py) * b[1];
+		if (u >= -4.0 * k && v >= -4.0 * k && u + v <= reach * k) {
+			return c;
+		}
+	}
+	return -1;
+}
+
+/* The prints read now, on this thread, for a screen w across: for a picture
+ * of the desk that is taken once (desk-preview), not for the compositor. */
+void desk_mat_settle(int w)
+{
+	pthread_mutex_lock(&g_mat_lock);
+	g_papers_k = desk_px_per_pt(w);
+	bool start = papers_wake_locked();
+	pthread_mutex_unlock(&g_mat_lock);
+	if (start) {
+		papers_thread(NULL);
+	}
+	for (int i = 0; i < 400; i++) {
+		pthread_mutex_lock(&g_mat_lock);
+		bool busy = g_papers_busy;
+		pthread_mutex_unlock(&g_mat_lock);
+		if (!busy) {
+			break;
+		}
+		nanosleep(&(struct timespec){ 0, 20000000 }, NULL);
+	}
+}
+
+/* One print as it lies under the sheet: its shadow from the lamp, as far off
+ * the desk as it is (pressed flat, or held), the white of the paper, and the
+ * picture in it. In screen terms; not lit, the caller lights it. */
+static void paper_paint(cairo_t *cr, double k, const struct desk_mat_paper *p, cairo_surface_t *pic,
+	double cx, double cy, double hw, double hh, double lift)
+{
+	double t = p->turn * M_PI / 180.0, sx, sy;
+	shadow_dir(cx, cy, lift, &sx, &sy);
+	/* the shadow: tight while it lies flat, soft and far once it is lifted */
+	int layers = lift > 4.0 * k ? 8 : 3;
+	for (int i = layers; i >= 1; i--) {
+		double g = (0.35 * k + lift * 0.45) * i / layers;
+		cairo_save(cr);
+		cairo_translate(cr, cx + sx, cy + sy);
+		cairo_rotate(cr, t);
+		desk_rounded_path(cr, -hw - g, -hh - g, 2 * (hw + g), 2 * (hh + g), 1.0 + g);
+		cairo_set_source_rgba(cr, 0.03, 0.02, 0.01, lift > 4.0 * k ? 0.045 : 0.10);
+		cairo_fill(cr);
+		cairo_restore(cr);
+	}
+	cairo_save(cr);
+	cairo_translate(cr, cx, cy);
+	cairo_rotate(cr, t);
+	/* the print: a little warm, its edge a cut edge */
+	cairo_rectangle(cr, -hw, -hh, 2 * hw, 2 * hh);
+	cairo_set_source_rgb(cr, 0.955, 0.945, 0.915);
+	cairo_fill(cr);
+	double b = PAPER_BORDER * 2.0 * fmin(hw, hh);
+	double iw = 2 * (hw - b), ih = 2 * (hh - b);
+	if (pic && iw > 1.0 && ih > 1.0) {
+		double pw = cairo_image_surface_get_width(pic), ph = cairo_image_surface_get_height(pic);
+		double s = fmax(iw / pw, ih / ph);
+		cairo_save(cr);
+		cairo_rectangle(cr, -hw + b, -hh + b, iw, ih);
+		cairo_clip(cr);
+		cairo_translate(cr, -pw * s * 0.5, -ph * s * 0.5);
+		cairo_scale(cr, s, s);
+		cairo_set_source_surface(cr, pic, 0, 0);
+		cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
+		cairo_paint(cr);
+		cairo_restore(cr);
+	}
+	/* the paper's own tooth, over the white and the picture alike */
+	overlay_grain(cr, -hw, -hh, 2 * hw, 2 * hh, 0.55);
+	cairo_rectangle(cr, -hw + 0.5, -hh + 0.5, 2 * hw - 1.0, 2 * hh - 1.0);
+	cairo_set_source_rgba(cr, 0.35, 0.30, 0.24, 0.30);
+	cairo_set_line_width(cr, 1.0);
+	cairo_stroke(cr);
+	cairo_restore(cr);
+}
+
+/* The lamp of the room on what was laid in under, which has alpha where it
+ * is: the boards beside it are lit already, in the room. */
+static void mat_light_over(cairo_t *cr, int w, int h, cairo_pattern_t *under)
+{
+	cairo_surface_t *lit = mat_light(w, h);
+	if (!lit) {
+		return;
+	}
+	cairo_save(cr);
+	cairo_set_operator(cr, CAIRO_OPERATOR_MULTIPLY);
+	cairo_set_source_surface(cr, lit, 0, 0);
+	cairo_pattern_t *lp = cairo_get_source(cr);
+	cairo_pattern_set_filter(lp, CAIRO_FILTER_BILINEAR);
+	cairo_pattern_set_extend(lp, CAIRO_EXTEND_PAD);
+	cairo_matrix_t mt;
+	cairo_matrix_init_scale(&mt, (double)MAT_LIGHT_W / w, (double)MAT_LIGHT_H / h);
+	cairo_pattern_set_matrix(lp, &mt);
+	cairo_mask(cr, under);
+	cairo_restore(cr);
+}
+
+/* top laid over bottom, both colours with alpha (not premultiplied): what
+ * one paint of the two together is */
+static void rgba_over(const double top[4], const double bottom[4], double out[4])
+{
+	double a = top[3] + bottom[3] * (1.0 - top[3]);
+	for (int i = 0; i < 3; i++) {
+		out[i] = a > 1e-9 ? (top[i] * top[3] + bottom[i] * bottom[3] * (1.0 - top[3])) / a : 0.0;
+	}
+	out[3] = a;
+}
+
+/* The sheet's outline, its corners rounded, but corner c (or none, -1) cut
+ * off along the fold of it turned up, cut pixels along each edge. */
+static void sheet_path(cairo_t *cr, const double r[4], double rad, int c, double cut)
+{
+	cut = c < 0 ? 0.0 : fmin(cut, fmin(r[2], r[3]) * 0.5);
+	cairo_new_sub_path(cr);
+	for (int i = 0; i < 4; i++) {
+		double px, py, a[2], b[2];
+		sheet_corner(r, i, &px, &py, a, b);
+		if (i == c && cut > rad) {
+			cairo_line_to(cr, px + a[0] * cut, py + a[1] * cut);
+			cairo_line_to(cr, px + b[0] * cut, py + b[1] * cut);
+		} else {
+			cairo_line_to(cr, px + a[0] * rad, py + a[1] * rad);
+			cairo_curve_to(cr, px + a[0] * rad * 0.45, py + a[1] * rad * 0.45,
+				px + b[0] * rad * 0.45, py + b[1] * rad * 0.45, px + b[0] * rad, py + b[1] * rad);
+		}
+	}
+	cairo_close_path(cr);
+}
+
+/* The sheet over what is under it: it, its edge and the lamp in it; turned
+ * up at corner c by cut pixels (or not, -1). */
+static void clear_sheet(cairo_t *cr, int w, int h, const double r[4], double k, bool lifted, int c,
+	double cut)
+{
+	double x = r[0], y = r[1], mw = r[2], mh = r[3], rad = CLEAR_RADIUS_PT * k;
+	double lift = (lifted ? CLEAR_LIFTED_PT : CLEAR_LIFT_PT) * k;
+
+	/* Only its edge throws a shadow: a line of it, leaning away from the lamp,
+	 * soft and further off with the sheet lifted. */
+	double lx, rx, ty, by, along;
+	shadow_dir(x, y + mh * 0.5, lift, &lx, &along);
+	shadow_dir(x + mw, y + mh * 0.5, lift, &rx, &along);
+	shadow_dir(x + mw * 0.5, y, lift, &along, &ty);
+	shadow_dir(x + mw * 0.5, y + mh, lift, &along, &by);
+	int soft = lifted ? 6 : 2;
+	for (int i = soft; i >= 1; i--) {
+		double g = (lifted ? 2.6 : 0.8) * k * i / soft;
+		double sr[4] = { x + lx - g * 0.5, y + ty - g * 0.5, mw + rx - lx + g, mh + by - ty + g };
+		sheet_path(cr, sr, rad + g, c, cut);
+		cairo_set_source_rgba(cr, 0.02, 0.015, 0.008, lifted ? 0.035 : 0.10);
+		cairo_set_line_width(cr, fmax(1.0, (lifted ? 2.4 : 1.4) * k));
+		cairo_stroke(cr);
+	}
+
+	cairo_save(cr);
+	sheet_path(cr, r, rad, c, cut);
+	cairo_clip(cr);
+	/* Through it everything is a shade darker, a little toward the green of
+	 * the edge of glass, and a little less sharp for the room it shows back,
+	 * lighter toward the lamp; less so held up off it. One paint of it all. */
+	double ex = w * 0.5, ey = h * 0.5;
+	double big = fmax(mw, mh), a = lifted ? 1.2 : 1.0;
+	double tint[4], near_lamp[4];
+	const double dark[4] = { 0.02, 0.05, 0.045, lifted ? 0.04 : 0.07 };
+	const double haze[4] = { 0.80, 0.86, 0.85, lifted ? 0.015 : 0.03 };
+	const double room[4] = { 1.0, 0.97, 0.90, 0.07 * a };
+	rgba_over(haze, dark, tint);
+	rgba_over(room, tint, near_lamp);
+	double tx0 = 0.0, ty0 = 0.0, tz0 = 0.0;
+	lamp_toward(x + mw * 0.5, y + mh * 0.5, &tx0, &ty0, &tz0);
+	double hn0 = hypot(tx0, ty0);
+	double ux = hn0 > 1e-6 ? tx0 / hn0 : 0.6, uy = hn0 > 1e-6 ? ty0 / hn0 : 0.8;
+	double R0 = 0.5 * hypot(mw, mh);
+	cairo_pattern_t *veil = cairo_pattern_create_linear(x + mw * 0.5 + ux * R0, y + mh * 0.5 + uy * R0,
+		x + mw * 0.5 - ux * R0, y + mh * 0.5 - uy * R0);
+	cairo_pattern_add_color_stop_rgba(veil, 0.0, near_lamp[0], near_lamp[1], near_lamp[2], near_lamp[3]);
+	cairo_pattern_add_color_stop_rgba(veil, 0.6, tint[0], tint[1], tint[2], tint[3]);
+	cairo_set_source(cr, veil);
+	cairo_paint(cr);
+	cairo_pattern_destroy(veil);
+	/* and the lamp itself in it, seen where the sheet lies between the eye,
+	 * over the middle of the screen, and the lamp's image under the desk:
+	 * most of the way toward the point under the lamp. Its shade a bright
+	 * patch, softened by the vinyl's own faint grain, in a wider glow. */
+	double px = ex + (g_light.x - g_paint_ox - ex) * 0.74, py = ey + (g_light.y - g_paint_oy - ey) * 0.74;
+	cairo_save(cr);
+	cairo_translate(cr, px, py);
+	cairo_scale(cr, 1.0, 0.78);
+	cairo_rectangle(cr, -big * 0.34, -big * 0.34, big * 0.68, big * 0.68);
+	cairo_pattern_t *glow = cairo_pattern_create_radial(0, 0, 0, 0, 0, big * 0.34);
+	cairo_pattern_add_color_stop_rgba(glow, 0.00, 1.0, 0.98, 0.92, 0.40 * a);
+	cairo_pattern_add_color_stop_rgba(glow, 0.13, 1.0, 0.97, 0.90, 0.33 * a);
+	cairo_pattern_add_color_stop_rgba(glow, 0.21, 1.0, 0.96, 0.88, 0.10 * a);
+	cairo_pattern_add_color_stop_rgba(glow, 0.50, 1.0, 0.95, 0.86, 0.025 * a);
+	cairo_pattern_add_color_stop_rgba(glow, 1.00, 1.0, 0.95, 0.86, 0.0);
+	cairo_set_source(cr, glow);
+	cairo_fill(cr);
+	cairo_pattern_destroy(glow);
+	cairo_restore(cr);
+	/* the fine scratches a sheet gets, seen only in the lamp: the same each
+	 * time, from the size of the desk */
+	uint32_t seed = 0x9e3779b9u ^ (uint32_t)(mw * 7 + mh * 13);
+	cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+	for (int i = 0; i < 46; i++) {
+		seed = seed * 1664525u + 1013904223u;
+		double sx0 = x + (seed >> 8) % 10000 / 10000.0 * mw;
+		seed = seed * 1664525u + 1013904223u;
+		double sy0 = y + (seed >> 8) % 10000 / 10000.0 * mh;
+		seed = seed * 1664525u + 1013904223u;
+		double ang = (seed >> 8) % 10000 / 10000.0 * M_PI;
+		seed = seed * 1664525u + 1013904223u;
+		double len = (6.0 + (seed >> 8) % 10000 / 10000.0 * 46.0) * k;
+		double d = hypot(sx0 - px, (sy0 - py) / 0.78) / (big * 0.30);
+		double near = clampf(1.0 - d, 0.0, 1.0);
+		if (near <= 0.02) {
+			continue;
+		}
+		cairo_move_to(cr, sx0, sy0);
+		cairo_line_to(cr, sx0 + cos(ang) * len, sy0 + sin(ang) * len);
+		cairo_set_source_rgba(cr, 1.0, 0.98, 0.92, 0.22 * near * near);
+		cairo_set_line_width(cr, fmax(0.6, 0.55 * k));
+		cairo_stroke(cr);
+	}
+	cairo_set_line_cap(cr, CAIRO_LINE_CAP_BUTT);
+	/* its edge, polished and as thick as it is: a band just in from the edge
+	 * where what is under it is bent and darker, light along the side facing
+	 * the lamp and dark along the other */
+	double band = CLEAR_EDGE_PT * k;
+	sheet_path(cr, r, rad, c, cut);
+	cairo_set_source_rgba(cr, 0.04, 0.07, 0.065, 0.16);
+	cairo_set_line_width(cr, band * 2.0);
+	cairo_stroke(cr);
+	cairo_restore(cr);
+
+	double tx = 0.0, tyy = 0.0, tz = 0.0;
+	lamp_toward(x + mw * 0.5, y + mh * 0.5, &tx, &tyy, &tz);
+	double hn = hypot(tx, tyy);
+	double dxl = hn > 1e-6 ? tx / hn : -0.6, dyl = hn > 1e-6 ? tyy / hn : -0.8;
+	double R = 0.5 * hypot(mw, mh);
+	cairo_pattern_t *edge = cairo_pattern_create_linear(x + mw * 0.5 + dxl * R, y + mh * 0.5 + dyl * R,
+		x + mw * 0.5 - dxl * R, y + mh * 0.5 - dyl * R);
+	cairo_pattern_add_color_stop_rgba(edge, 0.0, 1.0, 0.98, 0.92, lifted ? 0.85 : 0.70);
+	cairo_pattern_add_color_stop_rgba(edge, 0.5, 1.0, 0.98, 0.92, 0.22);
+	cairo_pattern_add_color_stop_rgba(edge, 1.0, 0.0, 0.0, 0.0, 0.35);
+	double er[4] = { x + 0.75, y + 0.75, mw - 1.5, mh - 1.5 };
+	sheet_path(cr, er, rad, c, cut);
+	cairo_set_source(cr, edge);
+	cairo_set_line_width(cr, fmax(1.5, 1.4 * k));
+	cairo_stroke(cr);
+	cairo_pattern_destroy(edge);
+}
+
+/* What is under the clear sheet (DESK_OVL_MAT): the prints, or the one
+ * picture all over it. The sheet is a sprite of its own over it
+ * (DESK_OVL_MAT_SHEET), so that moving a print does not draw the sheet, nor
+ * lifting the sheet what is under it. */
+static void clear_under_paint(cairo_t *cr, int w, int h, const struct desk_mat *m, cairo_surface_t *pic)
+{
+	double r[4], k = desk_px_per_pt(w);
+	mat_rect(w, h, DESK_MAT_FULL, r);
+	struct desk_mat_paper papers[DESK_MAT_PAPERS_MAX];
+	cairo_surface_t *pics[DESK_MAT_PAPERS_MAX];
+	int n = 0;
+	pthread_mutex_lock(&g_mat_lock);
+	g_papers_k = k;
+	int held = g_mat_held;
+	if (m->under == DESK_MAT_UNDER_FREE) {
+		n = g_npapers;
+		for (int i = 0; i < n; i++) {
+			papers[i] = g_papers[i];
+			pics[i] = g_prints[i].pic ? cairo_surface_reference(g_prints[i].pic) : NULL;
+		}
+	}
+	bool start = papers_wake_locked();
+	pthread_mutex_unlock(&g_mat_lock);
+	if (start) {
+		papers_start();
+	}
+
+	/* what is under the sheet, lit where it lies */
+	double rad = CLEAR_RADIUS_PT * k;
+	cairo_save(cr);
+	desk_rounded_path(cr, r[0], r[1], r[2], r[3], rad);
+	cairo_clip(cr);
+	cairo_push_group(cr);
+	if (pic) {
+		/* one picture all over it, cut to fill it from the middle */
+		double pw = cairo_image_surface_get_width(pic), ph = cairo_image_surface_get_height(pic);
+		double s = fmax(r[2] / pw, r[3] / ph);
+		cairo_save(cr);
+		cairo_translate(cr, r[0] + (r[2] - pw * s) * 0.5, r[1] + (r[3] - ph * s) * 0.5);
+		cairo_scale(cr, s, s);
+		cairo_set_source_surface(cr, pic, 0, 0);
+		cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_BEST);
+		cairo_paint(cr);
+		cairo_restore(cr);
+	}
+	for (int i = 0; i < n; i++) {
+		if (i == held || !pics[i]) {
+			continue;   /* in the hand; or not read yet, and laid when it is */
+		}
+		double cx, cy, hw, hh;
+		paper_place_in(r, k, &papers[i], &cx, &cy, &hw, &hh);
+		paper_paint(cr, k, &papers[i], pics[i], cx, cy, hw, hh, PAPER_LIFT_PT * k);
+	}
+	cairo_pattern_t *under = cairo_pop_group(cr);
+	cairo_set_source(cr, under);
+	cairo_paint(cr);
+	mat_light_over(cr, w, h, under);
+	cairo_pattern_destroy(under);
+	cairo_restore(cr);
+	for (int i = 0; i < n; i++) {
+		if (pics[i]) {
+			cairo_surface_destroy(pics[i]);
+		}
+	}
+}
+
+/* The clear sheet by itself (DESK_OVL_MAT_SHEET), as it lies or is lifted. */
+static void clear_sheet_paint(cairo_t *cr, int w, int h)
+{
+	pthread_mutex_lock(&g_mat_lock);
+	bool clear = g_mat.kind == DESK_MAT_CLEAR, lifted = g_mat_lifted;
+	int corner = g_mat_corner;
+	double cut = g_mat_cut;
+	pthread_mutex_unlock(&g_mat_lock);
+	if (!clear) {
+		return;
+	}
+	double r[4], k = desk_px_per_pt(w);
+	mat_rect(w, h, DESK_MAT_FULL, r);
+	clear_sheet(cr, w, h, r, k, lifted, corner, cut * k);
+}
+
+static uint64_t sheet_key(void)
+{
+	pthread_mutex_lock(&g_mat_lock);
+	uint64_t k = g_sheet_gen;
+	pthread_mutex_unlock(&g_mat_lock);
+	return k;
+}
+
+/* Where the sheet draws (x, y, w, h): all of it and its shadow; nothing,
+ * a box of nothing, when there is no clear mat. */
+static bool sheet_box(int w, int h, double box[4])
+{
+	box[0] = box[1] = box[2] = box[3] = 0.0;
+	if (!desk_mat_clear(NULL)) {
+		return true;
+	}
+	double r[4], k = desk_px_per_pt(w), pad = (CLEAR_LIFTED_PT * 1.6 + 8.0) * k;
+	mat_rect(w, h, DESK_MAT_FULL, r);
+	box[0] = floor(r[0] - pad);
+	box[1] = floor(r[1] - pad);
+	box[2] = ceil(r[0] + r[2] + pad) - box[0];
+	box[3] = ceil(r[1] + r[3] + pad) - box[1];
+	return true;
+}
+
+/* Where what is under a clear mat draws: the picture all over it, all of
+ * it; the prints, from the first to the last of them and their shadows;
+ * none, a box of nothing. */
+static void under_box(int w, int h, const struct desk_mat *m, double box[4])
+{
+	double r[4], k = desk_px_per_pt(w);
+	mat_rect(w, h, DESK_MAT_FULL, r);
+	box[0] = box[1] = box[2] = box[3] = 0.0;
+	if (m->under == DESK_MAT_UNDER_WHOLE) {
+		if (m->photo[0]) {
+			memcpy(box, r, sizeof r);
+		}
+		return;
+	}
+	double x0 = INFINITY, y0 = INFINITY, x1 = -INFINITY, y1 = -INFINITY;
+	pthread_mutex_lock(&g_mat_lock);
+	for (int i = 0; i < g_npapers; i++) {
+		if (i == g_mat_held) {
+			continue;
+		}
+		double cx, cy, hw, hh, t = g_papers[i].turn * M_PI / 180.0;
+		paper_place_in(r, k, &g_papers[i], &cx, &cy, &hw, &hh);
+		double ex = hw * fabs(cos(t)) + hh * fabs(sin(t)), ey = hw * fabs(sin(t)) + hh * fabs(cos(t));
+		double pad = 4.0 * k + 2.0;
+		x0 = fmin(x0, cx - ex - pad);
+		y0 = fmin(y0, cy - ey - pad);
+		x1 = fmax(x1, cx + ex + pad);
+		y1 = fmax(y1, cy + ey + pad);
+	}
+	pthread_mutex_unlock(&g_mat_lock);
+	x0 = fmax(x0, r[0]);
+	y0 = fmax(y0, r[1]);
+	x1 = fmin(x1, r[0] + r[2]);
+	y1 = fmin(y1, r[1] + r[3]);
+	if (x1 > x0 && y1 > y0) {
+		box[0] = floor(x0);
+		box[1] = floor(y0);
+		box[2] = ceil(x1) - box[0];
+		box[3] = ceil(y1) - box[1];
+	}
+}
+
+cairo_surface_t *desk_mat_paper_picture(int w, int h, const struct desk_mat_paper *p, double lift,
+	int *ox, int *oy)
+{
+	if (!p || w < 8 || h < 8) {
+		return NULL;
+	}
+	cairo_surface_t *pic = NULL;
+	pthread_mutex_lock(&g_mat_lock);
+	for (int i = 0; i < g_npapers && !pic; i++) {
+		if (g_prints[i].pic && !strcmp(g_papers[i].name, p->name)) {
+			pic = cairo_surface_reference(g_prints[i].pic);
+		}
+	}
+	pthread_mutex_unlock(&g_mat_lock);
+	if (!pic) {
+		return NULL;
+	}
+	double r[4], k = desk_px_per_pt(w), cx, cy, hw, hh;
+	mat_rect(w, h, DESK_MAT_FULL, r);
+	paper_place_in(r, k, p, &cx, &cy, &hw, &hh);
+	lift *= k;
+	/* as far round it as it can reach turned, and its shadow past that */
+	double reach = hypot(hw, hh), pad = lift * 1.6 + 8.0 * k;
+	int x0 = (int)floor(cx - reach - pad), y0 = (int)floor(cy - reach - pad);
+	int sw = (int)ceil(2 * (reach + pad)) + 2, sh = sw;
+	cairo_surface_t *s = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, sw, sh);
+	cairo_t *cr = cairo_create(s);
+	cairo_translate(cr, -x0, -y0);
+	cairo_push_group(cr);
+	paper_paint(cr, k, p, pic, cx, cy, hw, hh, lift);
+	cairo_pattern_t *it = cairo_pop_group(cr);
+	cairo_set_source(cr, it);
+	cairo_paint(cr);
+	mat_light_over(cr, w, h, it);
+	cairo_pattern_destroy(it);
+	cairo_destroy(cr);
+	cairo_surface_destroy(pic);
+	*ox = x0;
+	*oy = y0;
+	return s;
+}
+
+/* ---- the corner turned up, and the envelope of prints -------------------
+ *
+ * The clear mat is lifted by a corner, as one is: the hand turns it up, and
+ * holds it up while what is under it is moved. The corner is its own
+ * picture over the sheet, which leaves that corner out of its own (a
+ * clear sheet's corner turned over shows the desk where it was). By it lies
+ * the envelope the prints came in: more are taken out of it, and one put
+ * back in it is gone from under the mat. */
+
+#define ENVELOPE_W_PT 200.0
+#define ENVELOPE_H_PT 138.0
+
+/* A corner raised a little off the desk, where it lies: not turned over,
+ * only stood up at its tip, h pixels, and coming down to lie flat at reach
+ * pixels along each edge -- its edges catching the light, and the shadow
+ * they throw. Nothing of the sheet has to be drawn again for it. */
+static cairo_surface_t *corner_raised(double px, double py, const double a[2], const double b[2],
+	double reach, double h, double k, int *ox, int *oy)
+{
+	double ax = px + a[0] * reach, ay = py + a[1] * reach, bx = px + b[0] * reach, by = py + b[1] * reach;
+	double sx, sy;
+	shadow_dir(px, py, h, &sx, &sy);
+	double pad = 10.0 * k;
+	double x0 = floor(fmin(fmin(ax, bx), fmin(px, px + sx)) - pad);
+	double y0 = floor(fmin(fmin(ay, by), fmin(py, py + sy)) - pad);
+	double x1 = ceil(fmax(fmax(ax, bx), fmax(px, px + sx)) + pad);
+	double y1 = ceil(fmax(fmax(ay, by), fmax(py, py + sy)) + pad);
+	cairo_surface_t *s = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, (int)(x1 - x0), (int)(y1 - y0));
+	cairo_t *cr = cairo_create(s);
+	cairo_translate(cr, -x0, -y0);
+	/* the shadow: between the edges where they lie and where their shadow
+	 * falls, nothing at the far ends, most at the corner */
+	double sn = fmax(hypot(sx, sy), 1.0);
+	for (int i = 5; i >= 1; i--) {
+		double g = 0.9 * k * i;
+		cairo_move_to(cr, ax, ay);
+		cairo_line_to(cr, px, py);
+		cairo_line_to(cr, bx, by);
+		cairo_line_to(cr, px + sx * (1.0 + g / sn), py + sy * (1.0 + g / sn));
+		cairo_close_path(cr);
+		cairo_set_source_rgba(cr, 0.02, 0.015, 0.008, 0.075);
+		cairo_fill(cr);
+	}
+	/* the edges, up off the desk: in the light, most where they are highest */
+	cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
+	cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+	for (int e = 0; e < 2; e++) {
+		double ex = e ? bx : ax, ey = e ? by : ay;
+		cairo_pattern_t *lit = cairo_pattern_create_linear(ex, ey, px, py);
+		cairo_pattern_add_color_stop_rgba(lit, 0.0, 1.0, 0.98, 0.92, 0.0);
+		cairo_pattern_add_color_stop_rgba(lit, 1.0, 1.0, 0.98, 0.92, 0.95);
+		cairo_move_to(cr, ex, ey);
+		cairo_line_to(cr, px, py);
+		cairo_set_source(cr, lit);
+		cairo_set_line_width(cr, fmax(1.6, 2.2 * k));
+		cairo_stroke(cr);
+		cairo_pattern_destroy(lit);
+	}
+	cairo_destroy(cr);
+	*ox = (int)x0;
+	*oy = (int)y0;
+	return s;
+}
+
+cairo_surface_t *desk_mat_curl_picture(int w, int h, int corner, double cut, bool folded, int *ox,
+	int *oy)
+{
+	if (corner < 0 || corner > 3 || w < 8 || h < 8 || !(cut > 0.0)) {
+		return NULL;
+	}
+	double r[4], k = desk_px_per_pt(w);
+	mat_rect(w, h, DESK_MAT_FULL, r);
+	double c = fmin(cut * k, fmin(r[2], r[3]) * 0.5);
+	double px, py, a[2], b[2];
+	sheet_corner(r, corner, &px, &py, a, b);
+	if (!folded) {
+		return corner_raised(px, py, a, b, c * 2.8, c * 0.75, k, ox, oy);
+	}
+	/* The fold runs from A on one edge to B on the other. Turned over it, the
+	 * corner would lie flat at T over the sheet; held up, it stands off the
+	 * sheet and is seen short of that, its tip highest. */
+	double ax = px + a[0] * c, ay = py + a[1] * c, bx = px + b[0] * c, by = py + b[1] * c;
+	double mx = (ax + bx) * 0.5, my = (ay + by) * 0.5;
+	double tx = mx + (ax + bx - px - mx) * 0.80, ty = my + (ay + by - py - my) * 0.80;
+	double sx, sy;
+	shadow_dir(tx, ty, c * 0.42, &sx, &sy);
+	double pad = 14.0 * k;
+	double x0 = floor(fmin(fmin(ax, bx), fmin(fmin(tx, tx + sx), px)) - pad);
+	double y0 = floor(fmin(fmin(ay, by), fmin(fmin(ty, ty + sy), py)) - pad);
+	double x1 = ceil(fmax(fmax(ax, bx), fmax(fmax(tx, tx + sx), px)) + pad);
+	double y1 = ceil(fmax(fmax(ay, by), fmax(fmax(ty, ty + sy), py)) + pad);
+	cairo_surface_t *s = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, (int)(x1 - x0), (int)(y1 - y0));
+	cairo_t *cr = cairo_create(s);
+	cairo_translate(cr, -x0, -y0);
+	/* the bend of it bows out between the fold and the tip */
+	double bow = c * 0.10;
+	double nx = tx - mx, ny = ty - my, nn = hypot(nx, ny);
+	nx = nn > 1e-6 ? nx / nn : 0.0;
+	ny = nn > 1e-6 ? ny / nn : 0.0;
+
+	/* Its shadow on what is under it: along the fold, where it leaves the
+	 * sheet, and further out to its tip. */
+	for (int i = 6; i >= 1; i--) {
+		double g = 1.6 * k * i;
+		cairo_move_to(cr, ax, ay);
+		cairo_line_to(cr, tx + sx + nx * g, ty + sy + ny * g);
+		cairo_line_to(cr, bx, by);
+		cairo_close_path(cr);
+		cairo_set_source_rgba(cr, 0.02, 0.015, 0.008, 0.035);
+		cairo_fill(cr);
+	}
+
+	/* The corner itself: clear, so only where it bends toward the lamp, and
+	 * its cut edges, are seen; a little haze between. */
+	cairo_move_to(cr, ax, ay);
+	cairo_curve_to(cr, ax + (tx - ax) * 0.5 + nx * bow, ay + (ty - ay) * 0.5 + ny * bow,
+		tx - nx * bow * 0.3, ty - ny * bow * 0.3, tx, ty);
+	cairo_curve_to(cr, tx - nx * bow * 0.3, ty - ny * bow * 0.3,
+		bx + (tx - bx) * 0.5 + nx * bow, by + (ty - by) * 0.5 + ny * bow, bx, by);
+	cairo_close_path(cr);
+	cairo_pattern_t *haze = cairo_pattern_create_linear(mx, my, tx, ty);
+	cairo_pattern_add_color_stop_rgba(haze, 0.0, 1.0, 0.98, 0.93, 0.30);
+	cairo_pattern_add_color_stop_rgba(haze, 0.25, 1.0, 0.98, 0.93, 0.10);
+	cairo_pattern_add_color_stop_rgba(haze, 1.0, 0.85, 0.92, 0.90, 0.16);
+	cairo_set_source(cr, haze);
+	cairo_fill_preserve(cr);
+	cairo_pattern_destroy(haze);
+	cairo_set_source_rgba(cr, 1.0, 0.98, 0.92, 0.70);
+	cairo_set_line_width(cr, fmax(1.2, 1.3 * k));
+	cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
+	cairo_stroke(cr);
+	/* the fold: the bend catches the lamp in a line along it, dark beside */
+	cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+	cairo_move_to(cr, ax + nx * 1.5 * k, ay + ny * 1.5 * k);
+	cairo_line_to(cr, bx + nx * 1.5 * k, by + ny * 1.5 * k);
+	cairo_set_source_rgba(cr, 1.0, 0.98, 0.92, 0.55);
+	cairo_set_line_width(cr, 2.6 * k);
+	cairo_stroke(cr);
+	cairo_move_to(cr, ax - nx * 0.8 * k, ay - ny * 0.8 * k);
+	cairo_line_to(cr, bx - nx * 0.8 * k, by - ny * 0.8 * k);
+	cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.16);
+	cairo_set_line_width(cr, 1.0 * k);
+	cairo_stroke(cr);
+	cairo_set_line_cap(cr, CAIRO_LINE_CAP_BUTT);
+	cairo_destroy(cr);
+	*ox = (int)x0;
+	*oy = (int)y0;
+	return s;
+}
+
+/* Where the envelope lies, by the mat lifted at corner c, turned up cut
+ * pixels: its middle, its size and how it is turned. Past the fold, along
+ * the edge across the desk from the corner. */
+static void envelope_place(const double r[4], double k, int c, double cut, double *cx, double *cy,
+	double *ew, double *eh, double *turn)
+{
+	double px, py, a[2], b[2];
+	sheet_corner(r, c, &px, &py, a, b);
+	*ew = ENVELOPE_W_PT * k;
+	*eh = ENVELOPE_H_PT * k;
+	double hx = c == 0 || c == 3 ? 1.0 : -1.0, vy = c == 0 || c == 1 ? 1.0 : -1.0;
+	*cx = px + hx * (cut + 30.0 * k + *ew * 0.5);
+	*cy = py + vy * (26.0 * k + *eh * 0.5);
+	*turn = (c == 0 || c == 2 ? -4.0 : 4.0) * M_PI / 180.0;
+}
+
+bool desk_mat_envelope_box(int w, int h, int corner, double cut, double box[4])
+{
+	if (corner < 0 || corner > 3 || w < 8 || h < 8) {
+		return false;
+	}
+	double r[4], k = desk_px_per_pt(w), cx, cy, ew, eh, t;
+	mat_rect(w, h, DESK_MAT_FULL, r);
+	envelope_place(r, k, corner, cut * k, &cx, &cy, &ew, &eh, &t);
+	double hw = 0.5 * (ew * fabs(cos(t)) + eh * fabs(sin(t)));
+	double hh = 0.5 * (ew * fabs(sin(t)) + eh * fabs(cos(t)));
+	box[0] = cx - hw;
+	box[1] = cy - hh;
+	box[2] = 2 * hw;
+	box[3] = 2 * hh;
+	return true;
+}
+
+/* A photographer's envelope, of brown paper, the prints in it; open, its
+ * flap turned up behind and the prints' tops out of its mouth. */
+static void envelope_paint(cairo_t *cr, double cx, double cy, double ew, double eh, double turn,
+	bool open, double k)
+{
+	double sx, sy;
+	shadow_dir(cx, cy, 1.6 * k, &sx, &sy);
+	cairo_save(cr);
+	cairo_translate(cr, cx + sx, cy + sy);
+	cairo_rotate(cr, turn);
+	for (int i = 3; i >= 1; i--) {
+		double g = 0.9 * k * i;
+		desk_rounded_path(cr, -ew * 0.5 - g, -eh * 0.5 - g, ew + 2 * g, eh + 2 * g, 3.0 * k + g);
+		cairo_set_source_rgba(cr, 0.03, 0.02, 0.01, 0.08);
+		cairo_fill(cr);
+	}
+	cairo_restore(cr);
+
+	cairo_save(cr);
+	cairo_translate(cr, cx, cy);
+	cairo_rotate(cr, turn);
+	double x = -ew * 0.5, y = -eh * 0.5;
+	if (open) {
+		/* three prints, a little fanned, their tops out of it */
+		static const double INK[3][3] = { { 0.36, 0.52, 0.66 }, { 0.64, 0.50, 0.32 },
+			{ 0.40, 0.57, 0.37 } };
+		for (int i = 0; i < 3; i++) {
+			double pw = ew * 0.82, ph = eh * 0.74;
+			cairo_save(cr);
+			cairo_translate(cr, (i - 1) * 3.0 * k, y + ph * 0.30 - i * 2.5 * k);
+			cairo_rotate(cr, (i - 1) * 0.05);
+			cairo_rectangle(cr, -pw * 0.5, -ph * 0.5, pw, ph);
+			cairo_set_source_rgb(cr, 0.955, 0.945, 0.915);
+			cairo_fill_preserve(cr);
+			cairo_set_source_rgba(cr, 0.35, 0.30, 0.24, 0.35);
+			cairo_set_line_width(cr, 1.0);
+			cairo_stroke(cr);
+			double b = ph * 0.06;
+			cairo_rectangle(cr, -pw * 0.5 + b, -ph * 0.5 + b, pw - 2 * b, ph - 2 * b);
+			cairo_set_source_rgb(cr, INK[i][0], INK[i][1], INK[i][2]);
+			cairo_fill(cr);
+			cairo_restore(cr);
+		}
+		/* the flap, turned up behind the mouth: its inside, paler */
+		cairo_move_to(cr, x + 2.0 * k, y);
+		cairo_line_to(cr, x + ew - 2.0 * k, y);
+		cairo_line_to(cr, x + ew * 0.5, y - eh * 0.30);
+		cairo_close_path(cr);
+		cairo_set_source_rgb(cr, 0.85, 0.74, 0.55);
+		cairo_fill_preserve(cr);
+		cairo_set_source_rgba(cr, 0.30, 0.20, 0.10, 0.25);
+		cairo_set_line_width(cr, 1.0);
+		cairo_stroke(cr);
+	}
+	/* the paper of it */
+	desk_rounded_path(cr, x, y, ew, eh, 2.5 * k);
+	cairo_set_source_rgb(cr, 0.79, 0.65, 0.46);
+	cairo_fill(cr);
+	overlay_grain(cr, x, y, ew, eh, 1.1);
+	/* where its sides are folded in and glued, from its foot */
+	cairo_move_to(cr, x + 2.0 * k, y + eh - 2.0 * k);
+	cairo_line_to(cr, x + ew * 0.5, y + eh * 0.52);
+	cairo_line_to(cr, x + ew - 2.0 * k, y + eh - 2.0 * k);
+	cairo_set_source_rgba(cr, 0.25, 0.16, 0.08, 0.16);
+	cairo_set_line_width(cr, 1.2 * k);
+	cairo_stroke(cr);
+	if (!open) {
+		/* the flap, shut down over its mouth */
+		cairo_move_to(cr, x, y + 1.0 * k);
+		cairo_line_to(cr, x + ew, y + 1.0 * k);
+		cairo_line_to(cr, x + ew * 0.5, y + eh * 0.42);
+		cairo_close_path(cr);
+		cairo_set_source_rgb(cr, 0.75, 0.61, 0.42);
+		cairo_fill_preserve(cr);
+		cairo_set_source_rgba(cr, 0.25, 0.16, 0.08, 0.30);
+		cairo_set_line_width(cr, 1.0 * k);
+		cairo_stroke(cr);
+	}
+	/* and on it, in the laboratory's red, what is in it */
+	show_text_fit_as(cr, DESK_FONT_ENGRAVE, TR("PHOTOS"), 0.0, y + eh * 0.80, 18.0 * k, true, 0.64, 0.16,
+		0.12, 0.92, 0, ew * 0.80);
+	cairo_restore(cr);
+}
+
+cairo_surface_t *desk_mat_envelope_picture(int w, int h, int corner, double cut, bool open, int *ox,
+	int *oy)
+{
+	double box[4];
+	if (!desk_mat_envelope_box(w, h, corner, cut, box)) {
+		return NULL;
+	}
+	double r[4], k = desk_px_per_pt(w), cx, cy, ew, eh, t;
+	mat_rect(w, h, DESK_MAT_FULL, r);
+	envelope_place(r, k, corner, cut * k, &cx, &cy, &ew, &eh, &t);
+	/* room above it for the prints and the flap open, and round it for its shadow */
+	double pad = 8.0 * k, up = open ? eh * 0.40 : 0.0;
+	int x0 = (int)floor(box[0] - pad), y0 = (int)floor(box[1] - pad - up);
+	int sw = (int)ceil(box[2] + 2 * pad), sh = (int)ceil(box[3] + 2 * pad + up);
+	cairo_surface_t *s = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, sw, sh);
+	cairo_t *cr = cairo_create(s);
+	cairo_translate(cr, -x0, -y0);
+	cairo_push_group(cr);
+	envelope_paint(cr, cx, cy, ew, eh, t, open, k);
+	cairo_pattern_t *it = cairo_pop_group(cr);
+	cairo_set_source(cr, it);
+	cairo_paint(cr);
+	mat_light_over(cr, w, h, it);
+	cairo_pattern_destroy(it);
+	cairo_destroy(cr);
+	*ox = x0;
+	*oy = y0;
+	return s;
+}
+
 /* ---- what lies over the desk, a sprite at a time ----------------
  *
  * The compositor used to repaint everything drawn over the baked desk --
@@ -30776,6 +42915,10 @@ void desk_draw_gadgets(cairo_t *cr, int w, int h, time_t now, double drawer_open
 uint64_t desk_overlay_key(int which, time_t now, int unread)
 {
 	switch (which) {
+	case DESK_OVL_MAT:
+		return mat_key();
+	case DESK_OVL_MAT_SHEET:
+		return sheet_key();
 	case DESK_OVL_CLOCK:
 		return desk_clock_key(now);
 	case DESK_OVL_POST:
@@ -30802,6 +42945,17 @@ void desk_draw_overlay(cairo_t *cr, int which, int w, int h, time_t now, int unr
 {
 	struct room_xf xf;
 	switch (which) {
+	case DESK_OVL_MAT:
+		mat_paint(cr, w, h);
+		break;
+	case DESK_OVL_MAT_SHEET:
+		clear_sheet_paint(cr, w, h);
+		break;
+	case DESK_OVL_CASES:
+		if (room_xform(w, h, 0.0, &xf)) {
+			room_cases_paint(cr, &xf);
+		}
+		break;
 	case DESK_OVL_CLOCK:
 		if (room_xform(w, h, 0.0, &xf)) {
 			desk_gadget_face(cr, &xf, DESK_GADGET_CLOCK, now);
@@ -30857,6 +43011,24 @@ void desk_draw_desktop(cairo_t *cr, int w, int h, time_t now, bool with_demo_win
 {
 	desk_light_desk(w, h);
 	desk_draw_room(cr, w, h, drawer_open);
+	/* the mat lies on the boards, under everything that stands or lies on
+	 * it (the compositor lays it as its own sprite, DESK_OVL_MAT) */
+	{
+		int ox0 = 0, oy0 = 0, ox1 = 0, oy1 = 0;
+		double clip0 = 0.0, clip1 = 0.0;
+		cairo_save(cr);
+		if (desk_desk_place(w, h, 0.0, &ox0, &oy0, &clip0)
+			&& desk_desk_place(w, h, drawer_open, &ox1, &oy1, &clip1)) {
+			cairo_translate(cr, ox1 - ox0, oy1 - oy0);
+		}
+		desk_draw_overlay(cr, DESK_OVL_MAT, w, h, now, 0);
+		desk_draw_overlay(cr, DESK_OVL_MAT_SHEET, w, h, now, 0);
+		cairo_restore(cr);
+	}
+	struct room_xf xf;
+	if (room_xform(w, h, drawer_open, &xf)) {
+		room_cases_paint(cr, &xf);
+	}
 	desk_draw_gadgets(cr, w, h, now, drawer_open);
 	desk_draw_console_idle(cr, w, h, drawer_open);
 	desk_draw_post_idle(cr, w, h, drawer_open, 2);
@@ -31292,8 +43464,13 @@ static void lk_rig_for(const struct desk_door_mood *m, struct lk_rig *r)
 	r->haze = wx == DESK_WX_FOG ? vmul(vadd(r->amb_hi, r->amb_lo), 0.75) : vmul(r->amb_hi, 0.75);
 	r->exposure = LK_EXPOSURE * (1.0 - 0.18 * day)
 		* (1.0 - 0.18 * day * (wx == DESK_WX_SNOW || wx == DESK_WX_FOG));
+	/* The key changes only where the rig does: below 13 degrees under the
+	 * horizon the night is the same night (tw, dd, day, low, on and up are
+	 * all at their ends), and which way the sun is counts only while it
+	 * is out -- or the door, and its films, were traced again every few
+	 * minutes all night for nothing. */
 	unsigned k = 2166136261u;
-	int q[8] = { (int)lround(el / 1.5), (int)lround(az / 6.0), wx,
+	int q[8] = { (int)lround(fmax(el, -13.5) / 1.5), up > 0.0 ? (int)lround(az / 6.0) : 0, wx,
 		(int)lround(heavy * 4.0), (int)m->decor, 0, (int)lround(moon * 4.0), m->year };
 	for (int i = 0; i < 8; i++) {
 		k = (k ^ (unsigned)q[i]) * 16777619u;
@@ -34333,9 +46510,7 @@ static void *shf_worker(void *arg)
 static void shf_run(struct shf_job *j)
 {
 	j->next = 0;
-	long nproc = sysconf(_SC_NPROCESSORS_ONLN);
-	int n = (int)(nproc > 0 ? nproc : 1);
-	n = n > 8 ? 8 : n;
+	int n = bake_threads();
 	pthread_t th[8];
 	int started = 0;
 	for (int i = 0; i + 1 < n; i++) {
@@ -34760,6 +46935,149 @@ static void lk_camera(int w, int h, const struct desk_lock_look *lk, struct lk_c
 	lk_camera_to(w, h, lk, NULL, c);
 }
 
+/* Where the moves under way have the eye, the key and the door. Here and
+ * not in the compositor, so that a move filmed ahead (desk_lock_films) is
+ * made by the very sums that make it live. */
+static double lk_ease(double t)
+{
+	t = clampf(t, 0.0, 1.0);
+	return t * t * (3.0 - 2.0 * t);
+}
+
+/* how long a move runs until it leaves the eye where it stays */
+static double lk_move_len(int move, bool inside)
+{
+	switch (move) {
+	case DESK_LOCK_MOVE_WALK:
+		return DESK_LOCK_WALK_S;
+	case DESK_LOCK_MOVE_LEAN:
+		return DESK_LOCK_TRY_AT + DESK_LOCK_TRY_S;
+	case DESK_LOCK_MOVE_FAIL:
+		return 0.72;   /* leant back out; the key's shudder is long since nothing */
+	case DESK_LOCK_MOVE_OPEN:
+		return inside ? DESK_LOCK_PUSH1 : DESK_LOCK_SWING1;
+	case DESK_LOCK_MOVE_OUT:
+		return DESK_LOCK_OUT_END;
+	default:
+		return 0.0;
+	}
+}
+
+void desk_lock_pose(const struct desk_lock_times *tm, struct desk_lock_look *lk)
+{
+	lk->back = lk->lean = lk->turn = lk->open = lk->push = lk->fail = 0.0;
+	if (tm->walking) {
+		lk->back = 1.0 - lk_ease(tm->walk_t / DESK_LOCK_WALK_S);
+	}
+	/* Return: lean in to the key, and try it */
+	if (tm->checking) {
+		double t = tm->check_t, l0 = tm->lean0;
+		lk->lean = l0 + (1.0 - l0) * lk_ease(t / DESK_LOCK_LEAN_S);
+		lk->turn = DESK_LOCK_TRY * lk_ease((t - DESK_LOCK_TRY_AT) / DESK_LOCK_TRY_S);
+	}
+	if (tm->opening) {
+		/* it goes round; stand back */
+		double t = tm->open_t;
+		lk->turn += (1.0 - lk->turn) * lk_ease(t / DESK_LOCK_TURN_S);
+		lk->lean *= 1.0 - lk_ease((t - DESK_LOCK_BACK0) / (DESK_LOCK_BACK1 - DESK_LOCK_BACK0));
+	} else if (tm->failing) {
+		/* it will not go: it is jerked against the wards and comes back,
+		 * and you stand back to read why */
+		double t = tm->fail_t;
+		lk->fail = clampf(t / DESK_LOCK_FAIL_S, 0.0, 0.999);
+		lk->turn *= 1.0 - lk_ease(t / 0.30);
+		lk->turn += 0.07 * sin(t * 46.0) * exp(-t * 5.5);
+		lk->lean *= 1.0 - lk_ease((t - 0.22) / 0.50);
+	}
+	if (tm->leaving) {
+		/* letting yourself in, backwards */
+		double t = tm->leave_t;
+		lk->push = 1.0 - lk_ease(t / DESK_LOCK_OUT_WALK);
+		lk->open = 1.0 - lk_ease((t - DESK_LOCK_OUT_SHUT0)
+			/ (DESK_LOCK_OUT_SHUT1 - DESK_LOCK_OUT_SHUT0));
+		lk->lean = lk_ease((t - DESK_LOCK_OUT_LEAN) / DESK_LOCK_LEAN_S)
+			* (1.0 - lk_ease((t - DESK_LOCK_OUT_BACK) / (DESK_LOCK_OUT_END - DESK_LOCK_OUT_BACK)));
+		lk->turn = 1.0 - lk_ease((t - DESK_LOCK_OUT_TURN) / DESK_LOCK_TURN_S);
+	}
+	if (tm->opening) {
+		double t = tm->open_t;
+		lk->open = lk_ease((t - DESK_LOCK_SWING0) / (DESK_LOCK_SWING1 - DESK_LOCK_SWING0));
+		lk->push = tm->inside ? lk_ease((t - DESK_LOCK_PUSH0) / (DESK_LOCK_PUSH1 - DESK_LOCK_PUSH0))
+			: 0.0;
+	}
+	/* Which move it is, if it is one alone and begun from where it always
+	 * begins: Return from standing at the door; let in, or told no, once the
+	 * key has been seen tried (the compositor waits for that). Anything
+	 * else -- Return while still walking up, or while leaning back from a
+	 * no -- is made live. */
+	const double tried = DESK_LOCK_TRY_AT + DESK_LOCK_TRY_S;
+	bool leant = tm->checking && tm->lean0 == 0.0;
+	lk->move = DESK_LOCK_MOVE_NONE;
+	lk->move_t = 0.0;
+	if (tm->walking) {
+		if (!tm->checking && !tm->opening && !tm->failing && !tm->leaving) {
+			lk->move = DESK_LOCK_MOVE_WALK;
+			lk->move_t = tm->walk_t;
+		}
+	} else if (tm->leaving) {
+		if (!tm->checking && !tm->opening && !tm->failing) {
+			lk->move = DESK_LOCK_MOVE_OUT;
+			lk->move_t = tm->leave_t;
+		}
+	} else if (tm->opening) {
+		if (leant && tm->open_t < 0.0) {
+			lk->move = DESK_LOCK_MOVE_LEAN;   /* waiting for the key to have been tried */
+			lk->move_t = tm->check_t;
+		} else if (leant && tm->check_t - tm->open_t >= tried) {
+			lk->move = DESK_LOCK_MOVE_OPEN;
+			lk->move_t = tm->open_t;
+		}
+	} else if (tm->failing) {
+		if (leant && tm->check_t - tm->fail_t >= tried) {
+			lk->move = DESK_LOCK_MOVE_FAIL;
+			lk->move_t = tm->fail_t;
+		}
+	} else if (leant) {
+		lk->move = DESK_LOCK_MOVE_LEAN;
+		lk->move_t = tm->check_t;
+	}
+}
+
+/* the pose t seconds into a move, begun from where it always begins */
+static void lk_move_pose(int move, double t, bool inside, struct desk_lock_look *lk)
+{
+	struct desk_lock_times tm;
+	memset(&tm, 0, sizeof tm);
+	tm.inside = inside;
+	switch (move) {
+	case DESK_LOCK_MOVE_WALK:
+		tm.walking = true;
+		tm.walk_t = t;
+		break;
+	case DESK_LOCK_MOVE_LEAN:
+		tm.checking = true;
+		tm.check_t = t;
+		break;
+	case DESK_LOCK_MOVE_FAIL:
+		tm.checking = tm.failing = true;
+		tm.check_t = t + 10.0;
+		tm.fail_t = t;
+		break;
+	case DESK_LOCK_MOVE_OPEN:
+		tm.checking = tm.opening = true;
+		tm.check_t = t + 10.0;
+		tm.open_t = t;
+		break;
+	case DESK_LOCK_MOVE_OUT:
+		tm.leaving = true;
+		tm.leave_t = t;
+		break;
+	default:
+		break;
+	}
+	desk_lock_pose(&tm, lk);
+}
+
 static vec3 lk_cam_dir(const struct lk_cam *c, double x, double y)
 {
 	vec3 d = v3((x - c->cx) / c->f, -(y - c->cy) / c->f, -1.0);
@@ -34958,6 +47276,12 @@ static void lk_row(struct lk_job *j, int y)
 	}
 }
 
+/* a fine trace no longer wanted, or the session ending under it */
+static bool lk_job_stopped(const struct lk_job *j)
+{
+	return (j->stop && atomic_load(j->stop)) || (j->back && room_stopping());
+}
+
 static void *lk_worker(void *arg)
 {
 	struct lk_job *j = arg;
@@ -34965,7 +47289,7 @@ static void *lk_worker(void *arg)
 		thread_to_the_back();
 	}
 	for (;;) {
-		if (j->stop && atomic_load(j->stop)) {
+		if (lk_job_stopped(j)) {
 			break;
 		}
 		pthread_mutex_lock(&j->lock);
@@ -34983,9 +47307,7 @@ static void lk_run(struct lk_job *j)
 {
 	j->next = 0;
 	pthread_mutex_init(&j->lock, NULL);
-	long nproc = sysconf(_SC_NPROCESSORS_ONLN);
-	int n = (int)(nproc > 0 ? nproc : 1);
-	n = n > 8 ? 8 : n;
+	int n = bake_threads();
 	pthread_t th[8];
 	int started = 0;
 	for (int i = 0; i + 1 < n; i++) {
@@ -35001,13 +47323,18 @@ static void lk_run(struct lk_job *j)
 }
 
 /* The glow round what is bright -- the lantern, the glass, the shine on
- * the brass -- and the corners let go dark, the way a lens has it. */
-static void lk_post(unsigned char *px, int stride, int W, int H, double amount)
+ * the brass -- and the corners let go dark, the way a lens has it. A
+ * frame with a margin (mx, my pixels each side, beyond the screen's edges)
+ * has its corners where the screen's are; one at res of the screen's size
+ * has its glow as wide as at the screen's. */
+static void lk_post(unsigned char *px, int stride, int W, int H, double amount, int mx, int my,
+	double res)
 {
 	if (amount <= 0.0) {
 		return;
 	}
-	int bw = (W + 3) / 4, bh = (H + 3) / 4;
+	int blk = (int)lround(clampf(4.0 * res, 1.0, 4.0));
+	int bw = (W + blk - 1) / blk, bh = (H + blk - 1) / blk;
 	float *b = calloc((size_t)bw * bh * 3, sizeof *b);
 	float *tmp = calloc((size_t)bw * bh * 3, sizeof *tmp);
 	if (!b || !tmp) {
@@ -35017,14 +47344,14 @@ static void lk_post(unsigned char *px, int stride, int W, int H, double amount)
 	}
 	for (int y = 0; y < H; y++) {
 		const uint32_t *row = (const uint32_t *)(const void *)(px + (size_t)y * stride);
-		float *br = b + (size_t)(y / 4) * bw * 3;
+		float *br = b + (size_t)(y / blk) * bw * 3;
 		for (int x = 0; x < W; x++) {
 			uint32_t p = row[x];
 			double r = ((p >> 16) & 0xff) / 255.0, g = ((p >> 8) & 0xff) / 255.0, bb = (p & 0xff) / 255.0;
 			double l = 0.2126 * r + 0.7152 * g + 0.0722 * bb;
-			double k = fmax(l - 0.62, 0.0) / 0.38 / 16.0;
+			double k = fmax(l - 0.62, 0.0) / 0.38 / (blk * blk);
 			if (k > 0.0) {
-				float *d = br + (x / 4) * 3;
+				float *d = br + (x / blk) * 3;
 				d[0] += (float)(r * k);
 				d[1] += (float)(g * k);
 				d[2] += (float)(bb * k);
@@ -35035,17 +47362,18 @@ static void lk_post(unsigned char *px, int stride, int W, int H, double amount)
 	blur_pass_rect(b, tmp, bw, bh, 2);
 	blur_pass_rect(b, tmp, bw, bh, 4);
 	blur_pass_rect(b, tmp, bw, bh, 8);
-	double ax = 1.0 / (W * 0.5), ay = 1.0 / (H * 0.5);
-	double aspect = (double)W / H;
+	int iw = W - 2 * mx, ih = H - 2 * my;
+	double ax = 1.0 / (iw * 0.5), ay = 1.0 / (ih * 0.5);
+	double aspect = (double)iw / ih;
 	for (int y = 0; y < H; y++) {
 		uint32_t *row = (uint32_t *)(void *)(px + (size_t)y * stride);
-		double fy = (y + 0.5) / 4.0 - 0.5;
+		double fy = (y + 0.5) / blk - 0.5;
 		int y0 = (int)floor(fy);
 		double ty = fy - y0;
 		int ya = y0 < 0 ? 0 : y0 >= bh ? bh - 1 : y0, yb = y0 + 1 >= bh ? bh - 1 : y0 + 1 < 0 ? 0 : y0 + 1;
 		double vy = (y - H * 0.5) * ay;
 		for (int x = 0; x < W; x++) {
-			double fx = (x + 0.5) / 4.0 - 0.5;
+			double fx = (x + 0.5) / blk - 0.5;
 			int x0 = (int)floor(fx);
 			double tx = fx - x0;
 			int xa = x0 < 0 ? 0 : x0 >= bw ? bw - 1 : x0, xb = x0 + 1 >= bw ? bw - 1 : x0 + 1 < 0 ? 0 : x0 + 1;
@@ -35070,9 +47398,11 @@ static void lk_post(unsigned char *px, int stride, int W, int H, double amount)
 }
 
 /* the scene from cam, W x H pixels, the edges done finely or not -- a fine
- * one being the background's (lk_bg_start), NULL if it was stopped */
-static cairo_surface_t *lk_trace(const struct lk_scene *sc, const struct lk_cam *cam, int W, int H,
-	bool fine, atomic_bool *stop)
+ * one being the background's (lk_bg_start) or a film's, NULL if it was
+ * stopped -- with a margin of mx, my pixels past the screen's edges, at
+ * res of the screen's size (lk_post) */
+static cairo_surface_t *lk_trace_framed(const struct lk_scene *sc, const struct lk_cam *cam,
+	int W, int H, bool fine, atomic_bool *stop, int mx, int my, double res)
 {
 	cairo_surface_t *img = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, W, H);
 	unsigned char *aa = malloc((size_t)W * H);
@@ -35094,14 +47424,14 @@ static cairo_surface_t *lk_trace(const struct lk_scene *sc, const struct lk_cam 
 	lk_run(&j);
 	/* in 2D: the edges as they come, and no glow */
 	bool flat = desk_gfx_level() == DESK_GFX_2D;
-	bool stopped = stop && atomic_load(stop);
+	bool stopped = lk_job_stopped(&j);
 	if (fine && !flat && !stopped) {
 		j.pass = 1;
 		lk_run(&j);
-		stopped = stop && atomic_load(stop);
+		stopped = lk_job_stopped(&j);
 	}
 	if (!flat && !stopped) {
-		lk_post(j.px, j.stride, W, H, sc->post);
+		lk_post(j.px, j.stride, W, H, sc->post, mx, my, res);
 	}
 	cairo_surface_mark_dirty(img);
 	free(aa);
@@ -35111,6 +47441,12 @@ static cairo_surface_t *lk_trace(const struct lk_scene *sc, const struct lk_cam 
 		return NULL;
 	}
 	return img;
+}
+
+static cairo_surface_t *lk_trace(const struct lk_scene *sc, const struct lk_cam *cam, int W, int H,
+	bool fine, atomic_bool *stop)
+{
+	return lk_trace_framed(sc, cam, W, H, fine, stop, 0, 0, 1.0);
 }
 
 /* ---- the pictures that go on things ---- */
@@ -35306,6 +47642,7 @@ static struct {
 
 static void lk_bg_collect(bool wait);
 static void lk_bg_stop(void);
+static void lkf_canvas_free(void);
 
 static void lk_frame_drop(struct lk_frame *f)
 {
@@ -35320,6 +47657,7 @@ void desk_lock_forget(void)
 	lk_bg_stop();
 	lk_frame_drop(&g_lock.rest);
 	lk_frame_drop(&g_lock.last);
+	lkf_canvas_free();
 	if (g_lock.sign) {
 		cairo_surface_destroy(g_lock.sign);
 	}
@@ -35531,10 +47869,12 @@ static void lk_bg_stop(void)
 	lk_bg_collect(true);
 }
 
+static bool lkf_awaited(void);
+
 bool desk_lock_settling(void)
 {
 	lk_bg_collect(false);
-	return g_lk_bg.running;
+	return g_lk_bg.running || lkf_awaited();
 }
 
 void desk_lock_settle(void)
@@ -35544,9 +47884,10 @@ void desk_lock_settle(void)
 
 /* The frame for cam: the one kept at the door, the last one if nothing has
  * moved since, or a new one, as fine as keeps the frame rate. Where the eye
- * comes to rest, a fine one is started on the side. */
+ * comes to rest, a fine one is started on the side -- unless one is coming
+ * anyway, made ahead (desk_lock_films). */
 static struct lk_frame *lk_frame_for(struct lk_scene *sc, const struct lk_cam *cam, int w, int h,
-	double k, cairo_surface_t *inside)
+	double k, cairo_surface_t *inside, bool coming)
 {
 	lk_bg_collect(false);
 	struct desk_lock_look rest;
@@ -35558,7 +47899,7 @@ static struct lk_frame *lk_frame_for(struct lk_scene *sc, const struct lk_cam *c
 		&& cam->eye.y == rc.eye.y && cam->eye.z == rc.eye.z && cam->yaw == rc.yaw
 		&& cam->pitch == rc.pitch && cam->f == rc.f;
 	if (at_rest && g_lock.rest.img) {
-		if (g_lock.rest.mood != sc->rig.key) {
+		if (g_lock.rest.mood != sc->rig.key && !coming) {
 			/* the weather, or the hour, has moved on: the door as it was
 			 * until it is traced finely as it is now -- no coarse one
 			 * in between, the eye has not moved */
@@ -35568,7 +47909,7 @@ static struct lk_frame *lk_frame_for(struct lk_scene *sc, const struct lk_cam *c
 	}
 	struct lk_frame *f = &g_lock.last;
 	if (lk_same(f, cam, sc)) {
-		if (!f->fine && ++g_lock.still >= 2) {
+		if (!f->fine && ++g_lock.still >= 2 && !coming) {
 			lk_bg_start(sc, cam, W, H, k, at_rest, inside);
 		}
 		return f;
@@ -35603,10 +47944,1438 @@ static struct lk_frame *lk_frame_for(struct lk_scene *sc, const struct lk_cam *c
 	f->post = sc->post;
 	f->mood = sc->rig.key;
 	f->fine = false;
-	if (at_rest) {
+	if (at_rest && !coming) {
 		lk_bg_start(sc, cam, W, H, k, true, inside);
 	}
 	return f;
+}
+
+/* ---- the moves, filmed ahead ----
+ *
+ * Moving, the door is traced as it goes, as coarse as keeps the frame
+ * rate (lk_frame_for): on a big screen a fifth of its size or less, the
+ * name on the board a smudge, and fine only once the eye has stopped and a
+ * fine trace has been made -- seconds, on a big screen. But the moves are
+ * the same every time: the walk up, leaning in to the key, told no, let
+ * in and through, out of the room. So, at Medium and up, they are filmed
+ * ahead (desk_lock_films), on a thread at the back of the queue, for the
+ * door as it is (whose, the weather, the bounce): frames at half the
+ * screen's size (no more than LKF_PX pixels, and smaller where the picture
+ * goes by faster than LKF_SLOW), with a margin all round; and where a move
+ * begins or ends with the eye still -- at the door, leant in to the key --
+ * the picture there at the screen's own size (the stills).
+ *
+ * Each frame keeps a grid of what it saw, in metres -- what is on the door
+ * in the door's own frame, what is on the key in the key's -- and is laid
+ * by it (lkf_show): each cell of the grid two triangles, each put where
+ * its corners now land, the door swung and the key turned as they are
+ * now. Near and far, turned and leant, a frame is where the eye would see
+ * it, and the frames either side of the moment fade one into the other as
+ * the room's own films do, each giving way toward its edge to the other.
+ * What the grid cannot carry is what a frame did not see, and what changes
+ * besides where things are -- the light as the door opens, a shine. So
+ * the frames are as close as that asks (lkf_bake_film): no more than
+ * LKF_SPACING pixels of the picture moved where one scale and a shift do
+ * not put it back, more where it goes by too fast for the eye to see a
+ * double edge, and none shown more than LKF_ZOOM times bigger or smaller
+ * than it was made.
+ *
+ * What is drawn over the door -- the letters, the caret, the light in the
+ * slot, the cords, what moves out there -- is drawn as ever. The room the
+ * door opens on is a picture, and it changes (the clock on the bookcase,
+ * the needles on the Control Panel): the film has it as it was when the
+ * film was made, and the last of the walk in is the picture as it is now,
+ * the frame before fading into it (and out of it, at the first of the
+ * walk out). DESK_LOCK_FILM_DUMP=<dir> writes the frames as they are made,
+ * and says how many there are and why (desk-preview --lock-film). */
+
+static void lk_edges(cairo_surface_t *s, vec3 edge[5]);
+
+/* how big the door is drawn for a w x h screen, of the screen: as big as
+ * what is a scene rather than something read (desk_ambient_size) */
+static double lk_scale_for(int w, int h)
+{
+	int ow, oh;
+	desk_ambient_size(w, h, &ow, &oh);
+	return clampf((double)ow / w, 0.25, 3.0);
+}
+
+#define LKF_PX 550000.0      /* the most pixels a film's frame has, inside its margin */
+#define LKF_MARGIN 0.06      /* that margin, each side, of the frame */
+#define LKF_SPACING 48.0     /* frames as far apart as that many pixels moved (lkf_moved) */
+#define LKF_ZOOM 1.35        /* and no more than that much bigger or smaller */
+#define LKF_SLOW 800.0       /* pixels a second the picture goes by at a frame's full size */
+#define LKF_MOST 64          /* and no more than that many to a move */
+#define LKF_STEPS 240        /* the steps a move's change is counted in */
+#define LKF_GX 41            /* the grid of what a frame saw kept with it */
+#define LKF_GY 26
+
+/* what is made ahead: the two stills, then a film for each move */
+enum { LKF_REST, LKF_HOLD, LKF_STILLS };
+#define LKF_JOBS (LKF_STILLS + DESK_LOCK_MOVES)
+#define LKF_JOB_OF(move) (LKF_STILLS + (move))
+
+/* everything a picture of the door is made from */
+struct lkf_key {
+	int w, h, level;
+	int view;                 /* the room it opens on (OPEN, OUT): -1 none */
+	double k, steady;
+	unsigned sign, mood, room;
+};
+
+/* where a point a frame saw is: fixed, on the door, on the key */
+enum { LKF_FIXED = 0, LKF_DOOR, LKF_KEY };
+
+struct lkf_frame {
+	cairo_surface_t *img;     /* NULL: the room's picture, as it is now */
+	double p;                 /* how far into its move, by what changes */
+	struct lk_cam cam;        /* in its own pixels */
+	double door, key;         /* the door's swing and the key's turn it was made at */
+	/* at each point of a grid over it, corner to corner, what the ray met:
+	 * in metres, or (on the door or the key) in the door's own frame */
+	vec3 ref[LKF_GX * LKF_GY];
+	unsigned char on[LKF_GX * LKF_GY];
+};
+
+struct lkf_film {
+	struct lkf_key key;
+	double len;
+	double prog[LKF_STEPS + 1];
+	int n;
+	struct lkf_frame *f;
+};
+
+/* what the thread making them needs, made on the compositor's */
+struct lkf_job {
+	bool want;
+	struct lkf_key key;
+	struct desk_door_mood mood;
+	cairo_surface_t *sign, *gold, *plate;
+	cairo_surface_t *pic;     /* the room's picture (OPEN, OUT), or NULL */
+	bool room_on;
+	struct lk_room room;      /* its own pictures referenced */
+	struct lk_cam end;
+	vec3 edge[5];
+};
+
+static struct {
+	pthread_mutex_t lock;
+	bool running;
+	int busy;                 /* the job being made, or -1 */
+	atomic_bool stop;         /* and it is no longer wanted */
+	struct lkf_job job[LKF_JOBS];
+	struct lkf_frame *still[LKF_STILLS];
+	struct lkf_key still_key[LKF_STILLS];
+	struct lkf_film *film[DESK_LOCK_MOVES];
+	bool awaited;             /* a still the door is showing is on its way */
+} g_lkf = { .lock = PTHREAD_MUTEX_INITIALIZER, .busy = -1 };
+
+static bool lkf_key_eq(const struct lkf_key *a, const struct lkf_key *b)
+{
+	return a->w == b->w && a->h == b->h && a->level == b->level && a->view == b->view
+		&& fabs(a->k - b->k) < 1e-9 && a->steady == b->steady && a->sign == b->sign
+		&& a->mood == b->mood && a->room == b->room;
+}
+
+static unsigned lkf_hash(unsigned h, const void *p, size_t n)
+{
+	const unsigned char *c = p;
+	for (size_t i = 0; i < n; i++) {
+		h = (h ^ c[i]) * 16777619u;
+	}
+	return h;
+}
+
+/* the board and the plate as lk_prepare draws them: whose, the picture,
+ * the word on the plate, a birthday's sash */
+static unsigned lkf_sign_key(const char *name, const void *picture, bool birthday)
+{
+	const char *label = TR("PASSWORD");
+	unsigned h = lkf_hash(2166136261u, name, strlen(name) + 1);
+	h = lkf_hash(h, &picture, sizeof picture);
+	h = lkf_hash(h, label, strlen(label) + 1);
+	return lkf_hash(h, &birthday, sizeof birthday);
+}
+
+static void lkf_key_of(struct lkf_key *key, int w, int h, double k, const struct desk_lock_look *lk,
+	unsigned mood)
+{
+	memset(key, 0, sizeof *key);
+	key->w = w;
+	key->h = h;
+	key->level = (int)desk_gfx_level();
+	key->view = -1;
+	key->k = k;
+	key->steady = lk->steady;
+	key->sign = lkf_sign_key(lk->name ? lk->name : "", lk->picture,
+		lk->mood.set && (lk->mood.decor & DESK_DECOR_BIRTHDAY));
+	key->mood = mood;
+}
+
+/* and for a move, the room it opens on, as it is built */
+static void lkf_key_room(struct lkf_key *key, int view, int w, int h)
+{
+	key->view = view;
+	struct room_render *rr = view >= 0 ? room_for_whole(w, h) : NULL;
+	key->room = rr ? rr->serial : 0;
+}
+
+static void lkf_frame_free(struct lkf_frame *f)
+{
+	if (f && f->img) {
+		cairo_surface_destroy(f->img);
+	}
+	free(f);
+}
+
+static void lkf_film_free(struct lkf_film *film)
+{
+	if (!film) {
+		return;
+	}
+	for (int i = 0; i < film->n; i++) {
+		if (film->f[i].img) {
+			cairo_surface_destroy(film->f[i].img);
+		}
+	}
+	free(film->f);
+	free(film);
+}
+
+static void lkf_job_drop(struct lkf_job *j)
+{
+	cairo_surface_t *s[5] = { j->sign, j->gold, j->plate, j->pic, NULL };
+	for (int i = 0; i < 4; i++) {
+		if (s[i]) {
+			cairo_surface_destroy(s[i]);
+		}
+	}
+	for (int i = 0; i < 2; i++) {
+		if (j->room.keep[i]) {
+			cairo_surface_destroy(j->room.keep[i]);
+		}
+	}
+	memset(j, 0, sizeof *j);
+}
+
+/* a copy of a job for the thread, every picture in it its own */
+static void lkf_job_copy(struct lkf_job *to, const struct lkf_job *from)
+{
+	*to = *from;
+	cairo_surface_t **s[4] = { &to->sign, &to->gold, &to->plate, &to->pic };
+	for (int i = 0; i < 4; i++) {
+		if (*s[i]) {
+			cairo_surface_reference(*s[i]);
+		}
+	}
+	for (int i = 0; i < 2; i++) {
+		if (to->room.keep[i]) {
+			cairo_surface_reference(to->room.keep[i]);
+		}
+	}
+}
+
+
+/* how far into the film's move t seconds is, and when it is that far */
+static double lkf_prog_at(const struct lkf_film *film, double t)
+{
+	double u = clampf(t / film->len, 0.0, 1.0) * LKF_STEPS;
+	int i = (int)u;
+	if (i >= LKF_STEPS) {
+		return film->prog[LKF_STEPS];
+	}
+	return film->prog[i] + (film->prog[i + 1] - film->prog[i]) * (u - i);
+}
+
+static double lkf_time_at(const struct lkf_film *film, double p)
+{
+	int i = 0;
+	while (i < LKF_STEPS - 1 && film->prog[i + 1] < p) {
+		i++;
+	}
+	double d = film->prog[i + 1] - film->prog[i];
+	double u = i + (d > 1e-12 ? clampf((p - film->prog[i]) / d, 0.0, 1.0) : 0.0);
+	return film->len * u / LKF_STEPS;
+}
+
+/* What the eye sees at a pose, coarsely: a grid of rays, the points they
+ * meet, and whether each is on the door (and swings with it). */
+#define LKF_PROBE_X 10
+#define LKF_PROBE_Y 7
+struct lkf_probe {
+	int n;
+	vec3 p[LKF_PROBE_X * LKF_PROBE_Y];
+	unsigned char on[LKF_PROBE_X * LKF_PROBE_Y];
+};
+
+/* what a ray met rides on: the key, the door (what is on it too), or
+ * nothing that moves */
+static int lkf_on(const struct lk_scene *sc, const struct lk_hit *hit)
+{
+	if (hit->id == LK_KEY) {
+		return LKF_KEY;
+	}
+	if ((hit->id >= LK_DOOR && hit->id <= LK_BRASS)
+		|| (hit->id == LK_DECO && hit->face >= 0 && hit->face < sc->ndeco
+		&& sc->deco[hit->face].door)) {
+		return LKF_DOOR;
+	}
+	return LKF_FIXED;
+}
+
+/* a point on the key, in the door's frame, turned from key a to key b */
+static vec3 lkf_key_turn(vec3 q, double a, double b)
+{
+	vec3 c = v3(LK_KEY_X, LK_KEY_Y, 0.0);
+	return vadd(c, rot_z(vsub(q, c), a - b));
+}
+
+/* a point of what was seen in a, where it is in b */
+static vec3 lkf_carry(vec3 p, int on, const struct lk_scene *a, const struct lk_scene *b)
+{
+	if (on == LKF_DOOR) {
+		return lk_from_door(b, lk_to_door(a, p));
+	}
+	if (on == LKF_KEY) {
+		return lk_from_door(b, lkf_key_turn(lk_to_door(a, p), a->key, b->key));
+	}
+	return p;
+}
+
+static void lkf_probe(const struct lk_scene *sc, const struct lk_cam *cam, int w, int h,
+	struct lkf_probe *pr)
+{
+	pr->n = 0;
+	for (int j = 0; j < LKF_PROBE_Y; j++) {
+		for (int i = 0; i < LKF_PROBE_X; i++) {
+			vec3 d = lk_cam_dir(cam, (i + 0.5) / LKF_PROBE_X * w, (j + 0.5) / LKF_PROBE_Y * h);
+			struct lk_hit hit;
+			lk_intersect(sc, cam->eye, d, &hit);
+			if (hit.t >= 1e8) {
+				continue;
+			}
+			pr->p[pr->n] = vadd(cam->eye, vmul(d, hit.t));
+			pr->on[pr->n] = (unsigned char)lkf_on(sc, &hit);
+			pr->n++;
+		}
+	}
+}
+
+/* The grid of what a frame from cam, fw x fh of its pixels, saw of sc:
+ * corner to corner, where each ray met something (far off, where it met
+ * nothing), and what that rides on. */
+static void lkf_grid(struct lkf_frame *f, const struct lk_scene *sc, const struct lk_cam *cam,
+	int fw, int fh)
+{
+	f->door = sc->door;
+	f->key = sc->key;
+	for (int j = 0; j < LKF_GY; j++) {
+		for (int i = 0; i < LKF_GX; i++) {
+			int k = j * LKF_GX + i;
+			vec3 d = lk_cam_dir(cam, (double)i * fw / (LKF_GX - 1), (double)j * fh / (LKF_GY - 1));
+			struct lk_hit hit;
+			lk_intersect(sc, cam->eye, d, &hit);
+			vec3 p = vadd(cam->eye, vmul(d, hit.t < 1e8 ? hit.t : 60.0));
+			int on = hit.t < 1e8 ? lkf_on(sc, &hit) : LKF_FIXED;
+			f->ref[k] = on == LKF_FIXED ? p : lk_to_door(sc, p);
+			f->on[k] = (unsigned char)on;
+		}
+	}
+}
+
+/* where frame f's point k is, with the door and the key as sc has them */
+static vec3 lkf_point(const struct lkf_frame *f, int k, const struct lk_scene *sc)
+{
+	if (f->on[k] == LKF_DOOR) {
+		return lk_from_door(sc, f->ref[k]);
+	}
+	if (f->on[k] == LKF_KEY) {
+		return lk_from_door(sc, lkf_key_turn(f->ref[k], f->key, sc->key));
+	}
+	return f->ref[k];
+}
+
+/* How far the picture moves from pose a to pose b where one scale and a
+ * shift do not put it back -- the double edges a fade between frames made
+ * there would show -- in the screen's pixels: what a saw, carried to b
+ * (swung with the door, if on it), the one in eight that moved most; and
+ * in all, scale and shift and the rest (*all), as fast as the eye sees it
+ * go. */
+static double lkf_moved(const struct lkf_probe *pr, const struct lk_scene *sa,
+	const struct lk_cam *ca, const struct lk_scene *sb, const struct lk_cam *cb, int w, int h,
+	double *all, double *scale)
+{
+	*all = 0.0;
+	*scale = 1.0;
+	double X[LKF_PROBE_X * LKF_PROBE_Y], Y[LKF_PROBE_X * LKF_PROBE_Y];
+	double U[LKF_PROBE_X * LKF_PROBE_Y], V[LKF_PROBE_X * LKF_PROBE_Y];
+	int n = 0;
+	double mx = 0.0, my = 0.0, mu = 0.0, mv = 0.0;
+	for (int i = 0; i < pr->n; i++) {
+		vec3 q = lkf_carry(pr->p[i], pr->on[i], sa, sb);
+		double x, y, u, v;
+		if (!lk_project(ca, pr->p[i], &x, &y) || !lk_project(cb, q, &u, &v)
+			|| u < -0.25 * w || u > 1.25 * w || v < -0.25 * h || v > 1.25 * h) {
+			continue;
+		}
+		X[n] = x;
+		Y[n] = y;
+		U[n] = u;
+		V[n] = v;
+		mx += x;
+		my += y;
+		mu += u;
+		mv += v;
+		n++;
+	}
+	if (n < 3) {
+		return 0.0;
+	}
+	mx /= n;
+	my /= n;
+	mu /= n;
+	mv /= n;
+	double num = 0.0, den = 0.0;
+	for (int i = 0; i < n; i++) {
+		num += (X[i] - mx) * (U[i] - mu) + (Y[i] - my) * (V[i] - mv);
+		den += (X[i] - mx) * (X[i] - mx) + (Y[i] - my) * (Y[i] - my);
+	}
+	double s = den > 1e-9 && num > 0.0 ? num / den : 1.0;
+	*scale = s;
+	double r[LKF_PROBE_X * LKF_PROBE_Y];
+	for (int i = 0; i < n; i++) {
+		r[i] = hypot(mu + s * (X[i] - mx) - U[i], mv + s * (Y[i] - my) - V[i]);
+		*all += hypot(U[i] - X[i], V[i] - Y[i]) / n;
+	}
+	/* the one in eight that moved most, not the one ray that grazed something */
+	int k = n - 1 - n / 8;
+	for (int a = 0; a <= k; a++) {
+		int m = a;
+		for (int b = a + 1; b < n; b++) {
+			if (r[b] < r[m]) {
+				m = b;
+			}
+		}
+		double tmp = r[a];
+		r[a] = r[m];
+		r[m] = tmp;
+	}
+	return r[k];
+}
+
+/* the still a move begins or ends on, or -1 */
+static int lkf_first_still(int move)
+{
+	return move == DESK_LOCK_MOVE_LEAN ? LKF_REST
+		: move == DESK_LOCK_MOVE_FAIL || move == DESK_LOCK_MOVE_OPEN ? LKF_HOLD : -1;
+}
+
+static int lkf_last_still(int move)
+{
+	return move == DESK_LOCK_MOVE_LEAN ? LKF_HOLD
+		: move == DESK_LOCK_MOVE_WALK || move == DESK_LOCK_MOVE_FAIL
+		|| move == DESK_LOCK_MOVE_OUT ? LKF_REST : -1;
+}
+
+/* The door as job has it, in the pose of look, as desk_draw_lock puts
+ * it together, and the eye there (in the screen's w x h); NULL if there
+ * was not the memory, or else to be freed. */
+static struct lk_scene *lkf_scene(const struct lkf_job *job, struct desk_lock_look *look,
+	struct lk_cam *cam)
+{
+	const struct lkf_key *key = &job->key;
+	struct lk_scene *sc = malloc(sizeof *sc);
+	if (!sc) {
+		return NULL;
+	}
+	look->mood = job->mood;
+	look->steady = key->steady;
+	look->inside = job->pic;
+	look->inside_view = key->view;
+	lk_scene_for(sc, key->w, key->h, look);
+	lk_tex_of(&sc->sign, job->sign);
+	lk_tex_of(&sc->gold, job->gold);
+	lk_tex_of(&sc->plate, job->plate);
+	bool room = false;
+	if (job->pic) {
+		lk_tex_of(&sc->pic, job->pic);
+		if (look->open > 0.0 || look->push > 0.0) {
+			memcpy(sc->edge, job->edge, sizeof sc->edge);
+			if (job->room_on) {
+				sc->room = job->room;
+				room = true;
+			}
+		}
+	}
+	lk_camera_to(key->w, key->h, look, room ? &job->end : NULL, cam);
+	return sc;
+}
+
+/* One frame of the door: as job has it, the pose of look, at res of the
+ * screen's size, with a margin or not; and what it saw, for laying it
+ * where another eye would see the same. False if it was stopped. */
+static bool lkf_trace(const struct lkf_job *job, struct desk_lock_look *look, double res,
+	bool margin, struct lkf_frame *out)
+{
+	const struct lkf_key *key = &job->key;
+	struct lk_cam cam;
+	struct lk_scene *sc = lkf_scene(job, look, &cam);
+	if (!sc) {
+		return false;
+	}
+	int W = (int)ceil(key->w * key->k), H = (int)ceil(key->h * key->k);
+	int iw = (int)ceil(W * res), ih = (int)ceil(H * res);
+	int mx = margin ? (int)ceil(iw * LKF_MARGIN) : 0, my = margin ? (int)ceil(ih * LKF_MARGIN) : 0;
+	double s = key->k * res;
+	struct lk_cam fc = cam;
+	fc.f *= s;
+	fc.cx = cam.cx * s + mx;
+	fc.cy = cam.cy * s + my;
+	cairo_surface_t *img = lk_trace_framed(sc, &fc, iw + 2 * mx, ih + 2 * my, true, &g_lkf.stop,
+		mx, my, res);
+	if (!img || cairo_surface_status(img) != CAIRO_STATUS_SUCCESS) {
+		if (img) {
+			cairo_surface_destroy(img);
+		}
+		free(sc);
+		return false;
+	}
+	memset(out, 0, sizeof *out);
+	out->img = img;
+	out->cam = fc;
+	lkf_grid(out, sc, &fc, iw + 2 * mx, ih + 2 * my);
+	free(sc);
+	return true;
+}
+
+/* half the screen's size, and no more than LKF_PX pixels */
+static double lkf_res(const struct lkf_key *key)
+{
+	double W = ceil(key->w * key->k), H = ceil(key->h * key->k);
+	return fmin(0.5, sqrt(LKF_PX / fmax(W * H, 1.0)));
+}
+
+static struct lkf_frame *lkf_bake_still(const struct lkf_job *job, int which)
+{
+	struct desk_lock_look look;
+	memset(&look, 0, sizeof look);
+	if (which == LKF_HOLD) {
+		lk_move_pose(DESK_LOCK_MOVE_LEAN, lk_move_len(DESK_LOCK_MOVE_LEAN, false), false, &look);
+	}
+	struct lkf_frame *f = calloc(1, sizeof *f);
+	if (f && !lkf_trace(job, &look, 1.0, false, f)) {
+		free(f);
+		return NULL;
+	}
+	return f;
+}
+
+/* A move's film: what it changes counted along it, frames spread evenly
+ * by that, the stills it begins and ends on (taken here) and the room's
+ * picture as it is then (left NULL) where it goes in or comes out. */
+static struct lkf_film *lkf_bake_film(const struct lkf_job *job, int move,
+	struct lkf_frame *const still[LKF_STILLS])
+{
+	bool inside = job->key.view >= 0 && job->pic;
+	struct lkf_film *film = calloc(1, sizeof *film);
+	if (!film) {
+		return NULL;
+	}
+	film->key = job->key;
+	film->len = lk_move_len(move, inside);
+	/* how much of the picture moves, along the move, step by step */
+	int w = job->key.w, h = job->key.h;
+	double speed[LKF_STEPS + 1] = { 0.0 }, moved = 0.0;
+	struct lk_scene *sa = NULL;
+	struct lk_cam ca;
+	for (int i = 0; i <= LKF_STEPS; i++) {
+		struct desk_lock_look look;
+		memset(&look, 0, sizeof look);
+		lk_move_pose(move, film->len * i / LKF_STEPS, inside, &look);
+		struct lk_cam cb;
+		struct lk_scene *sb = lkf_scene(job, &look, &cb);
+		if (!sb || atomic_load(&g_lkf.stop)) {
+			free(sa);
+			free(sb);
+			free(film);
+			return NULL;
+		}
+		if (sa) {
+			/* Frames LKF_SPACING pixels of that apart -- or, where the
+			 * picture goes by fast, as far apart as it goes in a frame and
+			 * a half of the screen's: no eye sees a double edge in what is
+			 * a smear going by -- and no frame shown more than LKF_ZOOM
+			 * times the size it was made at */
+			struct lkf_probe pr;
+			lkf_probe(sa, &ca, w, h, &pr);
+			double all, scale, r = lkf_moved(&pr, sa, &ca, sb, &cb, w, h, &all, &scale);
+			double fast = all / (film->len / LKF_STEPS) / 60.0 * 1.5;
+			film->prog[i] = film->prog[i - 1] + r / fmax(LKF_SPACING, fast)
+				+ fabs(log(scale)) / log(LKF_ZOOM);
+			speed[i] = all / (film->len / LKF_STEPS);
+			moved += r / fmax(LKF_SPACING, fast);
+		}
+		free(sa);
+		sa = sb;
+		ca = cb;
+	}
+	free(sa);
+	double total = film->prog[LKF_STEPS];
+	int n = (int)ceil(total) + 1;
+	n = n < 2 ? 2 : n > LKF_MOST ? LKF_MOST : n;
+	if (getenv("DESK_LOCK_FILM_DUMP")) {
+		double top = 0.0;
+		for (int i = 0; i <= LKF_STEPS; i++) {
+			top = fmax(top, speed[i]);
+		}
+		printf("  move %d: %.1f frames' worth (%.1f moving, %.1f growing), %d frames; "
+			"fastest %.0f px/s\n", move, total, moved, total - moved, n, top);
+	}
+	film->f = calloc((size_t)n, sizeof *film->f);
+	if (!film->f) {
+		free(film);
+		return NULL;
+	}
+	film->n = n;
+	double res = lkf_res(&job->key);
+	int s0 = lkf_first_still(move), s1 = lkf_last_still(move);
+	for (int i = 0; i < n; i++) {
+		double p = total * i / (n - 1);
+		struct lkf_frame *f = &film->f[i];
+		int s = i == 0 ? s0 : i == n - 1 ? s1 : -1;
+		if (s >= 0) {
+			*f = *still[s];
+			cairo_surface_reference(f->img);
+		} else if ((i == 0 && move == DESK_LOCK_MOVE_OUT && inside)
+			|| (i == n - 1 && move == DESK_LOCK_MOVE_OPEN && inside)) {
+			/* the room, as it will be then (NULL), seen from where the walk
+			 * ends: what its picture saw */
+			struct desk_lock_look look;
+			memset(&look, 0, sizeof look);
+			lk_move_pose(move, i == 0 ? 0.0 : film->len, inside, &look);
+			struct lk_cam cam;
+			struct lk_scene *sc = lkf_scene(job, &look, &cam);
+			if (!sc) {
+				film->n = i;
+				lkf_film_free(film);
+				return NULL;
+			}
+			int pw = cairo_image_surface_get_width(job->pic);
+			int ph = cairo_image_surface_get_height(job->pic);
+			double ks = (double)pw / w;
+			cam.f *= ks;
+			cam.cx *= ks;
+			cam.cy *= ks;
+			memset(f, 0, sizeof *f);
+			f->cam = cam;
+			lkf_grid(f, sc, &cam, pw, ph);
+			free(sc);
+		} else {
+			/* where the picture goes by fast, a smaller frame: what goes by
+			 * at more than LKF_SLOW pixels a second is a smear anyway */
+			double t = lkf_time_at(film, p);
+			double v = speed[(int)lround(clampf(t / film->len, 0.0, 1.0) * LKF_STEPS)];
+			struct desk_lock_look look;
+			memset(&look, 0, sizeof look);
+			lk_move_pose(move, t, inside, &look);
+			if (!lkf_trace(job, &look, res * clampf(LKF_SLOW / fmax(v, 1.0), 0.6, 1.0), true, f)) {
+				film->n = i;
+				lkf_film_free(film);
+				return NULL;
+			}
+		}
+		f->p = p;
+	}
+	return film;
+}
+
+/* the next thing wanted and not there, stills first and then the moves
+ * in the order they come once the door is down (under the lock) */
+static int lkf_next(void)
+{
+	static const int ORDER[LKF_JOBS] = { LKF_REST, LKF_HOLD,
+		LKF_JOB_OF(DESK_LOCK_MOVE_LEAN), LKF_JOB_OF(DESK_LOCK_MOVE_OPEN),
+		LKF_JOB_OF(DESK_LOCK_MOVE_FAIL), LKF_JOB_OF(DESK_LOCK_MOVE_OUT),
+		LKF_JOB_OF(DESK_LOCK_MOVE_WALK), LKF_JOB_OF(DESK_LOCK_MOVE_NONE) };
+	for (int i = 0; i < LKF_JOBS; i++) {
+		int j = ORDER[i];
+		const struct lkf_job *job = &g_lkf.job[j];
+		if (!job->want || !job->sign) {
+			continue;
+		}
+		if (j < LKF_STILLS) {
+			if (!g_lkf.still[j] || !lkf_key_eq(&g_lkf.still_key[j], &job->key)) {
+				return j;
+			}
+			continue;
+		}
+		int move = j - LKF_STILLS;
+		if ((move == DESK_LOCK_MOVE_OPEN || move == DESK_LOCK_MOVE_OUT) && job->key.view >= 0
+			&& !job->pic) {
+			continue;   /* waiting for the room's picture */
+		}
+		const struct lkf_film *film = g_lkf.film[move];
+		if (film && lkf_key_eq(&film->key, &job->key)) {
+			continue;
+		}
+		/* the stills it begins and ends on first */
+		int s0 = lkf_first_still(move), s1 = lkf_last_still(move);
+		bool ready = true;
+		for (int e = 0; e < 2; e++) {
+			int s = e ? s1 : s0;
+			if (s < 0) {
+				continue;
+			}
+			struct lkf_key sk = job->key;
+			sk.view = -1;
+			sk.room = 0;
+			ready = ready && g_lkf.still[s] && lkf_key_eq(&g_lkf.still_key[s], &sk);
+		}
+		if (ready) {
+			return j;
+		}
+	}
+	return -1;
+}
+
+static const char *const LKF_NAME[LKF_JOBS] = { "standing at it", "leant in to the key",
+	"", "walking up to it", "leaning in to the key", "told no", "let in", "out of the room" };
+
+static void *lkf_worker(void *arg)
+{
+	(void)arg;
+	thread_to_the_back();
+	for (;;) {
+		pthread_mutex_lock(&g_lkf.lock);
+		int j = room_stopping() ? -1 : lkf_next();
+		if (j < 0) {
+			g_lkf.running = false;
+			g_lkf.busy = -1;
+			pthread_mutex_unlock(&g_lkf.lock);
+			return NULL;
+		}
+		struct lkf_job job;
+		lkf_job_copy(&job, &g_lkf.job[j]);
+		struct lkf_frame *still[LKF_STILLS];
+		for (int s = 0; s < LKF_STILLS; s++) {
+			/* what a film begins and ends on, held for it */
+			still[s] = g_lkf.still[s];
+			if (still[s]) {
+				cairo_surface_reference(still[s]->img);
+			}
+		}
+		struct lkf_frame held[LKF_STILLS];
+		for (int s = 0; s < LKF_STILLS; s++) {
+			if (still[s]) {
+				held[s] = *still[s];
+				still[s] = &held[s];
+			}
+		}
+		g_lkf.busy = j;
+		atomic_store(&g_lkf.stop, false);
+		pthread_mutex_unlock(&g_lkf.lock);
+
+		double t0 = room_now();
+		struct lkf_frame *made = NULL;
+		struct lkf_film *film = NULL;
+		if (j < LKF_STILLS) {
+			made = lkf_bake_still(&job, j);
+		} else {
+			film = lkf_bake_film(&job, j - LKF_STILLS, still);
+		}
+		double dt = room_now() - t0;
+		for (int s = 0; s < LKF_STILLS; s++) {
+			if (still[s]) {
+				cairo_surface_destroy(still[s]->img);
+			}
+		}
+
+		pthread_mutex_lock(&g_lkf.lock);
+		const struct lkf_job *now = &g_lkf.job[j];
+		bool keep = !atomic_load(&g_lkf.stop) && now->want && lkf_key_eq(&now->key, &job.key);
+		if (keep && made) {
+			lkf_frame_free(g_lkf.still[j]);
+			g_lkf.still[j] = made;
+			g_lkf.still_key[j] = job.key;
+			made = NULL;
+			room_log("the door, %s, made ahead: %dx%d in %.2f s", LKF_NAME[j],
+				cairo_image_surface_get_width(g_lkf.still[j]->img),
+				cairo_image_surface_get_height(g_lkf.still[j]->img), dt);
+		} else if (keep && film) {
+			int move = j - LKF_STILLS;
+			/* the room's picture and pictures were for making it */
+			struct lkf_job *jj = &g_lkf.job[j];
+			if (jj->pic) {
+				cairo_surface_destroy(jj->pic);
+				jj->pic = NULL;
+			}
+			for (int i = 0; i < 2; i++) {
+				if (jj->room.keep[i]) {
+					cairo_surface_destroy(jj->room.keep[i]);
+				}
+			}
+			memset(&jj->room, 0, sizeof jj->room);
+			jj->room_on = false;
+			const char *dump = getenv("DESK_LOCK_FILM_DUMP");
+			for (int i = 0; dump && i < film->n; i++) {
+				/* desk-preview --lock-film, to look at: the frames as made */
+				char fp[1024];
+				snprintf(fp, sizeof fp, "%s/%d-%02d.png", dump, move, i);
+				if (film->f[i].img) {
+					cairo_surface_write_to_png(film->f[i].img, fp);
+				}
+			}
+			lkf_film_free(g_lkf.film[move]);
+			g_lkf.film[move] = film;
+			film = NULL;
+			const struct lkf_frame *mid = &g_lkf.film[move]->f[g_lkf.film[move]->n / 2];
+			room_log("the door, %s, filmed ahead: %d frames (%dx%d in the middle) in %.2f s",
+				LKF_NAME[j],
+				g_lkf.film[move]->n, mid->img ? cairo_image_surface_get_width(mid->img) : 0,
+				mid->img ? cairo_image_surface_get_height(mid->img) : 0, dt);
+		}
+		g_lkf.busy = -1;
+		pthread_mutex_unlock(&g_lkf.lock);
+		lkf_frame_free(made);
+		lkf_film_free(film);
+		lkf_job_drop(&job);
+	}
+}
+
+/* under the lock: what is no longer wanted let go, and the thread started
+ * if there is anything to make */
+static void lkf_tidy(void)
+{
+	for (int s = 0; s < LKF_STILLS; s++) {
+		const struct lkf_job *job = &g_lkf.job[s];
+		if (g_lkf.still[s] && (!job->want || !lkf_key_eq(&g_lkf.still_key[s], &job->key))) {
+			lkf_frame_free(g_lkf.still[s]);
+			g_lkf.still[s] = NULL;
+		}
+	}
+	for (int m = 1; m < DESK_LOCK_MOVES; m++) {
+		const struct lkf_job *job = &g_lkf.job[LKF_JOB_OF(m)];
+		if (g_lkf.film[m] && (!job->want || !lkf_key_eq(&g_lkf.film[m]->key, &job->key))) {
+			lkf_film_free(g_lkf.film[m]);
+			g_lkf.film[m] = NULL;
+		}
+	}
+	if (g_lkf.busy >= 0 && !g_lkf.job[g_lkf.busy].want) {
+		atomic_store(&g_lkf.stop, true);
+	}
+	if (!g_lkf.running && lkf_next() >= 0) {
+		pthread_t th;
+		if (pthread_create(&th, NULL, lkf_worker, NULL) == 0) {
+			pthread_detach(th);
+			g_lkf.running = true;
+		}
+	}
+}
+
+unsigned desk_lock_films(int w, int h, const struct desk_lock_look *look, unsigned moves)
+{
+	/* DESK_LOCK_FILMS=off: traced as they go, as they were */
+	const char *off = getenv("DESK_LOCK_FILMS");
+	if (!look || w < 8 || h < 8 || desk_gfx_level() < DESK_GFX_MEDIUM
+		|| (off && !strcmp(off, "off"))) {
+		moves = 0;
+	}
+	bool want[LKF_JOBS] = { false };
+	for (int m = 1; m < DESK_LOCK_MOVES; m++) {
+		if (moves & (1u << m)) {
+			want[LKF_JOB_OF(m)] = true;
+			int s0 = lkf_first_still(m), s1 = lkf_last_still(m);
+			if (s0 >= 0) {
+				want[s0] = true;
+			}
+			if (s1 >= 0) {
+				want[s1] = true;
+			}
+		}
+	}
+	struct lkf_key base;
+	memset(&base, 0, sizeof base);
+	if (moves) {
+		double k = lk_scale_for(w, h);
+		/* the board and the plate, drawn as the door will draw them */
+		lk_prepare(w, h, k, look->name ? look->name : "", look->picture,
+			look->mood.set && (look->mood.decor & DESK_DECOR_BIRTHDAY));
+		struct lk_rig rig;
+		lk_rig_for(&look->mood, &rig);
+		lkf_key_of(&base, w, h, k, look, rig.key);
+	}
+	unsigned missing = 0;
+	pthread_mutex_lock(&g_lkf.lock);
+	for (int j = 0; j < LKF_JOBS; j++) {
+		struct lkf_job *job = &g_lkf.job[j];
+		if (!want[j]) {
+			/* the thread making it, if it is, has its own copy */
+			if (g_lkf.busy == j) {
+				atomic_store(&g_lkf.stop, true);
+			}
+			lkf_job_drop(job);
+			continue;
+		}
+		int move = j >= LKF_STILLS ? j - LKF_STILLS : DESK_LOCK_MOVE_NONE;
+		bool room = move == DESK_LOCK_MOVE_OUT
+			|| (move == DESK_LOCK_MOVE_OPEN && look->inside_view >= 0);
+		struct lkf_key key = base;
+		if (room) {
+			lkf_key_room(&key, look->inside_view, w, h);
+		}
+		bool same = job->want && lkf_key_eq(&job->key, &key);
+		if (same && (!room || job->pic)) {
+			continue;   /* asked for already, as it is */
+		}
+		bool made = j < LKF_STILLS ? g_lkf.still[j] && lkf_key_eq(&g_lkf.still_key[j], &key)
+			: g_lkf.film[move] && lkf_key_eq(&g_lkf.film[move]->key, &key);
+		if (!same) {
+			/* another door now (the weather, the screen): what is being
+			 * made for the last one is no use */
+			if (g_lkf.busy == j) {
+				atomic_store(&g_lkf.stop, true);
+			}
+			lkf_job_drop(job);
+		}
+		job->want = true;
+		job->key = key;
+		job->mood = look->mood;
+		if (!job->sign) {
+			job->sign = cairo_surface_reference(g_lock.sign);
+			job->gold = cairo_surface_reference(g_lock.gold);
+			job->plate = cairo_surface_reference(g_lock.plate);
+		}
+		if (room && !made && !job->pic) {
+			if (!look->inside) {
+				missing |= 1u << move;
+				continue;
+			}
+			job->pic = cairo_surface_reference(look->inside);
+			lk_edges(look->inside, job->edge);
+			job->room_on = lk_room_build(&job->room, w, h, key.view, look->inside, job->edge,
+				&job->end);
+			for (int i = 0; i < 2; i++) {
+				if (job->room.keep[i]) {
+					cairo_surface_reference(job->room.keep[i]);
+				}
+			}
+		}
+	}
+	lkf_tidy();
+	pthread_mutex_unlock(&g_lkf.lock);
+	return missing;
+}
+
+void desk_lock_films_settle(void)
+{
+	for (;;) {
+		pthread_mutex_lock(&g_lkf.lock);
+		bool running = g_lkf.running;
+		pthread_mutex_unlock(&g_lkf.lock);
+		if (!running) {
+			return;
+		}
+		struct timespec ts = { 0, 20 * 1000 * 1000 };
+		nanosleep(&ts, NULL);
+	}
+}
+
+/* where frame f's grid lands for an eye at cam with the door and the key as
+ * sc has them: x, y in the screen's pixels times k; ok where it lands at
+ * all (not behind the eye, not so near it that it is thrown off anywhere) */
+static void lkf_land(const struct lkf_frame *f, const struct lk_scene *sc, const struct lk_cam *cam,
+	double k, int w, int h, double *x, double *y, bool *ok)
+{
+	for (int i = 0; i < LKF_GX * LKF_GY; i++) {
+		vec3 p = lkf_point(f, i, sc);
+		vec3 q = rot_x(rot_y(vsub(p, cam->eye), -cam->yaw), -cam->pitch);
+		ok[i] = q.z < -0.02;
+		if (!ok[i]) {
+			continue;
+		}
+		x[i] = (cam->cx + cam->f * q.x / -q.z) * k;
+		y[i] = (cam->cy - cam->f * q.y / -q.z) * k;
+		ok[i] = fabs(x[i]) < 8.0 * w * k && fabs(y[i]) < 8.0 * h * k;
+	}
+}
+
+/* As near as one scale and a shift put frame f's grid where it lands (in
+ * the screen's pixels: its pixel x, y at s x + tx, s y + ty): what is laid
+ * under the grid, for what of it lands nowhere. */
+static void lkf_fit(const struct lkf_frame *f, const double *gx, const double *gy, const bool *ok,
+	int fw, int fh, double *s, double *tx, double *ty)
+{
+	double mx = 0.0, my = 0.0, mu = 0.0, mv = 0.0;
+	int n = 0;
+	for (int i = 0; i < LKF_GX * LKF_GY; i++) {
+		if (ok[i]) {
+			mx += (double)(i % LKF_GX) * fw / (LKF_GX - 1);
+			my += (double)(i / LKF_GX) * fh / (LKF_GY - 1);
+			mu += gx[i];
+			mv += gy[i];
+			n++;
+		}
+	}
+	if (n >= 3) {
+		mx /= n;
+		my /= n;
+		mu /= n;
+		mv /= n;
+		double num = 0.0, den = 0.0;
+		for (int i = 0; i < LKF_GX * LKF_GY; i++) {
+			if (ok[i]) {
+				double x = (double)(i % LKF_GX) * fw / (LKF_GX - 1) - mx;
+				double y = (double)(i / LKF_GX) * fh / (LKF_GY - 1) - my;
+				num += x * (gx[i] - mu) + y * (gy[i] - mv);
+				den += x * x + y * y;
+			}
+		}
+		if (den > 1e-9 && num > 0.0) {
+			*s = num / den;
+			*tx = mu - *s * mx;
+			*ty = mv - *s * my;
+			return;
+		}
+	}
+	*s = 1.0;
+	*tx = *ty = 0.0;
+	(void)f;
+}
+
+/* ---- laying a frame by its grid ----
+ *
+ * Each cell of a frame's grid is two triangles, each laid by the one
+ * affine map that puts its three corners where they land: what the frame
+ * saw, near and far, the door swung and the key turned, put where the eye
+ * now sees it. Done here, by the row, on every core: a cairo clip and
+ * paint for each of hundreds of triangles was the slower, and its edges,
+ * smoothed, showed as seams. */
+
+struct lkf_warp {
+	uint32_t *dst;
+	int dw, dh, dstride;          /* in pixels */
+	const uint32_t *src;
+	int sw, sh, sstride;
+	const double *x, *y;          /* where each point of the grid lands, in dst */
+	const bool *ok;
+	double cw, ch;                /* a cell of the grid, in src's pixels */
+	int next;
+	pthread_mutex_t lock;
+};
+
+static inline uint32_t lkf_mix(uint32_t a, uint32_t b, unsigned t)
+{
+	uint32_t rb = (((a & 0xff00ffu) * (256u - t) + (b & 0xff00ffu) * t) >> 8) & 0xff00ffu;
+	uint32_t ag = (((a >> 8) & 0xff00ffu) * (256u - t) + ((b >> 8) & 0xff00ffu) * t) & 0xff00ff00u;
+	return rb | ag;
+}
+
+static inline uint32_t lkf_fetch(const struct lkf_warp *wp, double x, double y)
+{
+	x = x < 0.0 ? 0.0 : x > wp->sw - 1 ? wp->sw - 1 : x;
+	y = y < 0.0 ? 0.0 : y > wp->sh - 1 ? wp->sh - 1 : y;
+	int x0 = (int)x, y0 = (int)y;
+	int x1 = x0 + 1 < wp->sw ? x0 + 1 : x0, y1 = y0 + 1 < wp->sh ? y0 + 1 : y0;
+	unsigned fx = (unsigned)((x - x0) * 256.0), fy = (unsigned)((y - y0) * 256.0);
+	const uint32_t *r0 = wp->src + (size_t)y0 * wp->sstride, *r1 = wp->src + (size_t)y1 * wp->sstride;
+	return lkf_mix(lkf_mix(r0[x0], r0[x1], fx), lkf_mix(r1[x0], r1[x1], fx), fy);
+}
+
+/* triangle a, b, c of the grid, the rows y0 to y1 of it */
+static void lkf_warp_tri(const struct lkf_warp *wp, int a, int b, int c, int y0, int y1)
+{
+	double ua = wp->x[a], va = wp->y[a], ub = wp->x[b], vb = wp->y[b], uc = wp->x[c], vc = wp->y[c];
+	double det = (ub - ua) * (vc - va) - (uc - ua) * (vb - va);
+	if (fabs(det) < 1e-6) {
+		return;
+	}
+	double vmin = fmin(va, fmin(vb, vc)), vmax = fmax(va, fmax(vb, vc));
+	double umin = fmin(ua, fmin(ub, uc)), umax = fmax(ua, fmax(ub, uc));
+	int iy0 = (int)floor(vmin), iy1 = (int)ceil(vmax);
+	int ix0 = (int)floor(umin), ix1 = (int)ceil(umax);
+	iy0 = iy0 < y0 ? y0 : iy0;
+	iy1 = iy1 > y1 ? y1 : iy1;
+	ix0 = ix0 < 0 ? 0 : ix0;
+	ix1 = ix1 > wp->dw ? wp->dw : ix1;
+	if (iy0 >= iy1 || ix0 >= ix1) {
+		return;
+	}
+	/* where each corner was in the frame */
+	double xa = (a % LKF_GX) * wp->cw, ya = (a / LKF_GX) * wp->ch;
+	double xb = (b % LKF_GX) * wp->cw, yb = (b / LKF_GX) * wp->ch;
+	double xc = (c % LKF_GX) * wp->cw, yc = (c / LKF_GX) * wp->ch;
+	/* the corners' weights at u, v, and how they go along a row */
+	double l1u = (vc - va) / det, l1v = -(uc - ua) / det;
+	double l2u = -(vb - va) / det, l2v = (ub - ua) / det;
+	const double eps = -1e-7;
+	/* how far in from the frame's edge it is laid fully: toward its edge
+	 * it gives way to the other frame, not to a step between the two */
+	const double feather = 1.0 / fmax(0.04 * wp->sw, 1.0);
+	for (int py = iy0; py < iy1; py++) {
+		double V = py + 0.5 - va, U = ix0 + 0.5 - ua;
+		double l1 = l1u * U + l1v * V, l2 = l2u * U + l2v * V;
+		uint32_t *row = wp->dst + (size_t)py * wp->dstride;
+		for (int px = ix0; px < ix1; px++, l1 += l1u, l2 += l2u) {
+			if (l1 < eps || l2 < eps || 1.0 - l1 - l2 < eps) {
+				continue;
+			}
+			double sx = xa + l1 * (xb - xa) + l2 * (xc - xa);
+			double sy = ya + l1 * (yb - ya) + l2 * (yc - ya);
+			double in = fmin(fmin(sx, sy), fmin(wp->sw - sx, wp->sh - sy)) * feather;
+			if (in <= 0.0) {
+				continue;
+			}
+			unsigned a = in >= 1.0 ? 255u : (unsigned)(in * in * (3.0 - 2.0 * in) * 255.0);
+			row[px] = (lkf_fetch(wp, sx - 0.5, sy - 0.5) & 0xffffffu) | (a << 24);
+		}
+	}
+}
+
+static void *lkf_warp_worker(void *arg)
+{
+	struct lkf_warp *wp = arg;
+	const int band = 16;
+	for (;;) {
+		pthread_mutex_lock(&wp->lock);
+		int y0 = wp->next;
+		wp->next += band;
+		pthread_mutex_unlock(&wp->lock);
+		if (y0 >= wp->dh) {
+			return NULL;
+		}
+		int y1 = y0 + band < wp->dh ? y0 + band : wp->dh;
+		for (int j = 0; j + 1 < LKF_GY; j++) {
+			for (int i = 0; i + 1 < LKF_GX; i++) {
+				int a = j * LKF_GX + i, b = a + 1, c = a + LKF_GX + 1, d = a + LKF_GX;
+				if (!wp->ok[a] || !wp->ok[b] || !wp->ok[c] || !wp->ok[d]) {
+					continue;
+				}
+				double v0 = fmin(fmin(wp->y[a], wp->y[b]), fmin(wp->y[c], wp->y[d]));
+				double v1 = fmax(fmax(wp->y[a], wp->y[b]), fmax(wp->y[c], wp->y[d]));
+				if (v1 < y0 || v0 > y1) {
+					continue;
+				}
+				lkf_warp_tri(wp, a, b, c, y0, y1);
+				lkf_warp_tri(wp, a, c, d, y0, y1);
+			}
+		}
+	}
+}
+
+/* frame f's picture into dst, by its grid landed at x, y */
+static void lkf_warp(cairo_surface_t *dst, cairo_surface_t *src, const double *x, const double *y,
+	const bool *ok)
+{
+	cairo_surface_flush(dst);
+	cairo_surface_flush(src);
+	struct lkf_warp wp = {
+		.dst = (uint32_t *)(void *)cairo_image_surface_get_data(dst),
+		.dw = cairo_image_surface_get_width(dst), .dh = cairo_image_surface_get_height(dst),
+		.dstride = cairo_image_surface_get_stride(dst) / 4,
+		.src = (const uint32_t *)(const void *)cairo_image_surface_get_data(src),
+		.sw = cairo_image_surface_get_width(src), .sh = cairo_image_surface_get_height(src),
+		.sstride = cairo_image_surface_get_stride(src) / 4,
+		.x = x, .y = y, .ok = ok,
+	};
+	wp.cw = (double)wp.sw / (LKF_GX - 1);
+	wp.ch = (double)wp.sh / (LKF_GY - 1);
+	pthread_mutex_init(&wp.lock, NULL);
+	int n = bake_threads();
+	pthread_t th[8];
+	int started = 0;
+	for (int i = 0; i + 1 < n; i++) {
+		if (pthread_create(&th[started], NULL, lkf_warp_worker, &wp) == 0) {
+			started++;
+		}
+	}
+	lkf_warp_worker(&wp);
+	for (int i = 0; i < started; i++) {
+		pthread_join(th[i], NULL);
+	}
+	pthread_mutex_destroy(&wp.lock);
+	cairo_surface_mark_dirty(dst);
+}
+
+/* The two frames laid, into one: each where it saw, as much as it is to
+ * be shown (mix of b) and as fully as it is in from its edge; the colour
+ * left unpremultiplied by the warp, made cairo's here. */
+struct lkf_merge {
+	uint32_t *a;
+	const uint32_t *b;      /* NULL: a alone */
+	int w, h, stride;
+	unsigned t;             /* 0..256, of b */
+	int next;
+	pthread_mutex_t lock;
+};
+
+static void *lkf_merge_worker(void *arg)
+{
+	struct lkf_merge *m = arg;
+	for (;;) {
+		pthread_mutex_lock(&m->lock);
+		int y0 = m->next;
+		m->next += 32;
+		pthread_mutex_unlock(&m->lock);
+		if (y0 >= m->h) {
+			return NULL;
+		}
+		int y1 = y0 + 32 < m->h ? y0 + 32 : m->h;
+		for (int y = y0; y < y1; y++) {
+			uint32_t *ra = m->a + (size_t)y * m->stride;
+			const uint32_t *rb = m->b ? m->b + (size_t)y * m->stride : NULL;
+			for (int x = 0; x < m->w; x++) {
+				uint32_t pa = ra[x], pb = rb ? rb[x] : 0;
+				unsigned aa = pa >> 24, ab = pb >> 24;
+				unsigned wa = (256u - m->t) * aa, wb = rb ? m->t * ab : 0u;
+				if (wa + wb == 0) {
+					ra[x] = 0;
+					continue;
+				}
+				unsigned al = aa > ab ? aa : ab;
+				uint32_t out = 0;
+				for (int c = 0; c < 24; c += 8) {
+					unsigned v = (((pa >> c) & 0xffu) * wa + ((pb >> c) & 0xffu) * wb) / (wa + wb);
+					out |= ((v * al + 127u) / 255u) << c;
+				}
+				ra[x] = out | (al << 24);
+			}
+		}
+	}
+}
+
+static void lkf_merge(cairo_surface_t *a, cairo_surface_t *b, double mix)
+{
+	struct lkf_merge m = {
+		.a = (uint32_t *)(void *)cairo_image_surface_get_data(a),
+		.b = b ? (const uint32_t *)(const void *)cairo_image_surface_get_data(b) : NULL,
+		.w = cairo_image_surface_get_width(a), .h = cairo_image_surface_get_height(a),
+		.stride = cairo_image_surface_get_stride(a) / 4,
+		.t = (unsigned)lround(clampf(mix, 0.0, 1.0) * 256.0),
+	};
+	pthread_mutex_init(&m.lock, NULL);
+	int n = bake_threads();
+	pthread_t th[8];
+	int started = 0;
+	for (int i = 0; i + 1 < n; i++) {
+		if (pthread_create(&th[started], NULL, lkf_merge_worker, &m) == 0) {
+			started++;
+		}
+	}
+	lkf_merge_worker(&m);
+	for (int i = 0; i < started; i++) {
+		pthread_join(th[i], NULL);
+	}
+	pthread_mutex_destroy(&m.lock);
+	cairo_surface_mark_dirty(a);
+}
+
+/* the pictures frames are laid into, kept from one frame to the next:
+ * clear (nothing laid there yet) where a frame's grid does not reach */
+static cairo_surface_t *g_lkf_canvas[2];
+
+static cairo_surface_t *lkf_canvas(int i, int W, int H)
+{
+	cairo_surface_t **c = g_lkf_canvas;
+	if (c[i] && (cairo_image_surface_get_width(c[i]) != W
+		|| cairo_image_surface_get_height(c[i]) != H)) {
+		cairo_surface_destroy(c[i]);
+		c[i] = NULL;
+	}
+	if (!c[i]) {
+		c[i] = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, W, H);
+	}
+	cairo_surface_flush(c[i]);
+	memset(cairo_image_surface_get_data(c[i]), 0,
+		(size_t)cairo_image_surface_get_stride(c[i]) * H);
+	cairo_surface_mark_dirty(c[i]);
+	return c[i];
+}
+
+/* and let go with the rest of the door's pictures (desk_lock_forget) */
+static void lkf_canvas_free(void)
+{
+	for (int i = 0; i < 2; i++) {
+		if (g_lkf_canvas[i]) {
+			cairo_surface_destroy(g_lkf_canvas[i]);
+			g_lkf_canvas[i] = NULL;
+		}
+	}
+}
+
+/* Frames a and b (b over a, mix of it; b NULL for a alone) laid for the
+ * eye at cam, the door and key as sc has them, onto cr: each by its grid.
+ * What one of them did not see (the wider view of an eye further back
+ * than a frame) is the other's alone; what neither saw, the nearer of
+ * them scaled and moved as near as one scale and a shift put it. */
+static void lkf_show(cairo_t *cr, int w, int h, double k, const struct lk_scene *sc,
+	const struct lk_cam *cam, const struct lkf_frame *a, const struct lkf_frame *b, double mix)
+{
+	int W = (int)lround(w * k), H = (int)lround(h * k);
+	double kk = (double)W / w;
+	const struct lkf_frame *two[2] = { a, b };
+	static double gx[2][LKF_GX * LKF_GY], gy[2][LKF_GX * LKF_GY];
+	static bool ok[2][LKF_GX * LKF_GY];
+	cairo_surface_t *canvas[2] = { NULL, NULL };
+	for (int e = 0; e < (b ? 2 : 1); e++) {
+		const struct lkf_frame *f = two[e];
+		lkf_land(f, sc, cam, kk, w, h, gx[e], gy[e], ok[e]);
+		if (e == (b && mix > 0.5 ? 1 : 0)) {
+			/* under it all */
+			int fw = cairo_image_surface_get_width(f->img);
+			int fh = cairo_image_surface_get_height(f->img);
+			double s, tx, ty;
+			lkf_fit(f, gx[e], gy[e], ok[e], fw, fh, &s, &tx, &ty);
+			cairo_save(cr);
+			cairo_scale(cr, 1.0 / kk, 1.0 / kk);
+			cairo_translate(cr, tx, ty);
+			cairo_scale(cr, s, s);
+			cairo_set_source_surface(cr, f->img, 0, 0);
+			cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_BILINEAR);
+			cairo_pattern_set_extend(cairo_get_source(cr), CAIRO_EXTEND_PAD);
+			cairo_paint(cr);
+			cairo_restore(cr);
+		}
+		canvas[e] = lkf_canvas(e, W, H);
+		lkf_warp(canvas[e], f->img, gx[e], gy[e], ok[e]);
+	}
+	lkf_merge(canvas[0], canvas[1], b ? mix : 0.0);
+	cairo_save(cr);
+	cairo_scale(cr, 1.0 / kk, 1.0 / kk);
+	cairo_set_source_surface(cr, canvas[0], 0, 0);
+	cairo_paint(cr);
+	cairo_restore(cr);
+}
+
+/* The door from what was made ahead, if it was: the film of the move
+ * under way, or the still the eye has stopped at. coming says that the
+ * still the eye is at is on its way (and the door is to be drawn again
+ * until it is there). */
+/* paint a still, as it is */
+static void lkf_still(cairo_t *cr, int w, int h, cairo_surface_t *img)
+{
+	cairo_save(cr);
+	cairo_scale(cr, (double)w / cairo_image_surface_get_width(img),
+		(double)h / cairo_image_surface_get_height(img));
+	cairo_set_source_surface(cr, img, 0, 0);
+	cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
+	cairo_paint(cr);
+	cairo_restore(cr);
+}
+
+/* the film of the move under way, if there is one and the eye is not yet
+ * where it ends (under the lock) */
+static const struct lkf_film *lkf_film_for(int w, int h, double kn, const struct desk_lock_look *lk,
+	unsigned mood)
+{
+	int move = lk->move;
+	if (move <= DESK_LOCK_MOVE_NONE || move >= DESK_LOCK_MOVES || !g_lkf.film[move]) {
+		return NULL;
+	}
+	struct lkf_key key;
+	lkf_key_of(&key, w, h, kn, lk, mood);
+	if (move == DESK_LOCK_MOVE_OPEN || move == DESK_LOCK_MOVE_OUT) {
+		lkf_key_room(&key, lk->inside ? lk->inside_view : -1, w, h);
+	}
+	const struct lkf_film *film = g_lkf.film[move];
+	return lkf_key_eq(&film->key, &key) ? film : NULL;
+}
+
+bool desk_lock_filmed(int w, int h, const struct desk_lock_look *lk)
+{
+	if (desk_gfx_level() < DESK_GFX_MEDIUM || w < 8 || h < 8 || (lk->push >= 0.999 && lk->inside)) {
+		return false;
+	}
+	struct lk_rig rig;
+	lk_rig_for(&lk->mood, &rig);
+	pthread_mutex_lock(&g_lkf.lock);
+	const struct lkf_film *film = lkf_film_for(w, h, lk_scale_for(w, h), lk, rig.key);
+	bool on = film && lk->move_t < film->len;
+	pthread_mutex_unlock(&g_lkf.lock);
+	return on;
+}
+
+static bool lkf_paint(cairo_t *cr, int w, int h, double kn, double kd,
+	const struct desk_lock_look *lk, const struct lk_scene *sc, const struct lk_cam *cam,
+	bool *coming)
+{
+	*coming = false;
+	if (desk_gfx_level() < DESK_GFX_MEDIUM) {
+		return false;
+	}
+	struct lkf_key key;
+	lkf_key_of(&key, w, h, kn, lk, sc->rig.key);
+	bool painted = false;
+	pthread_mutex_lock(&g_lkf.lock);
+	const struct lkf_film *film = lkf_film_for(w, h, kn, lk, sc->rig.key);
+	if (film && lk->move_t >= film->len && film->f[film->n - 1].img
+		&& lkf_last_still(lk->move) >= 0) {
+		/* where the move left the eye: the still it ends on, as it is */
+		lkf_still(cr, w, h, film->f[film->n - 1].img);
+		painted = true;
+	} else if (film) {
+		double p = lkf_prog_at(film, lk->move_t);
+		int i = 0;
+		while (i < film->n - 2 && film->f[i + 1].p <= p) {
+			i++;
+		}
+		double span = film->f[i + 1].p - film->f[i].p;
+		double mix = span > 1e-12 ? clampf((p - film->f[i].p) / span, 0.0, 1.0) : 1.0;
+		struct lkf_frame *two[2] = { NULL, NULL };
+		bool ok = true;
+		for (int e = 0; e < 2; e++) {
+			const struct lkf_frame *f = &film->f[i + e];
+			two[e] = malloc(sizeof *two[e]);
+			if (!two[e]) {
+				ok = false;
+				continue;
+			}
+			*two[e] = *f;
+			if (!f->img) {
+				/* the room's picture as it is now, where the walk in ends */
+				two[e]->img = lk->inside;
+				ok = ok && lk->inside;
+			}
+		}
+		if (ok) {
+			if (mix < 0.002) {
+				lkf_show(cr, w, h, kd, sc, cam, two[0], NULL, 0.0);
+			} else if (mix > 0.998) {
+				lkf_show(cr, w, h, kd, sc, cam, two[1], NULL, 0.0);
+			} else {
+				lkf_show(cr, w, h, kd, sc, cam, two[0], two[1], mix);
+			}
+			painted = true;
+		}
+		free(two[0]);
+		free(two[1]);
+	}
+	if (!painted) {
+		/* stopped at the door, or leant in to the key */
+		bool rest = lk->back == 0.0 && lk->lean == 0.0 && lk->turn == 0.0 && lk->open == 0.0
+			&& lk->push == 0.0;
+		bool hold = lk->back == 0.0 && lk->lean == 1.0 && lk->turn == DESK_LOCK_TRY
+			&& lk->open == 0.0 && lk->push == 0.0;
+		int s = rest ? LKF_REST : hold ? LKF_HOLD : -1;
+		if (s >= 0 && g_lkf.still[s] && lkf_key_eq(&g_lkf.still_key[s], &key)) {
+			lkf_still(cr, w, h, g_lkf.still[s]->img);
+			painted = true;
+		} else if (s >= 0 && g_lkf.job[s].want && lkf_key_eq(&g_lkf.job[s].key, &key)
+			&& g_lkf.running) {
+			*coming = true;
+		}
+	}
+	g_lkf.awaited = *coming;
+	pthread_mutex_unlock(&g_lkf.lock);
+	return painted;
+}
+
+/* a still the door is waiting on is being made */
+static bool lkf_awaited(void)
+{
+	pthread_mutex_lock(&g_lkf.lock);
+	bool w = g_lkf.awaited && g_lkf.running;
+	pthread_mutex_unlock(&g_lkf.lock);
+	return w;
 }
 
 /* ---- what is drawn over the trace ---- */
@@ -35838,11 +49607,15 @@ static struct {
 
 void desk_draw_lock(cairo_t *cr, int w, int h, const struct desk_lock_look *lk)
 {
+	/* as fine as it is drawn (k), and as fine as the door is for this
+	 * screen (kn: what its board and its films are made for, whatever size
+	 * the compositor lays a frame of a film at) */
 	double kx = 1.0, ky = 0.0;
 	cairo_user_to_device_distance(cr, &kx, &ky);
-	double k = clampf(hypot(kx, ky), 0.25, 3.0);
+	double k = clampf(hypot(kx, ky), 0.25, 3.0), kd = k, kn = lk_scale_for(w, h);
 	if (desk_gfx_level() == DESK_GFX_2D) {
 		k = fmax(k * 0.5, 0.25);   /* traced at half the screen's size, once */
+		kn = fmax(kn * 0.5, 0.25);
 	}
 	if (lk->push >= 0.999 && lk->inside) {
 		/* through: the room, as the compositor will show it */
@@ -35855,7 +49628,7 @@ void desk_draw_lock(cairo_t *cr, int w, int h, const struct desk_lock_look *lk)
 		cairo_restore(cr);
 		return;
 	}
-	lk_prepare(w, h, k, lk->name ? lk->name : "", lk->picture,
+	lk_prepare(w, h, kn, lk->name ? lk->name : "", lk->picture,
 		lk->mood.set && (lk->mood.decor & DESK_DECOR_BIRTHDAY));
 	struct lk_scene sc;
 	lk_scene_for(&sc, w, h, lk);
@@ -35873,15 +49646,20 @@ void desk_draw_lock(cairo_t *cr, int w, int h, const struct desk_lock_look *lk)
 	bool room = lk->inside && (lk->open > 0.0 || lk->push > 0.0)
 		&& lk_room_build(&sc.room, w, h, lk->inside_view, lk->inside, sc.edge, &end);
 	lk_camera_to(w, h, lk, room ? &end : NULL, &cam);
-	struct lk_frame *f = lk_frame_for(&sc, &cam, w, h, k, lk->inside);
-	if (f->img) {
-		double iw = cairo_image_surface_get_width(f->img), ih = cairo_image_surface_get_height(f->img);
-		cairo_save(cr);
-		cairo_scale(cr, w / iw, h / ih);
-		cairo_set_source_surface(cr, f->img, 0, 0);
-		cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_BILINEAR);
-		cairo_paint(cr);
-		cairo_restore(cr);
+	/* filmed ahead, or traced as it goes */
+	bool coming;
+	if (!lkf_paint(cr, w, h, kn, kd, lk, &sc, &cam, &coming)) {
+		struct lk_frame *f = lk_frame_for(&sc, &cam, w, h, k, lk->inside, coming);
+		if (f->img) {
+			double iw = cairo_image_surface_get_width(f->img);
+			double ih = cairo_image_surface_get_height(f->img);
+			cairo_save(cr);
+			cairo_scale(cr, w / iw, h / ih);
+			cairo_set_source_surface(cr, f->img, 0, 0);
+			cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_BILINEAR);
+			cairo_paint(cr);
+			cairo_restore(cr);
+		}
 	}
 	lk_cords(cr, &sc, &cam);
 	g_lk_view.have = true;

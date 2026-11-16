@@ -1274,6 +1274,111 @@ static int cmp_app(const void *pa, const void *pb)
 	return c ? c : strcmp(a->id, b->id);
 }
 
+/* ---- the favourites -------------------------------------------- *
+ *
+ * $XDG_CONFIG_HOME/desk/favorites: a desktop file id a line, in the order
+ * the flags went on. Read once, at the first scan; after that what is
+ * here is the truth, and each change is written whole. An entry that is
+ * not on is a sheet peeled while the favourites binder is in the hand: it
+ * is not written, but stays in the binder until desk_apps_fav_tidy. */
+
+struct fav_entry {
+	char id[96];
+	bool on;
+};
+static struct fav_entry *g_fav;
+static int g_nfav, g_capfav;
+static bool g_fav_loaded;
+static pthread_mutex_t g_fav_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static bool fav_dir(char *out, size_t n)
+{
+	const char *cfg = getenv("XDG_CONFIG_HOME");
+	if (cfg && *cfg == '/') {
+		return (size_t)snprintf(out, n, "%s/desk", cfg) < n;
+	}
+	const char *home = getenv("HOME");
+	return home && *home == '/' && (size_t)snprintf(out, n, "%s/.config/desk", home) < n;
+}
+
+static int fav_find_locked(const char *id)
+{
+	for (int i = 0; i < g_nfav; i++) {
+		if (strcmp(g_fav[i].id, id) == 0) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+static bool fav_add_locked(const char *id, bool on)
+{
+	if (g_nfav == g_capfav) {
+		int cap = g_capfav ? g_capfav * 2 : 16;
+		struct fav_entry *n = realloc(g_fav, (size_t)cap * sizeof *n);
+		if (!n) {
+			return false;
+		}
+		g_fav = n;
+		g_capfav = cap;
+	}
+	str_copy(g_fav[g_nfav].id, sizeof g_fav[g_nfav].id, id);
+	g_fav[g_nfav].on = on;
+	g_nfav++;
+	return true;
+}
+
+static void fav_load_locked(void)
+{
+	g_fav_loaded = true;
+	char dir[512], path[600];
+	if (!fav_dir(dir, sizeof dir)) {
+		return;
+	}
+	snprintf(path, sizeof path, "%s/favorites", dir);
+	FILE *f = fopen(path, "re");
+	if (!f) {
+		return;
+	}
+	char line[256];
+	while (fgets(line, sizeof line, f)) {
+		char *id = str_trim(line);
+		if (*id && *id != '#' && fav_find_locked(id) < 0 && !fav_add_locked(id, true)) {
+			break;
+		}
+	}
+	fclose(f);
+}
+
+static bool fav_save_locked(void)
+{
+	char dir[512], path[600], tmp[620];
+	if (!fav_dir(dir, sizeof dir)) {
+		return false;
+	}
+	mkdir(dir, 0700);   /* its parent, the config folder, is there or nothing is */
+	snprintf(path, sizeof path, "%s/favorites", dir);
+	snprintf(tmp, sizeof tmp, "%s.new", path);
+	FILE *f = fopen(tmp, "we");
+	if (!f) {
+		return false;
+	}
+	fputs("# DEsk's favourites: the programs flagged in the bookcase's binders,\n"
+		"# a desktop file id a line. The binder at the left end of the row.\n", f);
+	for (int i = 0; i < g_nfav; i++) {
+		if (g_fav[i].on) {
+			fprintf(f, "%s\n", g_fav[i].id);
+		}
+	}
+	bool ok = fflush(f) == 0 && fsync(fileno(f)) == 0;
+	ok = fclose(f) == 0 && ok;
+	if (!ok || rename(tmp, path) != 0) {
+		unlink(tmp);
+		return false;
+	}
+	return true;
+}
+
 /* ---- the published snapshot ------------------------------------ */
 
 struct snapshot {
@@ -1298,6 +1403,7 @@ static int g_nwatch;
 static void snapshot_free(struct snapshot *s)
 {
 	free((void *)s->pub.apps);
+	free((void *)s->pub.fav);
 	free(s->off);
 	free(s);
 }
@@ -1320,8 +1426,52 @@ static const struct desk_shelf_info SHELF_DEFAULT[DESK_SHELF_COUNT] = {
 	{ "Utilities",   "Utilities",   "道具",           0.296, 0.296, 0.290, 0, 0 },
 	{ "System",      "System",      "システム",       0.176, 0.176, 0.186, 0, 0 },
 };
+static const struct desk_shelf_info SHELF_FAV_INFO =
+	{ "Favorites",   "Favorites",   "お気に入り",     0.520, 0.380, 0.110, 0, 0 };
 
-static void publish(struct scan *sc)
+static const struct desk_app *g_fav_sort;
+
+static int cmp_fav(const void *pa, const void *pb)
+{
+	const struct desk_app *a = &g_fav_sort[*(const int *)pa], *b = &g_fav_sort[*(const int *)pb];
+	int c = strcoll(a->name, b->name);
+	return c ? c : strcmp(a->id, b->id);
+}
+
+/* Which of the apps are flagged, and the favourites binder's sheets: the
+ * flagged and the peeled-but-kept, by name. */
+static void fav_apply(struct desk_app *apps, int n, struct desk_app_list *pub)
+{
+	int *fav = n > 0 ? malloc((size_t)n * sizeof *fav) : NULL;
+	int nfav = 0;
+	pthread_mutex_lock(&g_fav_lock);
+	if (!g_fav_loaded) {
+		fav_load_locked();
+	}
+	for (int i = 0; i < n; i++) {
+		int k = fav_find_locked(apps[i].id);
+		apps[i].fav = k >= 0 && g_fav[k].on;
+		if (k >= 0 && fav) {
+			fav[nfav++] = i;
+		}
+	}
+	pthread_mutex_unlock(&g_fav_lock);
+	/* qsort's comparison has no argument of its own; one thread sorts at a
+	 * time (publish's callers do not overlap in the sort) */
+	static pthread_mutex_t sort_lock = PTHREAD_MUTEX_INITIALIZER;
+	pthread_mutex_lock(&sort_lock);
+	g_fav_sort = apps;
+	qsort(fav, (size_t)nfav, sizeof *fav, cmp_fav);
+	g_fav_sort = NULL;
+	pthread_mutex_unlock(&sort_lock);
+	pub->fav = fav;
+	pub->nfav = nfav;
+	pub->shelf[DESK_SHELF_FAV] = SHELF_FAV_INFO;
+	pub->shelf[DESK_SHELF_FAV].count = nfav;
+}
+
+/* scan: the scan's own generation, or 0 for a new one */
+static void publish(struct scan *sc, unsigned scan)
 {
 	/* the tombstones go, and what is kept off the shelves (an Exec, but
 	 * no shelf) goes to a list of its own */
@@ -1367,9 +1517,11 @@ static void publish(struct scan *sc)
 		}
 		si->count++;
 	}
+	fav_apply(sc->apps, sc->n, &s->pub);
 
 	pthread_mutex_lock(&g_lock);
 	s->pub.generation = ++g_generation;
+	s->pub.scan_generation = scan ? scan : s->pub.generation;
 	struct snapshot *old = g_snap;
 	g_snap = s;
 	pthread_mutex_unlock(&g_lock);
@@ -1433,7 +1585,7 @@ static void do_scan(void)
 	}
 	memcpy(g_watch, sc.watch, (size_t)sc.n_watch * sizeof *g_watch);
 	g_nwatch = sc.n_watch;
-	publish(&sc);
+	publish(&sc, 0);
 }
 
 static void *worker(void *arg)
@@ -1452,6 +1604,102 @@ static void worker_start(void)
 	} else {
 		do_scan();
 	}
+}
+
+/* The list as it is, published again with the favourites as they are now:
+ * a copy of what was scanned, shelved and kept off alike, through publish
+ * as if a scan had found it. */
+static void fav_republish(void)
+{
+	pthread_mutex_lock(&g_lock);
+	struct snapshot *old = g_snap;
+	if (old) {
+		old->refs++;
+	}
+	pthread_mutex_unlock(&g_lock);
+	if (!old) {
+		return;
+	}
+	struct scan sc;
+	memset(&sc, 0, sizeof sc);
+	int n = old->pub.n + old->n_off;
+	sc.apps = n > 0 ? malloc((size_t)n * sizeof *sc.apps) : NULL;
+	if (sc.apps || !n) {
+		if (old->pub.n) {
+			memcpy(sc.apps, old->pub.apps, (size_t)old->pub.n * sizeof *sc.apps);
+		}
+		if (old->n_off) {
+			memcpy(sc.apps + old->pub.n, old->off, (size_t)old->n_off * sizeof *sc.apps);
+		}
+		sc.n = sc.cap = n;
+		sc.n_files = old->pub.n_files;
+		sc.n_hidden = old->pub.n_hidden;
+		publish(&sc, old->pub.scan_generation);
+	}
+	desk_apps_release(&old->pub);
+}
+
+bool desk_apps_fav_set(const char *id, bool on, bool keep)
+{
+	if (!id || !*id) {
+		return false;
+	}
+	pthread_mutex_lock(&g_fav_lock);
+	if (!g_fav_loaded) {
+		fav_load_locked();
+	}
+	int k = fav_find_locked(id);
+	if (on && k < 0) {
+		fav_add_locked(id, true);
+	} else if (on) {
+		g_fav[k].on = true;
+	} else if (k >= 0 && keep) {
+		g_fav[k].on = false;
+	} else if (k >= 0) {
+		memmove(&g_fav[k], &g_fav[k + 1], (size_t)(g_nfav - k - 1) * sizeof *g_fav);
+		g_nfav--;
+	}
+	bool ok = fav_save_locked();
+	pthread_mutex_unlock(&g_fav_lock);
+	fav_republish();
+	return ok;
+}
+
+void desk_apps_fav_tidy(void)
+{
+	pthread_mutex_lock(&g_fav_lock);
+	int keep = 0;
+	for (int i = 0; i < g_nfav; i++) {
+		if (g_fav[i].on) {
+			g_fav[keep++] = g_fav[i];
+		}
+	}
+	bool gone = keep != g_nfav;
+	g_nfav = keep;
+	pthread_mutex_unlock(&g_fav_lock);
+	if (gone) {
+		fav_republish();
+	}
+}
+
+const struct desk_app *desk_shelf_app(const struct desk_app_list *list, int shelf, int idx)
+{
+	int i = desk_shelf_app_index(list, shelf, idx);
+	return i >= 0 ? &list->apps[i] : NULL;
+}
+
+int desk_shelf_app_index(const struct desk_app_list *list, int shelf, int idx)
+{
+	if (!list || idx < 0) {
+		return -1;
+	}
+	if (shelf == DESK_SHELF_FAV) {
+		return idx < list->nfav ? list->fav[idx] : -1;
+	}
+	if (shelf < 0 || shelf >= DESK_SHELF_COUNT || idx >= list->shelf[shelf].count) {
+		return -1;
+	}
+	return list->shelf[shelf].first + idx;
 }
 
 void desk_apps_init(bool async)
@@ -1540,6 +1788,12 @@ void desk_apps_shutdown(void)
 	free(g_userfile);
 	g_userfile = NULL;
 	g_nuserfile = 0;
+	pthread_mutex_lock(&g_fav_lock);
+	free(g_fav);
+	g_fav = NULL;
+	g_nfav = g_capfav = 0;
+	g_fav_loaded = false;
+	pthread_mutex_unlock(&g_fav_lock);
 }
 
 static struct desk_app_list g_empty;
@@ -1556,6 +1810,8 @@ const struct desk_app_list *desk_apps_acquire(void)
 		for (int i = 0; i < DESK_SHELF_COUNT; i++) {
 			g_empty.shelf[i] = SHELF_DEFAULT[i];
 		}
+		g_empty.shelf[DESK_SHELF_FAV] = SHELF_FAV_INFO;
+		g_empty.scan_generation = 0;
 		return &g_empty;
 	}
 	return &s->pub;
@@ -1623,8 +1879,9 @@ static const char *const STD_FILES[] = {
 	"thunar.desktop", "caja-browser.desktop", "pcmanfm.desktop", "nemo.desktop",
 	"pcmanfm-qt.desktop", "org.kde.dolphin.desktop", "org.gnome.Nautilus.desktop", NULL,
 };
+/* DEsk's own first; the others for those who have chosen or want them */
 static const char *const STD_EDITOR[] = {
-	"org.xfce.mousepad.desktop", "mousepad.desktop", "pluma.desktop", "featherpad.desktop",
+	"desk-notepad.desktop", "org.xfce.mousepad.desktop", "mousepad.desktop", "pluma.desktop", "featherpad.desktop",
 	"org.kde.kwrite.desktop", "org.kde.kate.desktop", "org.gnome.gedit.desktop",
 	"gedit.desktop", "org.gnome.TextEditor.desktop", NULL,
 };

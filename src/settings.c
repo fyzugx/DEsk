@@ -15,7 +15,8 @@
  *
  *   DEsk makes      what is drawn as the room and handled as its things --
  *                     windows as paper, the drawer, the shelves, the clock,
- *                     the Control Panel, the post box, the front door --
+ *                     the Control Panel, the post box, the front door, the
+ *                     calculator --
  *                     and what only the compositor can do: the keyboard
  *                     and pointer and their keys, the screens and their
  *                     power, going idle, the lock. Its own settings are on
@@ -88,6 +89,7 @@
 #include <string.h>
 #include <strings.h>
 #include <poll.h>
+#include <pwd.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -112,6 +114,10 @@
  * does the pad in front when the window first opens, PULL_WAIT after. */
 #define TAB_H 42.0
 #define PULL_S 0.50
+/* a sample chosen coming out of its fan, and the one before going back in */
+#define FAN_S 0.45
+/* and the order for it signed, before it is sent */
+#define SIGN_S 1.3
 #define PULL_WAIT 0.12
 static const char *const TAB_WORDS[2] = { "Shell", "System" };
 /* A pad has a sheet to each part of the form, hung from a wire along the
@@ -131,7 +137,7 @@ static const char *const TAB_WORDS[2] = { "Shell", "System" };
 #define FLIP_S 0.50         /* a sheet over the wire; a few together take longer */
 #define FLIP_EYE 0.30       /* the eye a little above the pad */
 #define FLIP_END (M_PI / 2.0 + FLIP_EYE + 0.35)   /* over, and out of sight */
-#define PAGES_MAX 12
+#define PAGES_MAX 16
 /* What is written on each part's note: as short as on a sticky note. */
 static const char *const NOTE_WORDS[][2] = {
 	{ "WINDOWS", "Windows" },
@@ -175,7 +181,13 @@ struct opens {
 /* What is on the form, in order: the key in shell.conf, what is printed,
  * for a choice its words and the values they are written as, and for an
  * action what it opens. */
-enum { S_SECTION, S_CHECK, S_CHOICE, S_DATE, S_ACTION };
+/* S_ASK: something for the desk to do now (Restore Desk), asked for once:
+ * words[0] on its button, vals[0] what it is asked (wm.c termites_requests),
+ * def 1 (an action's value: there is something to do) */
+/* S_SIGN: the order on its sheet signed (what the desk is made of): the
+ * choices of fans on the sheet are only ticked until then, and written when
+ * the signature is; words[0] what is pencilled where it is to be signed */
+enum { S_SECTION, S_CHECK, S_CHOICE, S_DATE, S_ACTION, S_ASK, S_SIGN };
 struct setting {
 	int kind;
 	const char *key;
@@ -201,9 +213,47 @@ static const char *const GFX_VALS[] = { "ultra", "high", "medium", "low", "2d" }
 static const char *const MOTION_WORDS[] = { "Brisk", "Normal", "Gentle", NULL };
 static const char *const MOTION_VALS[] = { "brisk", "normal", "gentle" };
 static const char *const BOUNCE_WORDS[] = { "Normal", "Low", "None", NULL };
+/* (2026-11-12, the owner: 夜間モードの強さを選べるように) */
+static const char *const NIGHT_WORDS[] = { "night|Light", "night|Normal", "night|Strong",
+	"night|Strongest", NULL };
+static const char *const NIGHT_VALS[] = { "light", "normal", "strong", "strongest" };
 static const char *const BOUNCE_VALS[] = { "normal", "low", "off" };
+static const char *const INK_WORDS[] = { "Faded", "Normal", "Dark", "Darkest", NULL };
+static const char *const INK_VALS[] = { "faded", "normal", "dark", "darkest" };
 static const char *const CLOCK_WORDS[] = { "24-hour", "12-hour", NULL };
 static const char *const CLOCK_VALS[] = { "24h", "12h" };
+/* what the desk is made of (shell.conf desk_wood, desk_stain) */
+static const char *const WOOD_WORDS[] = { "Walnut", "Oak", "Cherry", "Maple", "Ebony", NULL };
+static const char *const WOOD_VALS[] = { "walnut", "oak", "cherry", "maple", "ebony" };
+static const char *const STAIN_WORDS[] = { "Natural", "Honey", "Brown", "Dark brown", "Grey", NULL };
+static const char *const STAIN_VALS[] = { "natural", "honey", "brown", "dark", "grey" };
+/* the mat on the desk (shell.conf desk_mat, desk_mat_size) */
+static const char *const MAT_WORDS[] = { "None", "Green", "Navy", "Burgundy", "Charcoal", "Cream",
+	"Leather", "Linoleum", "Photo", "Clear", NULL };
+static const char *const MAT_VALS[] = { "none", "green", "navy", "burgundy", "charcoal", "cream",
+	"leather", "linoleum", "photo", "clear" };
+static const char *const MATSZ_WORDS[] = { "Small", "Medium", "Large", "Full", NULL };
+static const char *const MATSZ_VALS[] = { "small", "medium", "large", "full" };
+/* what lies under a clear one (desk_mat_under), and desk-mat asked for pictures
+ * for it (wm.c termites_requests) */
+static const char *const MATUNDER_WORDS[] = { "Free", "Full screen", NULL };
+static const char *const MATUNDER_VALS[] = { "free", "whole" };
+static const char *const MATPICK_WORDS[] = { "Lay them \xe2\x80\xba", NULL };
+static const char *const MATPICK_VALS[] = { "mat-pick" };
+static const char *const MATWHOLE_WORDS[] = { "Choose \xe2\x80\xba", NULL };
+static const char *const MATWHOLE_VALS[] = { "mat-whole" };
+/* the order for what the desk is made of, signed */
+static const char *const SIGN_WORDS[] = { "Sign here \xe2\x80\xba", NULL };
+/* Wood Maintenance (wm.c, termites_*) */
+static const char *const TERM_WAIT_WORDS[] = { "30 sec", "1 min", "2 min", "5 min", NULL };
+static const char *const TERM_WAIT_VALS[] = { "30", "60", "120", "300" };
+static const char *const TERM_LEVEL_WORDS[] = { "One curious guest", "A small colony",
+	"Call the exterminator", NULL };
+static const char *const TERM_LEVEL_VALS[] = { "curious", "colony", "infestation" };
+static const char *const RESTORE_WORDS[] = { "Restore \xe2\x80\xba", NULL };
+static const char *const RESTORE_VALS[] = { "restore" };
+static const char *const PREVIEW_WORDS[] = { "Show me \xe2\x80\xba", NULL };
+static const char *const PREVIEW_VALS[] = { "preview" };
 static const char *const SOUND_WORDS[] = { "Off", "Quiet", "Normal", NULL };
 static const char *const SOUND_VALS[] = { "off", "quiet", "normal" };
 /* each language in its own words, as a language is always offered */
@@ -225,6 +275,8 @@ static const char *const SCREEN_OFF_VALS[] = { "never", "1", "2", "5", "10", "15
 static const char *TERMINAL_WORDS[TERMINALS_MAX + 3] = { "Automatic", NULL };
 static const char *TERMINAL_VALS[TERMINALS_MAX + 3] = { "auto", NULL };
 static int g_terminals = 1;
+static const char *const KEYS_WORDS[] = { "With fingers and no keyboard", "Always", "Never", NULL };
+static const char *const KEYS_VALS[] = { "auto", "always", "never" };
 static const char *const SPEED_WORDS[] = { "Slow", "Normal", "Fast", NULL };
 static const char *const SPEED_VALS[] = { "slow", "normal", "fast" };
 /* the layouts most keyboards are; shell.conf takes any that xkb knows */
@@ -336,9 +388,57 @@ static const struct setting SETTINGS[] = {
 		LANG_WORDS, LANG_VALS, 0, NULL },
 	{ S_CHOICE, "clock", "Clock", "The clock on the desk, and the times on letters.",
 		CLOCK_WORDS, CLOCK_VALS, 0, NULL },
+	{ S_CHOICE, "binder_ink", "Binder labels",
+		"How dark the names on the binders in the bookcase are typed.",
+		INK_WORDS, INK_VALS, 1, NULL },
 	{ S_CHECK, "lights_at_login", "Bring the lamp up slowly at login",
 		"The room starts dark and the lamp comes up as it is made; the clock counts how far. "
 		"Off, it is lit at once.", NULL, NULL, 1, NULL },
+	/* the termites, which had a part of their own (WOOD MAINTENANCE), are the desk's
+	 * (2026-11-12, the owner: シロアリは机の項目に移動) */
+	{ S_CHECK, "termites_enabled", "Termites when the desk is left alone",
+		"After a while with nobody at it, termites come out onto the desk and nibble at it, "
+		"and run off when the pointer moves. Only a picture: no file or program is touched.",
+		NULL, NULL, 0, NULL },
+	{ S_CHOICE, "termites_wait", "Termites come", NULL, TERM_WAIT_WORDS, TERM_WAIT_VALS, 1,
+		NULL },
+	{ S_CHOICE, "termites_level", "How many", NULL, TERM_LEVEL_WORDS, TERM_LEVEL_VALS, 1,
+		NULL },
+	{ S_CHECK, "termites_chew_windows", "Nibble the edges of windows",
+		"A mark goes with its window when the window moves, and when it closes.", NULL, NULL,
+		1, NULL },
+	{ S_CHECK, "termites_chew_folded", "Nibble folded windows", NULL, NULL, NULL, 1, NULL },
+	{ S_CHECK, "termites_damage_persistent", "Keep their marks in the wood",
+		"Between visits and logins, until the desk is restored. Off, it is cleaned up when "
+		"they leave.", NULL, NULL, 1, NULL },
+	{ S_ASK, NULL, "Restore the desk", "Every mark gone, in the wood and on the paper.",
+		RESTORE_WORDS, RESTORE_VALS, 1, NULL },
+	{ S_ASK, NULL, "See them now", "They come out at once, and run off when the pointer "
+		"moves.", PREVIEW_WORDS, PREVIEW_VALS, 1, NULL },
+	{ S_SECTION, NULL, "MATERIAL", "What the desk is made of, ordered as from a joiner: a wood "
+		"and a colour ticked from the samples, and the order signed.", NULL, NULL, 0, NULL },
+	{ S_CHOICE, "desk_wood", "What the desk is made of", "Its top, sides and drawer.",
+		WOOD_WORDS, WOOD_VALS, 0, NULL },
+	{ S_CHOICE, "desk_stain", "Colour", "A stain over the wood, the grain showing through.",
+		STAIN_WORDS, STAIN_VALS, 0, NULL },
+	{ S_SIGN, NULL, "Apply", "Once signed, the lamp goes down while the room is traced again in it.",
+		SIGN_WORDS, NULL, 0, NULL },
+	{ S_SECTION, NULL, "MAT", NULL, NULL, NULL, 0, NULL },
+	{ S_CHOICE, "desk_mat", "Desk mat",
+		"A mat on the desk under the windows: felt, leather tooled in gold, linoleum, a photo, or "
+		"a clear sheet over all the desk with pictures under it.", MAT_WORDS, MAT_VALS, 0, NULL },
+	{ S_CHOICE, "desk_mat_size", "Size of the desk mat",
+		"How much of the desk it covers. A clear one covers all of it.", MATSZ_WORDS, MATSZ_VALS, 1,
+		NULL },
+	{ S_CHOICE, "desk_mat_under", "Under the clear mat",
+		"Free: pictures laid where you like; lift the mat by a corner to move them. Full screen: "
+		"one picture under all of it.", MATUNDER_WORDS, MATUNDER_VALS, 0, NULL },
+	{ S_ASK, NULL, "Pictures under the clear mat",
+		"Chosen from anywhere and laid under it where no window covers them; the mat is made a clear "
+		"one if it is not. Put one back in its envelope to take it away.", MATPICK_WORDS,
+		MATPICK_VALS, 1, NULL },
+	{ S_ASK, NULL, "The mat's picture", "For Photo, and for the clear mat in Full screen.",
+		MATWHOLE_WORDS, MATWHOLE_VALS, 1, NULL },
 	{ S_SECTION, NULL, "SCREEN", NULL, NULL, NULL, 0, NULL },
 	{ S_CHOICE, "screen_off", "Turn the screen off when the desk is left",
 		"After this long without a key or the pointer, the screen goes dark; either brings "
@@ -346,6 +446,12 @@ static const struct setting SETTINGS[] = {
 	{ S_CHECK, "lock_on_screen_off", "Lock the desk when the screen goes off",
 		"The desk is then behind the front door, and your password lets you back in. Off, a "
 		"key or the pointer is enough.", NULL, NULL, 1, NULL },
+	{ S_CHECK, "auto_rotate", "Turn the screen with the machine",
+		"On a tablet, or a laptop that folds back, the built-in screen turns the way it is held, "
+		"and its touch screen and pen with it.", NULL, NULL, 1, NULL },
+	{ S_CHOICE, "night_strength", "Night colours",
+		"How warm NIGHT on the Control Panel turns the screen: the blue taken down, and the "
+		"green a little.", NIGHT_WORDS, NIGHT_VALS, 1, NULL },
 	{ S_SECTION, NULL, "KEYBOARD AND POINTER", NULL, NULL, NULL, 0, NULL },
 	{ S_CHECK, "tap_to_click", "Tap the touchpad to click",
 		"Off, only its buttons click.", NULL, NULL, 1, NULL },
@@ -356,6 +462,9 @@ static const struct setting SETTINGS[] = {
 		0, NULL },
 	{ S_CHOICE, "pointer_speed", "Pointer speed", "For mice and touchpads alike.",
 		SPEED_WORDS, SPEED_VALS, 1, NULL },
+	{ S_CHOICE, "onscreen_keyboard", "Keyboard on the screen",
+		"When something is to be typed: it comes up by itself. It is in the drawer as well.",
+		KEYS_WORDS, KEYS_VALS, 0, NULL },
 	{ S_CHECK, "left_handed", "Buttons for the left hand",
 		"The main button on the right, the other on the left.", NULL, NULL, 0, NULL },
 	{ S_CHOICE, "keyboard_layout", "Keyboard layout",
@@ -390,9 +499,9 @@ static const struct setting SETTINGS[] = {
 	{ S_CHECK, "letter_sound", "Hear a letter arrive",
 		"A letter coming through the slot of the post box.", NULL, NULL, 1, NULL },
 	{ S_SECTION, NULL, "NETWORK AND DEVICES",
-		"Volume, brightness, the wireless and the lock are on the Control Panel. The rest of "
-		"the machine is set in programs made for it, each of which opens as a window on the "
-		"desk.", NULL, NULL, 0, NULL },
+		"Volume, brightness, the wireless, the lock, sleep, power saving, the night's warm "
+		"colours and how the screens are used are on the Control Panel. The rest of the "
+		"machine is set in programs made for it, each of which opens as a window on the desk.", NULL, NULL, 0, NULL },
 	{ S_ACTION, NULL, "Network connections",
 		"Wired, Wi-Fi and VPN connections, and their passwords.", NULL, NULL, 0, &O_NETWORK },
 	{ S_ACTION, NULL, "Bluetooth devices",
@@ -472,6 +581,7 @@ struct app {
 	struct wl_seat *seat;
 	struct wl_pointer *ptr;
 	struct wl_keyboard *kbd;
+	struct wl_touch *touch;
 	struct wl_surface *surf;
 	struct xdg_surface *xsurf;
 	struct xdg_toplevel *top;
@@ -484,10 +594,18 @@ struct app {
 	int w, h;
 	int pending_w, pending_h;
 	int pending_mode;         /* 0 its own size, 1 maximised or full screen, 2 resized */
+	int bound_w, bound_h;     /* the most the desk has room for (configure_bounds), or 0 */
 	int own_w, own_h;         /* its own size: the form's, or as the hand last left it */
 	bool configured_once, closed, dirty;
 	double px, py;
 	int pressed, pressed_opt;
+	/* a finger on the sheet (the first; the others are let be): where it went down, and
+	 * how far the sheet had been slid then; sliding it, once it has gone further up or
+	 * down than a tap goes */
+	bool finger;
+	int32_t finger_id;
+	double finger_x0, finger_y0, finger_scroll0;
+	bool finger_slides;
 	struct desk_form_row rows[N_SETTINGS];
 	const char *opt[N_SETTINGS][DESK_FORM_OPTS];   /* a choice's words, in the language */
 	int found[N_SETTINGS];            /* an action: which of its programs is there, or -1 */
@@ -514,6 +632,19 @@ struct app {
 	int flip_from, flip_to;
 	int flip_w, flip_h;      /* the window's size they were printed for */
 	cairo_surface_t *flip_img[PAGES_MAX];   /* the sheets turned, and the one under, printed */
+	bool fan_on;             /* a sample chosen coming out of its fan: its row on the
+	                          * sheet, the one chosen before, since when */
+	int fan_row, fan_was;
+	struct timespec fan_at;
+	/* The order for what the desk is made of (its sheet's fans and signature):
+	 * their rows; what is ticked and not yet signed for (-1, nothing: as the
+	 * desk is), and what shell.conf says the desk is; the signature being
+	 * written, since when; signed, and nothing ticked since. */
+	int ord_wood, ord_stain, ord_sign;
+	int tick_wood, tick_stain;
+	int conf_wood, conf_stain;
+	bool sign_on, signed_;
+	struct timespec sign_at;
 	bool anim_on;            /* a pad coming up out of the folder */
 	struct timespec anim_at;
 	double anim_wait;        /* how long after anim_at it starts */
@@ -687,12 +818,14 @@ static bool conf_has_key(const char *path, const char *key)
  * and by what. Read with the settings, so a desk started since is heard. */
 static bool g_on_cpu;
 static char g_render_name[256];
+static int g_gfx_unchosen = -1;   /* the level it starts at when no file chooses (wm.c gfx_unchosen) */
 static char g_cpu_warn[512];
 
 static void render_read(void)
 {
 	g_on_cpu = false;
 	g_render_name[0] = '\0';
+	g_gfx_unchosen = -1;
 	const char *run = getenv("XDG_RUNTIME_DIR"), *wd = getenv("WAYLAND_DISPLAY");
 	char path[512];
 	if (!run || !*run || !wd || !*wd || strchr(wd, '/')
@@ -709,6 +842,12 @@ static void render_read(void)
 			g_on_cpu = !strcmp(val, "yes");
 		} else if (line_is(line, "renderer", val, sizeof val)) {
 			snprintf(g_render_name, sizeof g_render_name, "%s", val);
+		} else if (line_is(line, "graphics_unchosen", val, sizeof val)) {
+			for (int i = 0; i < (int)(sizeof GFX_VALS / sizeof GFX_VALS[0]); i++) {
+				if (!strcmp(val, GFX_VALS[i])) {
+					g_gfx_unchosen = i;
+				}
+			}
 		}
 	}
 	fclose(f);
@@ -725,6 +864,10 @@ static void conf_read(const char *path, struct desk_form_row *rows)
 	for (int i = 0; i < N_SETTINGS; i++) {
 		if (SETTINGS[i].key) {
 			rows[i].value = SETTINGS[i].def;
+			/* chosen nowhere, the level the desk starts at for what draws it */
+			if (g_gfx_unchosen >= 0 && !strcmp(SETTINGS[i].key, "graphics")) {
+				rows[i].value = g_gfx_unchosen;
+			}
 		}
 	}
 	const char *dirs = getenv("XDG_CONFIG_DIRS");
@@ -928,6 +1071,24 @@ static void action_words(struct app *a, int i)
 	a->rows[i].options = a->opt[i];
 }
 
+/* Who signs it: the name the account goes by (its full name, without the
+ * office and telephone that may follow), or its login. */
+static const char *signer(void)
+{
+	static char name[64];
+	if (!name[0]) {
+		struct passwd *pw = getpwuid(getuid());
+		const char *full = pw && pw->pw_gecos ? pw->pw_gecos : "";
+		size_t n = strcspn(full, ",");
+		if (n > 0 && n < sizeof name) {
+			snprintf(name, sizeof name, "%.*s", (int)n, full);
+		} else {
+			snprintf(name, sizeof name, "%s", pw && pw->pw_name ? pw->pw_name : "DEsk");
+		}
+	}
+	return name;
+}
+
 /* The form in the language it says: what the language row is set to,
  * and every word on the form put into it. */
 static void words_apply(struct app *a)
@@ -967,6 +1128,18 @@ static void words_apply(struct app *a)
 		}
 		if (st->kind == S_ACTION) {
 			action_words(a, i);
+		}
+		if (st->kind == S_ASK) {
+			a->opt[i][0] = TR(st->words[0]);
+			a->opt[i][1] = NULL;
+			rows[i].options = a->opt[i];
+		}
+		if (st->kind == S_SIGN) {
+			/* the signature, and what is pencilled where it goes */
+			a->opt[i][0] = signer();
+			a->opt[i][1] = TR(st->words[0]);
+			a->opt[i][2] = NULL;
+			rows[i].options = a->opt[i];
 		}
 	}
 	if (a->top) {
@@ -1033,7 +1206,18 @@ static bool conf_write(const char *path, const char *key, const char *value)
 			"#                                      nothing fading or moving; for no GPU)\n"
 			"#   motion = brisk | normal | gentle   how long things that move take\n"
 			"#   camera_bounce = normal | low | off the view swinging past and settling\n"
+			"#   night_strength = light | normal | strong | strongest   how warm NIGHT makes it\n"
+			"#   auto_rotate = yes | no             the built-in screen turned the way it is held\n"
 			"#   clock = 24h | 12h\n"
+			"#   desk_wood = walnut | oak | cherry | maple | ebony   what the desk is made of\n"
+			"#   desk_stain = natural | honey | brown | dark | grey   over its wood\n"
+			"#                                      (ebony: not brown or dark)\n"
+			"#   desk_mat = none | green | navy | burgundy | charcoal | cream | #rrggbb | leather\n"
+			"#              | linoleum | photo | clear   a mat on the desk, under the windows\n"
+			"#   desk_mat_photo = /path/to/picture  the picture, for photo and a clear whole\n"
+			"#   desk_mat_size = small | medium | large | full, or a percentage\n"
+			"#   desk_mat_under = free | whole      under a clear mat: prints where you lay\n"
+			"#                                      them (desk-mat), or the picture all over\n"
 			"#   language = auto | en | ja | zh | ko | es | fr | de\n"
 			"#                                      the desk's words; auto: the locale's\n"
 			"#   lights_at_login = yes | no         the room starts dark, the lamp comes up\n"
@@ -1043,6 +1227,7 @@ static bool conf_write(const char *path, const char *key, const char *value)
 			"#   tap_to_click = yes | no            a touchpad: a tap is a click\n"
 			"#   natural_scrolling = yes | no       a touchpad: the page follows the fingers\n"
 			"#   natural_scrolling_mouse = yes | no a mouse: the page follows the wheel\n"
+			"#   onscreen_keyboard = auto | always | never  when it comes up by itself\n"
 			"#   pointer_speed = slow | normal | fast\n"
 			"#   left_handed = yes | no             the buttons the other way round\n"
 			"#   keyboard_layout = system | <xkb>   us, jp, de...; system: the machine's\n"
@@ -1578,9 +1763,94 @@ static double page_h(const struct app *a)
 
 static void scroll_clamp(struct app *a);
 
+/* ---- the order for what the desk is made of ----
+ *
+ * Its sheet is an order, as to a joiner: a wood and a colour are ticked
+ * from fans of samples of them (each wood under the colour ticked, the
+ * colour on each wood), and nothing is sent until the order is signed at
+ * its foot -- then both are written, and the desk, which reads them, brings
+ * its lamp down and makes the room again in them (wm.c relight_*). */
+
+/* the order's rows on the form, found once */
+static void order_rows(struct app *a)
+{
+	a->ord_wood = a->ord_stain = a->ord_sign = -1;
+	a->tick_wood = a->tick_stain = -1;
+	for (int i = 0; i < N_SETTINGS; i++) {
+		const char *key = SETTINGS[i].key;
+		if (key && !strcmp(key, "desk_wood")) {
+			a->ord_wood = i;
+		} else if (key && !strcmp(key, "desk_stain")) {
+			a->ord_stain = i;
+		} else if (SETTINGS[i].kind == S_SIGN) {
+			a->ord_sign = i;
+		}
+	}
+}
+
+/* A colour not made for the wood ticked (desk_stain_offered: ebony is not
+ * stained brown or dark brown): natural on the order instead, as the desk
+ * would be made. */
+static void order_stain_made(struct app *a)
+{
+	int stain = a->rows[a->ord_stain].value;
+	if (desk_stain_offered(a->rows[a->ord_wood].value, stain)) {
+		return;
+	}
+	a->rows[a->ord_stain].value = DESK_STAIN_NATURAL;
+	a->tick_stain = a->conf_stain == DESK_STAIN_NATURAL ? -1 : DESK_STAIN_NATURAL;
+}
+
+/* shell.conf read again: what the desk is made of, and what is ticked over it
+ * still shown ticked -- unless it is what the desk is now */
+static void order_read(struct app *a)
+{
+	if (a->ord_wood < 0 || a->ord_stain < 0) {
+		return;
+	}
+	a->conf_wood = a->rows[a->ord_wood].value;
+	a->conf_stain = a->rows[a->ord_stain].value;
+	if (!desk_stain_offered(a->conf_wood, a->conf_stain)) {
+		/* as the desk takes it */
+		a->conf_stain = DESK_STAIN_NATURAL;
+		a->rows[a->ord_stain].value = DESK_STAIN_NATURAL;
+	}
+	if (a->tick_wood == a->conf_wood) {
+		a->tick_wood = -1;
+	}
+	if (a->tick_stain == a->conf_stain) {
+		a->tick_stain = -1;
+	}
+	if (a->tick_wood >= 0) {
+		a->rows[a->ord_wood].value = a->tick_wood;
+	}
+	if (a->tick_stain >= 0) {
+		a->rows[a->ord_stain].value = a->tick_stain;
+	}
+	order_stain_made(a);
+}
+
+/* Its fans of samples, each in the other's choice; and its foot: 0 nothing
+ * to sign, 1 something ticked to sign for, 2 signed. */
+static void swatches_apply(struct app *a)
+{
+	if (a->ord_wood < 0 || a->ord_stain < 0) {
+		return;
+	}
+	a->rows[a->ord_wood].swatch = DESK_SWATCH_WOOD;
+	a->rows[a->ord_wood].swatch_with = a->rows[a->ord_stain].value;
+	a->rows[a->ord_stain].swatch = DESK_SWATCH_STAIN;
+	a->rows[a->ord_stain].swatch_with = a->rows[a->ord_wood].value;
+	if (a->ord_sign >= 0) {
+		a->rows[a->ord_sign].value = a->sign_on || a->signed_ ? 2
+			: a->tick_wood >= 0 || a->tick_stain >= 0 ? 1 : 0;
+	}
+}
+
 /* The form on the sheet on top measured again, after its words changed. */
 static void form_measure(struct app *a)
 {
+	swatches_apply(a);
 	a->total = desk_shell_form_height(ink_w(a), &a->form);
 	scroll_clamp(a);
 }
@@ -1596,6 +1866,7 @@ static struct desk_shell_form page_form(const struct app *a, int pg)
 	/* shell.conf, at the foot of the sheets whose settings are kept there */
 	f.kept_in = a->pg_tab[pg] == 0 ? a->path : NULL;
 	f.on_paper = true;
+	f.fan_row = -1;
 	return f;
 }
 
@@ -2186,6 +2457,7 @@ static void draw_tabs(cairo_t *cr, struct app *a)
 }
 
 static void draw(struct app *a);
+static void sign_done(struct app *a);
 
 /* The other pad brought to the front: pulled up out of the folder over
  * the one there, as a sheet from the bottom of a pile. */
@@ -2257,6 +2529,22 @@ static void draw(struct app *a)
 	if (!a->configured_once || a->closed) {
 		return;
 	}
+	swatches_apply(a);
+	/* a sample on its way out of its fan */
+	double ft = a->fan_on ? since(&a->fan_at) / (FAN_S * g_slow) : 1.0;
+	if (ft >= 1.0) {
+		a->fan_on = false;
+	}
+	a->form.fan_row = a->fan_on ? a->fan_row : -1;
+	a->form.fan_was = a->fan_was;
+	a->form.fan_t = a->fan_on ? fmax(ft, 1e-3) : 1.0;
+	/* the order being signed, and sent once it is */
+	double st = a->sign_on ? since(&a->sign_at) / (SIGN_S * g_slow) : 1.0;
+	if (a->sign_on && st >= 1.0) {
+		sign_done(a);
+	}
+	swatches_apply(a);
+	a->form.sign_t = a->sign_on ? fmax(st, 1e-3) : 1.0;
 	struct buffer *b = !a->buf[0].busy ? &a->buf[0] : !a->buf[1].busy ? &a->buf[1] : NULL;
 	if (!b) {
 		a->dirty = true;   /* both with the compositor: when one comes back */
@@ -2352,6 +2640,14 @@ static void xsurf_configure(void *data, struct xdg_surface *xs, uint32_t serial)
 	} else {
 		a->w = a->own_w;
 		a->h = a->own_h;
+		/* and never more than the desk has room for (a small screen: 800 by 600, the form is
+		 * 694 by 660 and it slides; 2026-11-12) */
+		if (a->bound_w > 0 && a->w > a->bound_w) {
+			a->w = a->bound_w < 320 ? 320 : a->bound_w;
+		}
+		if (a->bound_h > 0 && a->h > a->bound_h) {
+			a->h = a->bound_h < 180 ? 180 : a->bound_h;
+		}
 	}
 	bool first = !a->configured_once;
 	a->configured_once = true;
@@ -2390,9 +2686,18 @@ static void top_close(void *data, struct xdg_toplevel *t)
 	a->closed = true;
 }
 
+static void top_bounds(void *data, struct xdg_toplevel *t, int32_t w, int32_t h)
+{
+	(void)t;
+	struct app *a = data;
+	a->bound_w = w;
+	a->bound_h = h;
+}
+
 static const struct xdg_toplevel_listener top_listener = {
 	.configure = top_configure,
 	.close = top_close,
+	.configure_bounds = top_bounds,
 };
 
 /* ---- the hand ---- */
@@ -2495,6 +2800,34 @@ static void set_value(struct app *a, int i, int v)
 	}
 	const char *word = st->kind == S_DATE ? date : st->kind == S_CHECK ? (v ? "yes" : "no")
 		: st->vals[v];
+	if (i == a->ord_wood || i == a->ord_stain) {
+		/* ticked on the order: taken out of its fan, and written only when
+		 * the order is signed */
+		if (a->sign_on) {
+			return;
+		}
+		int on_sheet = i - a->pg_first[a->page];
+		if (on_sheet >= 0 && on_sheet < a->pg_n[a->page]) {
+			a->fan_on = true;
+			a->fan_row = on_sheet;
+			a->fan_was = a->rows[i].value;
+			clock_gettime(CLOCK_MONOTONIC, &a->fan_at);
+		}
+		if (i == a->ord_wood) {
+			a->tick_wood = v == a->conf_wood ? -1 : v;
+		} else {
+			a->tick_stain = v == a->conf_stain ? -1 : v;
+		}
+		a->rows[i].value = v;
+		order_stain_made(a);
+		a->signed_ = false;
+		form_measure(a);
+		desk_sound_set_level(sound_level(a));
+		desk_sound_play(DESK_SND_PENCIL_TICK, (a->px / (a->w > 0 ? a->w : 1)) * 0.6 - 0.3, 1.0,
+			0.0);
+		draw(a);
+		return;
+	}
 	if (conf_write(a->path, st->key, word)) {
 		a->rows[i].value = v;
 		if (st->kind == S_DATE) {
@@ -2650,9 +2983,61 @@ static void opening_done(struct app *a)
 	}
 }
 
+/* Something asked of the desk (S_ASK): one word, in a file of its own
+ * beside the desk's socket, which the desk reads within a second and takes
+ * away (wm.c termites_requests). */
+static bool ask_desk(const char *word)
+{
+	const char *run = getenv("XDG_RUNTIME_DIR"), *sock = getenv("WAYLAND_DISPLAY");
+	if (!run || !sock || strchr(sock, '/')) {
+		return false;
+	}
+	char path[512];
+	snprintf(path, sizeof path, "%s/%s.termites", run, sock);
+	FILE *f = fopen(path, "we");
+	if (!f) {
+		return false;
+	}
+	bool ok = fprintf(f, "%s\n", word) > 0;
+	return fclose(f) == 0 && ok;
+}
+
+/* The order signed: the signature written along its line (draw), and then
+ * what is ticked written to shell.conf, for the desk to make. */
+static void sign_begin(struct app *a)
+{
+	if (a->sign_on || (a->tick_wood < 0 && a->tick_stain < 0)) {
+		return;
+	}
+	a->sign_on = true;
+	clock_gettime(CLOCK_MONOTONIC, &a->sign_at);
+	desk_sound_set_level(sound_level(a));
+	desk_sound_play(DESK_SND_PENCIL_RING, (a->px / (a->w > 0 ? a->w : 1)) * 0.6 - 0.3, 0.8, 0.0);
+	draw(a);
+}
+
+/* Both written, as the order shows them -- the colour too when only the
+ * wood was ticked, so that one shell.conf had that is not made for the new
+ * wood, or was not for the old, is not what it is made in. */
+static void sign_done(struct app *a)
+{
+	a->sign_on = false;
+	a->signed_ = true;
+	int wood = a->rows[a->ord_wood].value, stain = a->rows[a->ord_stain].value;
+	if (conf_write(a->path, "desk_stain", STAIN_VALS[stain])) {
+		a->conf_stain = stain;
+		a->tick_stain = -1;
+	}
+	if (conf_write(a->path, "desk_wood", WOOD_VALS[wood])) {
+		a->conf_wood = wood;
+		a->tick_wood = -1;
+	}
+	desk_sound_play(DESK_SND_PENCIL_TICK, 0.0, 0.7, 0.0);
+}
+
 /* What a click, or Space, on row i does: a box is ticked or not; a choice
  * goes to the word under the hand, or the next one; an action opens what
- * it opens. */
+ * it opens; something asked of the desk is asked. */
 static void use_row(struct app *a, int i, int opt)
 {
 	if (i < 0 || i >= N_SETTINGS) {
@@ -2666,11 +3051,22 @@ static void use_row(struct app *a, int i, int opt)
 		while (st->words[n]) {
 			n++;
 		}
-		set_value(a, i, opt >= 0 ? opt : (a->rows[i].value + 1 + n) % n);
+		int v = opt >= 0 ? opt : (a->rows[i].value + 1 + n) % n;
+		/* on the order, the next colour that is made for the wood */
+		while (i == a->ord_stain && a->ord_wood >= 0
+			&& !desk_stain_offered(a->rows[a->ord_wood].value, v)) {
+			v = (v + 1) % n;
+		}
+		set_value(a, i, v);
 	} else if (st->kind == S_DATE) {
 		date_step(a, i, opt);
 	} else if (st->kind == S_ACTION) {
 		open_row(a, i);
+	} else if (st->kind == S_ASK && ask_desk(st->vals[0])) {
+		desk_sound_play(DESK_SND_PENCIL_TICK, 0.0, 1.0, 0.0);
+		draw(a);
+	} else if (st->kind == S_SIGN) {
+		sign_begin(a);
 	}
 }
 
@@ -2706,6 +3102,71 @@ static void show_row(struct app *a, int i)
 	scroll_clamp(a);
 }
 
+/* The hand (the pointer, or a finger) come onto the sheet at x, y. */
+static void hand_comes(struct app *a, double x, double y)
+{
+	/* someone may have changed it in the meantime, by hand, or installed
+	 * something */
+	conf_read(a->path, a->rows);
+	order_read(a);
+	actions_find(a);
+	if (a->icons_done) {
+		icons_apply(a);
+	}
+	words_apply(a);
+	form_measure(a);
+	a->px = x;
+	a->py = y;
+	a->form.hover = -2;
+	track(a);
+}
+
+/* and gone again */
+static void hand_goes(struct app *a)
+{
+	a->pressed = -1;
+	a->form.hover = -1;
+	a->form.hover_opt = -1;
+	a->tab_hover = a->note_hover = -1;
+	draw(a);
+}
+
+/* Taken hold of where the hand is, and let go there: the left button, or a finger's tap. */
+static void hand_press(struct app *a)
+{
+	int opt;
+	a->pressed = row_at(a, &opt);
+	a->pressed_opt = opt;
+	a->tab_pressed = tab_at(a);
+	a->note_pressed = note_at(a);
+}
+
+static void hand_release(struct app *a)
+{
+	int opt;
+	int at = row_at(a, &opt);
+	int tab = tab_at(a);
+	int note = note_at(a);
+	/* let go where it was taken hold of: a tab; a note; a box or an
+	 * action anywhere on its row, a choice on the same word */
+	if (tab >= 0 && tab == a->tab_pressed) {
+		tab_switch(a, tab);
+	} else if (note >= 0 && note == a->note_pressed) {
+		page_turn(a, note);
+	} else if (at >= 0 && at == a->pressed) {
+		int i = a->pg_first[a->page] + at;
+		int kind = SETTINGS[i].kind;
+		if (kind == S_CHECK || kind == S_ACTION || kind == S_ASK || kind == S_SIGN) {
+			use_row(a, i, -1);
+		} else if (opt >= 0 && opt == a->pressed_opt) {
+			use_row(a, i, opt);
+		}
+	}
+	a->pressed = -1;
+	a->tab_pressed = -1;
+	a->note_pressed = -1;
+}
+
 static void ptr_enter(void *data, struct wl_pointer *p, uint32_t serial, struct wl_surface *s,
 	wl_fixed_t x, wl_fixed_t y)
 {
@@ -2726,19 +3187,7 @@ static void ptr_enter(void *data, struct wl_pointer *p, uint32_t serial, struct 
 	(void)p;
 	(void)serial;
 #endif
-	/* someone may have changed it in the meantime, by hand, or installed
-	 * something */
-	conf_read(a->path, a->rows);
-	actions_find(a);
-	if (a->icons_done) {
-		icons_apply(a);
-	}
-	words_apply(a);
-	form_measure(a);
-	a->px = wl_fixed_to_double(x);
-	a->py = wl_fixed_to_double(y);
-	a->form.hover = -2;
-	track(a);
+	hand_comes(a, wl_fixed_to_double(x), wl_fixed_to_double(y));
 }
 
 static void ptr_leave(void *data, struct wl_pointer *p, uint32_t serial, struct wl_surface *s)
@@ -2746,12 +3195,7 @@ static void ptr_leave(void *data, struct wl_pointer *p, uint32_t serial, struct 
 	(void)p;
 	(void)serial;
 	(void)s;
-	struct app *a = data;
-	a->pressed = -1;
-	a->form.hover = -1;
-	a->form.hover_opt = -1;
-	a->tab_hover = a->note_hover = -1;
-	draw(a);
+	hand_goes(data);
 }
 
 static void ptr_motion(void *data, struct wl_pointer *p, uint32_t time, wl_fixed_t x,
@@ -2775,34 +3219,10 @@ static void ptr_button(void *data, struct wl_pointer *p, uint32_t serial, uint32
 	if (button != BTN_LEFT) {
 		return;
 	}
-	int opt;
-	int at = row_at(a, &opt);
-	int tab = tab_at(a);
-	int note = note_at(a);
 	if (state == WL_POINTER_BUTTON_STATE_PRESSED) {
-		a->pressed = at;
-		a->pressed_opt = opt;
-		a->tab_pressed = tab;
-		a->note_pressed = note;
+		hand_press(a);
 	} else {
-		/* let go where it was taken hold of: a tab; a note; a box or an
-		 * action anywhere on its row, a choice on the same word */
-		if (tab >= 0 && tab == a->tab_pressed) {
-			tab_switch(a, tab);
-		} else if (note >= 0 && note == a->note_pressed) {
-			page_turn(a, note);
-		} else if (at >= 0 && at == a->pressed) {
-			int i = a->pg_first[a->page] + at;
-			int kind = SETTINGS[i].kind;
-			if (kind == S_CHECK || kind == S_ACTION) {
-				use_row(a, i, -1);
-			} else if (opt >= 0 && opt == a->pressed_opt) {
-				use_row(a, i, opt);
-			}
-		}
-		a->pressed = -1;
-		a->tab_pressed = -1;
-		a->note_pressed = -1;
+		hand_release(a);
 	}
 }
 
@@ -2846,6 +3266,128 @@ static const struct wl_pointer_listener ptr_listener = {
 	.motion = ptr_motion,
 	.button = ptr_button,
 	.axis = ptr_axis,
+};
+
+/* A finger (2026-11-12, the owner: シェルの設定がタッチ非対応 -- the sheet only listened to the
+ * pointer). The first finger down is the hand: a tap takes hold of what is under it and lets go
+ * there, as a click does; moved up or down further than a tap goes, it slides the sheet with it,
+ * one to one, and takes hold of nothing. The others are let be. */
+#define FINGER_SLOP 10.0
+
+static void touch_down(void *data, struct wl_touch *t, uint32_t serial, uint32_t time,
+	struct wl_surface *surface, int32_t id, wl_fixed_t x, wl_fixed_t y)
+{
+	(void)t;
+	(void)serial;
+	(void)time;
+	(void)surface;
+	struct app *a = data;
+	if (a->finger) {
+		return;
+	}
+	a->finger = true;
+	a->finger_id = id;
+	a->finger_slides = false;
+	a->finger_x0 = wl_fixed_to_double(x);
+	a->finger_y0 = wl_fixed_to_double(y);
+	a->finger_scroll0 = a->form.scroll;
+	hand_comes(a, a->finger_x0, a->finger_y0);
+	hand_press(a);
+}
+
+static void touch_motion(void *data, struct wl_touch *t, uint32_t time, int32_t id,
+	wl_fixed_t x, wl_fixed_t y)
+{
+	(void)t;
+	(void)time;
+	struct app *a = data;
+	if (!a->finger || id != a->finger_id) {
+		return;
+	}
+	a->px = wl_fixed_to_double(x);
+	a->py = wl_fixed_to_double(y);
+	if (!a->finger_slides && fabs(a->py - a->finger_y0) > FINGER_SLOP) {
+		/* a slide, not a tap: nothing is pressed after all */
+		a->finger_slides = true;
+		a->pressed = -1;
+		a->tab_pressed = -1;
+		a->note_pressed = -1;
+	}
+	if (a->finger_slides) {
+		/* the sheet goes the way the finger does */
+		double before = a->form.scroll;
+		a->form.scroll = a->finger_scroll0 + (a->finger_y0 - a->py);
+		scroll_clamp(a);
+		if (a->form.scroll != before) {
+			track(a);
+			draw(a);
+			return;
+		}
+	}
+	track(a);
+}
+
+static void touch_up(void *data, struct wl_touch *t, uint32_t serial, uint32_t time,
+	int32_t id)
+{
+	(void)t;
+	(void)serial;
+	(void)time;
+	struct app *a = data;
+	if (!a->finger || id != a->finger_id) {
+		return;
+	}
+	a->finger = false;
+	if (!a->finger_slides) {
+		hand_release(a);
+	}
+	/* (no pointer is left resting on the sheet: nothing is lit for one) */
+	hand_goes(a);
+}
+
+static void touch_frame(void *data, struct wl_touch *t)
+{
+	(void)data;
+	(void)t;
+}
+
+static void touch_cancel(void *data, struct wl_touch *t)
+{
+	(void)t;
+	struct app *a = data;
+	a->finger = false;
+	a->tab_pressed = -1;
+	a->note_pressed = -1;
+	hand_goes(a);
+}
+
+static void touch_shape(void *data, struct wl_touch *t, int32_t id, wl_fixed_t major,
+	wl_fixed_t minor)
+{
+	(void)data;
+	(void)t;
+	(void)id;
+	(void)major;
+	(void)minor;
+}
+
+static void touch_orientation(void *data, struct wl_touch *t, int32_t id,
+	wl_fixed_t orientation)
+{
+	(void)data;
+	(void)t;
+	(void)id;
+	(void)orientation;
+}
+
+static const struct wl_touch_listener touch_listener = {
+	.down = touch_down,
+	.up = touch_up,
+	.motion = touch_motion,
+	.frame = touch_frame,
+	.cancel = touch_cancel,
+	.shape = touch_shape,
+	.orientation = touch_orientation,
 };
 
 static void kbd_keymap(void *data, struct wl_keyboard *k, uint32_t format, int32_t fd,
@@ -3006,6 +3548,10 @@ static void seat_caps(void *data, struct wl_seat *seat, uint32_t caps)
 		a->kbd = wl_seat_get_keyboard(seat);
 		wl_keyboard_add_listener(a->kbd, &kbd_listener, a);
 	}
+	if ((caps & WL_SEAT_CAPABILITY_TOUCH) && !a->touch) {
+		a->touch = wl_seat_get_touch(seat);
+		wl_touch_add_listener(a->touch, &touch_listener, a);
+	}
 }
 
 static void seat_name(void *data, struct wl_seat *seat, const char *name)
@@ -3036,7 +3582,8 @@ static void reg_global(void *data, struct wl_registry *reg, uint32_t name, const
 	} else if (!strcmp(iface, wl_shm_interface.name)) {
 		a->shm = wl_registry_bind(reg, name, &wl_shm_interface, 1);
 	} else if (!strcmp(iface, xdg_wm_base_interface.name)) {
-		a->wm = wl_registry_bind(reg, name, &xdg_wm_base_interface, 1);
+		/* 4 for configure_bounds: the room there is on the desk for it */
+		a->wm = wl_registry_bind(reg, name, &xdg_wm_base_interface, version < 4 ? version : 4);
 		xdg_wm_base_add_listener(a->wm, &wm_listener, a);
 	} else if (!strcmp(iface, zxdg_decoration_manager_v1_interface.name)) {
 		a->decoman = wl_registry_bind(reg, name, &zxdg_decoration_manager_v1_interface, 1);
@@ -3130,8 +3677,9 @@ int main(int argc, char **argv)
 			st->kind == S_SECTION ? DESK_FORM_SECTION
 				: st->kind == S_CHECK ? DESK_FORM_CHECK
 				: st->kind == S_DATE ? DESK_FORM_DATE
-				: st->kind == S_ACTION ? DESK_FORM_ACTION : DESK_FORM_CHOICE,
-			st->label, st->note, st->words, st->def, NULL, NULL };
+				: st->kind == S_ACTION || st->kind == S_ASK ? DESK_FORM_ACTION
+				: st->kind == S_SIGN ? DESK_FORM_SIGN : DESK_FORM_CHOICE,
+			st->label, st->note, st->words, st->def, NULL, NULL, 0, 0 };
 		a.found[i] = -2;
 	}
 	/* the machine's page: from the heading of the part whose rows open
@@ -3163,7 +3711,9 @@ int main(int argc, char **argv)
 	a.tab_open[1] = a.tab_pg0[1];
 	a.tab_hover = a.tab_pressed = -1;
 	conf_path(a.path, sizeof a.path);
+	order_rows(&a);
 	conf_read(a.path, a.rows);
+	order_read(&a);
 	if (g_date_had_year && !check) {
 		/* a birthday kept with its year: the month and the day only, from
 		 * now on, and the year gone from the file */
@@ -3251,8 +3801,8 @@ int main(int argc, char **argv)
 		struct pollfd pfd = { fd, POLLIN, 0 };
 		/* sooner, when an action's "Opening…" is to go */
 		int ms = 1000;
-		if (a.anim_on || a.flip_on) {
-			ms = 16;   /* a pad coming up, sheets going over */
+		if (a.anim_on || a.flip_on || a.fan_on || a.sign_on) {
+			ms = 16;   /* a pad coming up, sheets going over, a sample coming out, a signature */
 		} else if (a.opening >= 0) {
 			double left = OPENING_S - since(&a.opened_at);
 			ms = left <= 0.0 ? 0 : left < 1.0 ? (int)ceil(left * 1000.0) : 1000;
@@ -3273,6 +3823,7 @@ int main(int argc, char **argv)
 		}
 		if (conf_changed(a.path, &a.seen, &a.seen_size, &a.seen_there)) {
 			conf_read(a.path, a.rows);
+			order_read(&a);
 			words_apply(&a);
 			form_measure(&a);
 			desk_sound_set_level(sound_level(&a));
@@ -3286,7 +3837,7 @@ int main(int argc, char **argv)
 			icons_apply(&a);
 			draw(&a);
 		}
-		if (a.dirty || a.anim_on || a.flip_on) {
+		if (a.dirty || a.anim_on || a.flip_on || a.fan_on || a.sign_on) {
 			draw(&a);
 		}
 	}

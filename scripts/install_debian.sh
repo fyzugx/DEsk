@@ -170,8 +170,10 @@ build|keyboards (xkbcommon)|libxkbcommon-dev
 build|touchpads and mice (libinput)|libinput-dev
 build|drawing (cairo)|libcairo2-dev
 build|letters: emoji and every script (Pango)|libpango1.0-dev
+build|the text editor (GTK 3)|libgtk-3-dev
 build|drawing: pixels (pixman)|libpixman-1-dev
 build|typefaces (fontconfig)|libfontconfig-dev
+build|typefaces: read for handwriting (FreeType)|libfreetype-dev
 build|the display (libdrm)|libdrm-dev
 build|the room on the GPU (EGL)|libegl-dev
 build|the room on the GPU (GLES)|libgles-dev
@@ -195,6 +197,7 @@ run|typefaces: emoji (Noto Color Emoji)|fonts-noto-color-emoji
 run|typefaces: the desk'"'"'s own (URW base 35)|fonts-urw-base35
 run|typefaces: handwriting on the memo pad (Klee)|fonts-klee
 run|screenshots (Print)|grim
+run|films (Print with a tape in the camera)|ffmpeg
 run|screenshots: a part of the screen|slurp
 run|screenshots: onto the clipboard|wl-clipboard
 run|screenshots: the letter saying where it went|libnotify-bin

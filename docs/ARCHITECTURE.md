@@ -56,6 +56,7 @@ These decide most questions about where code goes and what it does.
 | `desk-ctl` | `scripts/desk-ctl` (sh) | `reset` and `logout` for a stuck desk, from a terminal or another VT. |
 | `desk-window` | `scripts/desk-window` (sh) | Runs DEsk as a window inside the current session. |
 | `desk-screenshot` | `scripts/desk-screenshot` (sh) | Print / Alt+Print: grim, a file in Pictures, and a letter. |
+| `desk-record` | `scripts/desk-record` (sh) | Print with a tape in the camera: the desk's frames (on its stdin) and the speakers' sound made into a film by ffmpeg, an .mp4 in Videos/Screencasts, and a letter. |
 
 ### How a session starts
 
@@ -80,10 +81,15 @@ Logging out, restarting and powering off ask every window to close first
 
 | File | Lines | Role |
 | --- | ---: | --- |
-| `src/wm.c` | ~22,500 | The compositor: wlroots setup, outputs, input, windows (xdg-shell and Xwayland), the scene layers, every interactive part of the desk (drawer, views, calendar, memo, post box, tray, clock, lock, Ctrl+Alt+Del), `shell.conf` and `displays.conf`, multi-screen. |
+| `src/wm.c` | ~32,600 | The compositor: wlroots setup, outputs, input, windows (xdg-shell and Xwayland), the scene layers, every interactive part of the desk (drawer, views, calendar, memo, post box, tray, clock, lock, Ctrl+Alt+Del), `shell.conf` and `displays.conf`, multi-screen. |
+| `src/touch.c` | ~210 | What fingers have done, knowing nothing of the desk: tap, held, set off, how fast, and a whole hand. `wm.c` says what that means. |
+| `src/thing-keyboard.c`, `src/keyboardart.c` | ~2,800 | The keyboard on the screen, a typewriter, a thing with its fingers to itself: its keys read from the keymap and sent as a real keyboard's, its pictures cut and printed for the screen; and the sheet in it, written on with a pen. |
+| `src/handwriting.c` | ~1,000 | Reading what is written, a character at a time, against a table made from the machine's own faces. |
 | `src/draw.c` | ~34,900 | The drawing library: the ray-traced room (C reference tracer, GPU driver, cache), and every cairo-drawn thing (paper, frames, folding, crumpling, the book and binders, the Control Panel's live parts, letters, the calendar and memo pad, Shell Settings' form, the front door). |
 | `src/room.glsl` | ~2,400 | The room's tracer as a GLES 3.00 fragment shader: a line-for-line port of the C in `draw.c`, which stays the reference. |
 | `src/gpu.c` | ~800 | Offscreen EGL/GBM/GLES context for the shader; picks the render node the screen uses. |
+| `src/looks.c`, `src/lookfile.c` | ~360 | What a program kept in the drawer can be given to look like: its card or its icon, the drawer's own things, the desk's, and looks, folders of a picture and a few words (docs/LOOKS.md) — the desk's (`art/looks/looks.py`), everyone's and the person's own. The card they are chosen on is draw.c's, the choosing wm.c's. |
+| `src/look.c` | ~490 | `desk-look` (GTK 3): looks made from a picture chosen from anywhere (the card of looks runs it) or named, from a model in Blender (`art/looks/bake.py`), and one checked. |
 | `src/apps.c` | ~2,000 | Scans `.desktop` files on a worker thread, files them on eight shelves, finds icons, picks the standard terminal/browser/files/editor, launches programs. |
 | `src/i18n.c` | ~1,700 | The word table (seven languages) and month/day names. `include/i18n.h` explains the scheme. |
 | `src/fonts.c` | ~280 | Which typeface each role uses, per CJK region. |
@@ -92,21 +98,34 @@ Logging out, restarting and powering off ask every window to close first
 | `src/post.c` | ~440 | The notification daemon (`org.freedesktop.Notifications`). |
 | `src/tray.c` | ~1,350 | StatusNotifierItem watcher and host (the tray slips). |
 | `src/media.c` | ~800 | MPRIS client (the clock's MEDIA page, media keys). |
+| `src/saver.c` | ~240 | `org.freedesktop.ScreenSaver`'s Inhibit: X11 and Flatpak programs keeping the screen lit. |
 | `src/ime.c` | ~760 | Which input method is on (IBus, fcitx5). |
 | `src/session.c` | ~470 | Autostart and the session environment. |
 | `src/lock.c`, `src/user.c` | | PAM password check (on a thread); the user's name and picture for the door. |
-| `src/power.c` | | Log out / restart / power off through logind. |
+| `src/power.c` | | Restart / power off / suspend through logind, and the power-profiles daemon's profile (POWER SAVE). |
 | `src/panel.c` | ~950 | The Control Panel's readings from `/proc`, `/sys` and the mixer. |
 | `src/occasion.c` | ~530 | Dates (birthday, the new year...) and the weather at the door (open-meteo.com, opt-out). |
 | `src/cards.c` | ~190 | Which DRM cards wlroots takes: the firmware's framebuffer (simpledrm) left out when a real card with screens is there. |
 | `src/agenda.c`, `src/memo.c` | | The calendar's notes and the memo pad's sheets, saved under `$XDG_DATA_HOME/desk`. |
 | `src/camera.c` | ~260 | Whether a camera or microphone is in use (the clock's two lamps). |
+| `src/rec.c` | ~310 | Print's films: the frames the desk reads off the screen handed to `desk-record` down a socket, on a thread of their own. |
 | `src/sfx.c`, `src/sound.c` | ~2,750 | Every sound synthesised at start-up, and a mixer thread that plays them (libpulse, or ALSA loaded at run time). |
 | `src/preview.c`, `src/gputest.c` | | Developer tools (see §2). |
+| `include/thing.h`, `src/things.c` | ~250 | What a thing that is not paper is, what it can ask of the desk, and the list of them ([THINGS.md](THINGS.md)). |
+| `src/thing-phone.c`, `src/phone.c` | ~900 | The phone a picture-in-picture window is the screen of: its keys and its deck, and its pictures laid. |
+| `src/thing-notebook.c`, `src/notebook.c`, `src/nbink.c`, `src/notepad.c` | ~6,200 | The notebook desk-notepad's window is the top sheet of, with its pencil case, and desk-notepad itself: typed in and written in with a pen, its pages turned. |
+| `src/thing-calc.c`, `src/calc.c`, `src/calcart.c` | ~2,200 | The calculator: on the desk, its working out, and its pictures. |
 | `include/desk.h` | ~1,200 | The drawing library's API, as used by `wm.c`, `settings.c`, `index.c` and the tools. |
 | `include/compat.h` | | Carries settings and data over from DEsk's old name (DeskWM). |
 | `protocols/` | | wlr-output-management and wlr-output-power-management XML. |
-| `scripts/` | | Installers, session scripts, build helpers (`glsl2c.py`, `room-key.py`), `check-words.py` (the translation test). |
+| `scripts/` | | Installers, session scripts, build helpers (`glsl2c.py`, `room-key.py`, `bin2c.py`), `check-words.py` (the translation test). |
+| `art/camera/` | | Print's camera, and the tape that goes into it: `camera.py` models, lights and renders them in Blender (4.5) and packs the pieces into `camera.png`, with where each piece is in `camera-map.h`; and the camera as it lies in the drawer, `camera-top.png` (`camera-top.h`). Both are committed and built in (`bin2c.py`), so building needs no Blender; only remaking the picture does. |
+| `art/case.py` | | What the pictures of the things on the desk have in common, made in Blender (4.5): the room as the tracer has it (its camera for a screen of a given shape over a desk of a given width, its lamps, the desk and the wall, the room's light and its tone curve); how a thing is rendered with the shadow it throws on the desk; and how the pictures are put out, a PNG to each shape of screen and width of desk in `THING-case.bin` with what each is of in `THING-case.h`. draw.c lays the ones either side of the screen over the desk's sheet, plane by plane through homographies (`room_cases_paint`, under everything else drawn over the desk). Committed and built in like the camera's. |
+| `art/kit.py` | | What the pictures of a thing lying on the desk have in common, made in Blender (4.5): materials, shapes, keys, lights, one eye, polish ([THINGS.md](THINGS.md)). |
+| `art/phone/`, `art/notebook/`, `art/calc/` | | The script and the pictures of each thing. |
+| `art/clock/` | | The clock's case on the desk, which the desk's sheet leaves out: `clock.py` builds it to the tracer's measurements and renders it with `case.py` for twelve shapes of screen (`clock-case.bin`, `clock-case.h`). |
+| `art/post/` | | The post box at the back right of the desk, door shut, which the desk's sheet leaves out: `post.py` builds it to the tracer's measurements and renders it with `case.py` for twelve shapes of screen and three widths of desk (`post-case.bin`, `post-case.h`). Its plate and the post in its slot are drawn over it, as before. |
+| `art/console/` | | The Control Panel at the back left of the desk, stowed, which the desk's sheet leaves out: `console.py` builds what of it shows from the desk (the plinth and the nameplate's ledge, the walnut cheeks, the bottom of the panel with its pilot lenses, LOCK and SLEEP, and the front of the walnut lid with NIGHT and DISPLAY) to the tracer's measurements and renders it with `case.py` for twelve shapes of screen and three widths of desk (`console-case.bin`, `console-case.h`). Its nameplate and its lit lenses are drawn over it, as before. |
 | `session/` | | Session entry, PAM file, autostart entries, default applications list, portal configuration. |
 | `themes/` | | The DEsk icon theme (generated by `themes/make-icons.py`) and GTK theme. |
 | `packaging/` | | A Debian equivs file for the recommended program set. |
@@ -214,6 +233,12 @@ corner is the only control: Fold (minimise into a folded sheet), Unfold or
 Refold (maximise and restore), Discard (close, crumpled and thrown). Closing
 always asks the client first.
 
+A window can be something other than paper: a **thing** (`include/thing.h`,
+[THINGS.md](THINGS.md)) claims it as it comes, and then says how far in the
+window lies, how it is drawn, where a hand finds it and which of paper's rules
+it does without. Each has a file of its own and knows the desk only by what
+`thing.h` declares. `view_thing` says which a window is at the moment.
+
 ### 4.6 More than one screen
 
 The desk is drawn on one screen: the one at layout position 0,0
@@ -245,6 +270,8 @@ thread:
 - `org.freedesktop.Notifications` server (`post.c`): letters in the post box.
 - StatusNotifierWatcher (when no other is on the bus) and host (`tray.c`).
 - MPRIS client (`media.c`): what is playing, media keys.
+- `org.freedesktop.ScreenSaver` (when no other is on the bus) (`saver.c`): Inhibit and
+  UnInhibit, for programs that don't ask the Wayland way.
 - IBus (its own bus) and fcitx5 (`ime.c`); logind for ending the session.
 
 ## 5. The drawing library (`src/draw.c`)
@@ -349,6 +376,7 @@ the desk starts; a handler is not.
 | Screen arrangements | `$XDG_CONFIG_HOME/desk/displays.conf` |
 | Drawer contents | `$XDG_CONFIG_HOME/desk/drawer` |
 | Shelf overrides | `$XDG_CONFIG_HOME/desk/shelves.conf` |
+| Favourites | `$XDG_CONFIG_HOME/desk/favorites` |
 | Default programs | `~/.config/desk-mimeapps.list`, then the freedesktop.org lists |
 | Calendar notes, memo pad | `$XDG_DATA_HOME/desk/calendar`, `$XDG_DATA_HOME/desk/memo` |
 | Traced room, icons, door | `$XDG_CACHE_HOME/desk/` |
@@ -370,9 +398,12 @@ place. Formats are in [CONFIGURATION.md](CONFIGURATION.md).
   a Latin list and a CJK list; the CJK list is chosen again for Chinese,
   Japanese or Korean (Noto CJK SC, JP or KR), because shared characters are
   drawn differently in each.
-- **Sound**: nothing is a recording. `sfx.c` synthesises every sound from
-  modes, noise, crackle and creaks at start-up; `sound.c` plays variants,
-  panned to where the thing is on screen.
+- **Sound**: nothing is a recording. `sfx.c` synthesises most sounds from
+  modes, noise, crackle and creaks at start-up; the ones chosen by ear (the
+  drawer, a sheet on a mat or slid, the Control Panel) are made the same way
+  in Faust and baked (`art/sound`, `bake.py`), and read instead where they
+  are there. `sound.c` plays variants, panned to where the thing is on
+  screen; a slid window is two takes going round, faded by its speed.
 
 ## 9. Building and checking
 

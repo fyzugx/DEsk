@@ -1043,6 +1043,34 @@ static void s_guard_stop(struct buf *b, struct rng *r, int v)
 	finish(b, -25.0, -10.0);
 }
 
+static void s_lid_lift(struct buf *b, struct rng *r, int v)
+{
+	(void)v;
+	/* the console's walnut lid on its brass hinge: the knuckle turning, a short dry creak
+	 * lower than a door's, and the air the board moves */
+	static const double res[] = { 780.0, 1900.0, 3100.0 };
+	creak(b, r, 0.0, 0.16, near(r, 210.0, 0.1), near(r, 260.0, 0.1), 0.45, res, 3);
+	swish(b, r, 0.02, 0.20, 0.35, 380.0, 900.0, 0.8, 0.18);
+	finish(b, -30.0, -14.0);
+}
+
+static void s_lid_stop(struct buf *b, struct rng *r, int v)
+{
+	(void)v;
+	/* and at either end of its swing: walnut meeting the plate or its stop, a dull knock low
+	 * in the wood, and the brass of the hinge once */
+	static const double f[] = { 230.0, 520.0, 1180.0, 2600.0, 0.0 };
+	static const double a[] = { 1.0, 0.6, 0.35, 0.15 };
+	static const double d[] = { 0.035, 0.022, 0.012, 0.006 };
+	strike(b, r, 0.0, 0.42, 0.3, f, a, d, 0.04);
+	burst(b, r, 0.0, 0.001, 0.010, 0.45, BP(700.0, 0.8), NOF);
+	static const double hf[] = { 3300.0, 5200.0, 0.0 };
+	static const double ha[] = { 1.0, 0.5 };
+	static const double hd[] = { 0.010, 0.006 };
+	strike(b, r, near(r, 0.008, 0.2), 0.07, 0.05, hf, ha, hd, 0.03);
+	finish(b, -24.0, -9.0);
+}
+
 static void s_power_press(struct buf *b, struct rng *r, int v)
 {
 	(void)v;
@@ -1367,12 +1395,275 @@ static void s_popper(struct buf *b, struct rng *r, int v)
 	finish(b, -24.0, -5.0);
 }
 
+/* -- the camera -- */
+
+static void s_shutter(struct buf *b, struct rng *r, int v)
+{
+	(void)v;
+	/* A reflex camera going off. The mirror flung up against its stop --
+	 * a slap, and the thud of the body round it; the shutter's two
+	 * blinds, one and then the other, ticks of thin steel; the mirror
+	 * falling back; and the gears winding the shutter for the next. */
+	static const double mf[] = { 820.0, 1900.0, 3400.0, 5600.0, 0.0 };
+	static const double ma[] = { 1.0, 0.8, 0.5, 0.25 };
+	static const double md[] = { 0.012, 0.009, 0.006, 0.004 };
+	strike(b, r, 0.0, 0.45, 0.7, mf, ma, md, 0.04);
+	mode(b, 0.0, near(r, 150.0, 0.05), 0.40, 0.022);
+	burst(b, r, 0.0, 0.0008, 0.010, 0.5, BP(1100.0, 0.8), NOF);
+	static const double tf[] = { 4300.0, 6900.0, 9200.0, 0.0 };
+	static const double ta[] = { 1.0, 0.6, 0.3 };
+	static const double td[] = { 0.004, 0.003, 0.002 };
+	double t1 = near(r, 0.008, 0.15);
+	strike(b, r, t1, 0.22, 0.4, tf, ta, td, 0.03);
+	strike(b, r, t1 + near(r, 0.017, 0.1), 0.26, 0.45, tf, ta, td, 0.03);
+	static const double df[] = { 700.0, 1650.0, 3000.0, 5000.0, 0.0 };
+	double t2 = near(r, 0.062, 0.08);
+	strike(b, r, t2, 0.32, 0.5, df, ma, md, 0.05);
+	mode(b, t2, near(r, 135.0, 0.05), 0.30, 0.020);
+	static const double gears[] = { 1700.0, 3100.0, 5200.0 };
+	creak(b, r, t2 + 0.006, near(r, 0.075, 0.1), near(r, 430.0, 0.06), near(r, 370.0, 0.06),
+		2.0, gears, 3);
+	finish(b, -21.0, -7.0);
+}
+
+/* -- the camera's tape -- */
+
+/* A little motor: a cassette's reels taken up, its capstan got going -- a
+ * soft buzz with its gears' rattle in it, pitched from f0 to f1 over dur,
+ * getting going and running down at its ends. */
+static void motor(struct buf *b, struct rng *r, double t0, double dur, double f0, double f1,
+	double amp)
+{
+	int i0 = at(t0), len = at(dur);
+	double ph = 0.0, rp = 0.0;
+	for (int j = 0; j < len; j++) {
+		double t = j / SR, u = t / dur;
+		double f = f0 + (f1 - f0) * u;
+		ph += f / SR;
+		rp += f * 0.17 / SR;
+		double env = (1.0 - exp(-t / 0.03)) * (1.0 - exp(-(dur - t) / 0.04));
+		double buzz = 0.0;
+		for (int k = 1; k <= 6; k++) {
+			buzz += sin(TAU * ph * k + k * 0.9) / (k * 1.1);
+		}
+		double rattle = 0.6 + 0.4 * pow(0.5 + 0.5 * sin(TAU * rp), 3.0);
+		put(b, i0 + j, amp * env * (buzz * 0.16 * rattle + rnd2(r) * 0.04));
+	}
+}
+
+static void s_tape_in(struct buf *b, struct rng *r, int v)
+{
+	(void)v;
+	/* A cassette pushed into its slot: its shell sliding past the flap,
+	 * the catch taking it with a click; then the mechanism drawing it
+	 * home -- a clunk -- and its motor a moment, the tape taken up. */
+	static const double bands[] = { 2600.0, 5200.0, 900.0 };
+	static const double qs[] = { 1.1, 1.3, 1.0 };
+	static const double gains[] = { 0.6, 0.3, 0.3 };
+	friction(b, r, 0.0, 0.20, bands, qs, gains, 3, 50.0, 0.5, 0.45, env_push);
+	static const double cf[] = { 2900.0, 4700.0, 7400.0, 0.0 };
+	static const double ca[] = { 1.0, 0.55, 0.25 };
+	static const double cd[] = { 0.006, 0.004, 0.003 };
+	strike(b, r, 0.19, 0.30, 0.35, cf, ca, cd, 0.04);
+	static const double kf[] = { 420.0, 980.0, 2100.0, 0.0 };
+	static const double ka[] = { 1.0, 0.6, 0.3 };
+	static const double kd[] = { 0.035, 0.022, 0.012 };
+	strike(b, r, 0.25, 0.45, 0.25, kf, ka, kd, 0.03);
+	mode(b, 0.25, near(r, 165.0, 0.05), 0.30, 0.035);
+	motor(b, r, 0.30, 0.34, near(r, 300.0, 0.03), 330.0, 0.5);
+	finish(b, -27.0, -11.0);
+}
+
+static void s_tape_out(struct buf *b, struct rng *r, int v)
+{
+	(void)v;
+	/* The eject: the catch let go and the spring throwing the cassette
+	 * out against the hand -- a clack, the spring's ring, the shell
+	 * sliding. */
+	static const double kf[] = { 760.0, 1700.0, 3600.0, 0.0 };
+	static const double ka[] = { 1.0, 0.7, 0.35 };
+	static const double kd[] = { 0.025, 0.015, 0.008 };
+	strike(b, r, 0.0, 0.45, 0.5, kf, ka, kd, 0.03);
+	mode(b, 0.004, near(r, 1350.0, 0.04), 0.10, 0.06);
+	static const double bands[] = { 2400.0, 4800.0 };
+	static const double qs[] = { 1.0, 1.2 };
+	static const double gains[] = { 0.6, 0.3 };
+	friction(b, r, 0.02, 0.14, bands, qs, gains, 2, 50.0, 0.5, 0.35, env_pull);
+	finish(b, -27.0, -11.0);
+}
+
+/* A camcorder's beep: a thin, pure note, on and off. */
+static void pip(struct buf *b, double t0, double dur, double f, double amp)
+{
+	int i0 = at(t0), len = at(dur);
+	for (int j = 0; j < len; j++) {
+		double t = j / SR;
+		double env = fmin(1.0, t / 0.003) * fmin(1.0, (dur - t) / 0.006);
+		put(b, i0 + j, amp * env * sin(TAU * f * t));
+	}
+}
+
+static void s_rec_start(struct buf *b, struct rng *r, int v)
+{
+	(void)v;
+	/* Recording: the beep, and the transport getting going -- a soft
+	 * clunk, the motor winding up. */
+	pip(b, 0.0, 0.07, 2350.0, 0.35);
+	static const double kf[] = { 380.0, 900.0, 0.0 };
+	static const double ka[] = { 1.0, 0.5 };
+	static const double kd[] = { 0.03, 0.02 };
+	strike(b, r, 0.09, 0.30, 0.15, kf, ka, kd, 0.03);
+	motor(b, r, 0.10, 0.45, near(r, 230.0, 0.03), 330.0, 0.45);
+	finish(b, -27.0, -11.0);
+}
+
+static void s_rec_stop(struct buf *b, struct rng *r, int v)
+{
+	(void)v;
+	/* Stopped: two beeps, the motor running down, the clunk of the
+	 * transport letting go. */
+	pip(b, 0.0, 0.06, 2350.0, 0.35);
+	pip(b, 0.11, 0.06, 2350.0, 0.35);
+	motor(b, r, 0.0, 0.30, 330.0, near(r, 210.0, 0.03), 0.40);
+	static const double kf[] = { 380.0, 900.0, 0.0 };
+	static const double ka[] = { 1.0, 0.5 };
+	static const double kd[] = { 0.03, 0.02 };
+	strike(b, r, 0.30, 0.30, 0.15, kf, ka, kd, 0.03);
+	finish(b, -27.0, -11.0);
+}
+
+static void s_flash(struct buf *b, struct rng *r, int v)
+{
+	(void)v;
+	/* A flash going off: the tube's pop -- a hard tick, a breath of bright
+	 * noise -- and the capacitor charging again, a thin whine rising and
+	 * fading away. */
+	static const double f[] = { 3800.0, 6100.0, 9000.0, 0.0 };
+	static const double a[] = { 1.0, 0.6, 0.3 };
+	static const double d[] = { 0.004, 0.003, 0.002 };
+	strike(b, r, 0.0, 0.30, 0.6, f, a, d, 0.03);
+	burst(b, r, 0.0, 0.0005, 0.012, 0.35, HP(2500.0, 0.7), NOF);
+	int i0 = at(0.06), len = at(1.1);
+	double ph = 0.0;
+	for (int j = 0; j < len; j++) {
+		double t = j / SR, u = t / 1.1;
+		double fr = 2600.0 + 5200.0 * (1.0 - (1.0 - u) * (1.0 - u));
+		ph += fr / SR;
+		double env = (1.0 - exp(-t / 0.08)) * (1.0 - u) * (1.0 - u);
+		put(b, i0 + j, 0.035 * env * sin(TAU * ph));
+	}
+	finish(b, -30.0, -12.0);
+}
+
 struct sfx_def {
 	const char *name;
 	double secs;
 	int variants;
 	void (*make)(struct buf *b, struct rng *r, int v);
 };
+
+static void s_type_strike(struct buf *b, struct rng *r, int v)
+{
+	(void)v;
+	/* a long lever going down, then the type through the ribbon on the platen, hard rubber under
+	 * it and the whole frame ringing a little; the bar falling back on its felt */
+	static const double lf[] = { 1250.0, 2400.0, 0.0 };
+	static const double la[] = { 1.0, 0.5 };
+	static const double ld[] = { 0.006, 0.004 };
+	strike(b, r, 0.0, 0.12, 0.10, lf, la, ld, 0.05);
+	static const double f[] = { 1750.0, 2950.0, 4400.0, 6600.0, 0.0 };
+	static const double a[] = { 1.0, 0.85, 0.55, 0.30 };
+	static const double d[] = { 0.016, 0.011, 0.007, 0.004 };
+	strike(b, r, 0.012, 0.42, 0.85, f, a, d, 0.05);
+	static const double tf[] = { 190.0, 360.0, 720.0, 0.0 };
+	static const double ta[] = { 1.0, 0.7, 0.35 };
+	static const double td[] = { 0.024, 0.016, 0.009 };
+	strike(b, r, 0.012, 0.50, 0.0, tf, ta, td, 0.06);
+	static const double bf[] = { 900.0, 1700.0, 0.0 };
+	static const double ba[] = { 1.0, 0.5 };
+	static const double bd[] = { 0.010, 0.006 };
+	strike(b, r, 0.075, 0.10, 0.06, bf, ba, bd, 0.05);
+	finish(b, -22.0, -8.0);
+}
+
+static void s_type_release(struct buf *b, struct rng *r, int v)
+{
+	(void)v;
+	/* the lever back up, and the escapement letting the carriage go on a tooth */
+	static const double f[] = { 1500.0, 3100.0, 0.0 };
+	static const double a[] = { 1.0, 0.6 };
+	static const double d[] = { 0.006, 0.004 };
+	strike(b, r, 0.0, 0.2, 0.12, f, a, d, 0.05);
+	static const double ef[] = { 3600.0, 5400.0, 0.0 };
+	static const double ea[] = { 1.0, 0.5 };
+	static const double ed[] = { 0.003, 0.002 };
+	strike(b, r, 0.012, 0.16, 0.2, ef, ea, ed, 0.05);
+	finish(b, -33.0, -18.0);
+}
+
+static void s_type_space(struct buf *b, struct rng *r, int v)
+{
+	(void)v;
+	/* the bar going down on its two arms: no type, only the escapement */
+	static const double f[] = { 260.0, 560.0, 1300.0, 0.0 };
+	static const double a[] = { 1.0, 0.7, 0.3 };
+	static const double d[] = { 0.016, 0.012, 0.006 };
+	strike(b, r, 0.0, 0.4, 0.15, f, a, d, 0.05);
+	static const double ef[] = { 3400.0, 5200.0, 0.0 };
+	static const double ea[] = { 1.0, 0.5 };
+	static const double ed[] = { 0.004, 0.002 };
+	strike(b, r, 0.03, 0.2, 0.3, ef, ea, ed, 0.05);
+	finish(b, -25.0, -11.0);
+}
+
+static void s_type_shift(struct buf *b, struct rng *r, int v)
+{
+	(void)v;
+	/* the whole basket of type lifting on its springs */
+	static const double f[] = { 135.0, 310.0, 860.0, 1900.0, 0.0 };
+	static const double a[] = { 1.0, 0.75, 0.35, 0.15 };
+	static const double d[] = { 0.055, 0.035, 0.016, 0.008 };
+	strike(b, r, 0.0, 0.5, 0.12, f, a, d, 0.04);
+	finish(b, -24.0, -10.0);
+}
+
+static void s_type_bell(struct buf *b, struct rng *r, int v)
+{
+	(void)v;
+	/* the little bell under the carriage, struck by its hammer */
+	static const double f[] = { 2650.0, 4310.0, 6900.0, 10100.0, 0.0 };
+	static const double a[] = { 1.0, 0.5, 0.26, 0.09 };
+	static const double d[] = { 0.42, 0.26, 0.11, 0.05 };
+	strike(b, r, 0.0, 0.5, 0.2, f, a, d, 0.0);
+	finish(b, -25.0, -9.0);
+}
+
+static void s_type_return(struct buf *b, struct rng *r, int v)
+{
+	(void)v;
+	/* the lever taking up the line, the platen's ratchet going round a tooth, and the carriage
+	 * running home, tooth after tooth, faster, to its stop */
+	static const double lf[] = { 700.0, 1600.0, 3000.0, 0.0 };
+	static const double la[] = { 1.0, 0.6, 0.3 };
+	static const double ld[] = { 0.012, 0.008, 0.004 };
+	strike(b, r, 0.0, 0.3, 0.3, lf, la, ld, 0.04);
+	strike(b, r, 0.045, 0.25, 0.3, lf, la, ld, 0.04);
+	double t = 0.09, gap = 0.014;
+	static const double tf[] = { 2600.0, 4300.0, 0.0 };
+	static const double ta[] = { 1.0, 0.5 };
+	static const double td[] = { 0.0025, 0.0015 };
+	while (t < 0.31) {
+		strike(b, r, t, 0.09 * near(r, 1.0, 0.2), 0.05, tf, ta, td, 0.05);
+		t += gap * near(r, 1.0, 0.08);
+		gap = gap > 0.007 ? gap * 0.965 : gap;
+	}
+	burst(b, r, 0.09, 0.05, 0.08, 0.05, BP(1800.0, 0.6), NOF);
+	static const double sf[] = { 170.0, 380.0, 950.0, 2100.0, 0.0 };
+	static const double sa[] = { 1.0, 0.8, 0.4, 0.2 };
+	static const double sd[] = { 0.05, 0.03, 0.014, 0.007 };
+	strike(b, r, 0.315, 0.5, 0.3, sf, sa, sd, 0.03);
+	finish(b, -23.0, -8.0);
+}
 
 static const struct sfx_def SFX[DESK_SND_COUNT] = {
 	[DESK_SND_PAPER_SWING] = { "paper-swing", 0.42, 3, s_paper_swing },
@@ -1385,8 +1676,8 @@ static const struct sfx_def SFX[DESK_SND_COUNT] = {
 	[DESK_SND_PAPER_LAND] = { "paper-land", 0.3, 2, s_paper_land },
 	[DESK_SND_CORNER_LIFT] = { "corner-lift", 0.12, 3, s_corner_lift },
 	[DESK_SND_CORNER_TAP] = { "corner-tap", 0.08, 3, s_corner_tap },
-	[DESK_SND_DRAWER_OUT] = { "drawer-out", 1.02, 2, s_drawer_out },
-	[DESK_SND_DRAWER_IN] = { "drawer-in", 1.02, 2, s_drawer_in },
+	[DESK_SND_DRAWER_OUT] = { "drawer-out", 1.02, 3, s_drawer_out },
+	[DESK_SND_DRAWER_IN] = { "drawer-in", 1.02, 3, s_drawer_in },
 	[DESK_SND_DRAWER_STOP_OUT] = { "drawer-stop-out", 0.32, 3, s_drawer_stop_out },
 	[DESK_SND_DRAWER_STOP_IN] = { "drawer-stop-in", 0.4, 3, s_drawer_stop_in },
 	[DESK_SND_FELT_PICK] = { "felt-pick", 0.14, 3, s_felt_pick },
@@ -1397,6 +1688,14 @@ static const struct sfx_def SFX[DESK_SND_COUNT] = {
 	[DESK_SND_PAGE_TURN] = { "page-turn", 0.24, 4, s_page_turn },
 	[DESK_SND_SHEET_TAKE] = { "sheet-take", 0.28, 2, s_sheet_take },
 	[DESK_SND_SHEET_DOWN] = { "sheet-down", 0.2, 3, s_sheet_down },
+	/* (baked in art/sound, nothing made here: how many takes there are) */
+	[DESK_SND_SHEET_DOWN_SOFT] = { "sheet-down-soft", 0.0, 3, NULL },
+	[DESK_SND_SLIDE_WOOD_SLOW] = { "slide-wood-slow", 0.0, 1, NULL },
+	[DESK_SND_SLIDE_WOOD_QUICK] = { "slide-wood-quick", 0.0, 1, NULL },
+	[DESK_SND_SLIDE_SOFT_SLOW] = { "slide-soft-slow", 0.0, 1, NULL },
+	[DESK_SND_SLIDE_SOFT_QUICK] = { "slide-soft-quick", 0.0, 1, NULL },
+	[DESK_SND_SLIDE_CLEAR_SLOW] = { "slide-clear-slow", 0.0, 1, NULL },
+	[DESK_SND_SLIDE_CLEAR_QUICK] = { "slide-clear-quick", 0.0, 1, NULL },
 	[DESK_SND_POST_OPEN] = { "post-open", 0.9, 2, s_post_open },
 	[DESK_SND_POST_CLOSE] = { "post-close", 0.8, 2, s_post_close },
 	[DESK_SND_LETTER_ARRIVE] = { "letter-arrive", 0.62, 2, s_letter_arrive },
@@ -1410,6 +1709,8 @@ static const struct sfx_def SFX[DESK_SND_COUNT] = {
 	[DESK_SND_LOCK_CLUNK] = { "lock-clunk", 0.2, 2, s_lock_clunk },
 	[DESK_SND_GUARD_LIFT] = { "guard-lift", 0.22, 2, s_guard_lift },
 	[DESK_SND_GUARD_STOP] = { "guard-stop", 0.12, 2, s_guard_stop },
+	[DESK_SND_LID_LIFT] = { "lid-lift", 0.24, 2, s_lid_lift },
+	[DESK_SND_LID_STOP] = { "lid-stop", 0.16, 2, s_lid_stop },
 	[DESK_SND_POWER_PRESS] = { "power-press", 0.25, 1, s_power_press },
 	[DESK_SND_POWER_DOWN] = { "power-down", 2.9, 1, s_power_down },
 	[DESK_SND_CARD_SLIDE] = { "card-slide", 0.32, 2, s_card_slide },
@@ -1419,6 +1720,24 @@ static const struct sfx_def SFX[DESK_SND_COUNT] = {
 	[DESK_SND_PENCIL_RING] = { "pencil-ring", 0.4, 3, s_pencil_ring },
 	[DESK_SND_AERIAL_UP] = { "aerial-up", 1.75, 1, s_aerial_up },
 	[DESK_SND_AERIAL_DOWN] = { "aerial-down", 1.75, 1, s_aerial_down },
+	[DESK_SND_CC_CAP_ON] = { "cc-cap-on", 0.0, 3, NULL },
+	[DESK_SND_CC_CAP_OFF] = { "cc-cap-off", 0.0, 3, NULL },
+	[DESK_SND_CC_CAP] = { "cc-cap", 0.0, 3, NULL },
+	[DESK_SND_CC_CAP_SLEEP] = { "cc-cap-sleep", 0.0, 3, NULL },
+	[DESK_SND_CC_AIR_ON] = { "cc-air-on", 0.0, 2, NULL },
+	[DESK_SND_CC_AIR_OFF] = { "cc-air-off", 0.0, 2, NULL },
+	[DESK_SND_CC_LEVER_UP] = { "cc-lever-up", 0.0, 3, NULL },
+	[DESK_SND_CC_LEVER_DOWN] = { "cc-lever-down", 0.0, 3, NULL },
+	[DESK_SND_CC_KNOB] = { "cc-knob", 0.0, 3, NULL },
+	[DESK_SND_CC_KEY_IN] = { "cc-key-in", 0.0, 2, NULL },
+	[DESK_SND_CC_KEY_TURN] = { "cc-key-turn", 0.0, 2, NULL },
+	[DESK_SND_CC_KEY_BACK] = { "cc-key-back", 0.0, 2, NULL },
+	[DESK_SND_CC_KEY_OUT] = { "cc-key-out", 0.0, 2, NULL },
+	[DESK_SND_CC_LID_UP] = { "cc-lid-up", 0.0, 2, NULL },
+	[DESK_SND_CC_LID_UP_STOP] = { "cc-lid-up-stop", 0.0, 2, NULL },
+	[DESK_SND_CC_LID_DOWN] = { "cc-lid-down", 0.0, 2, NULL },
+	[DESK_SND_CC_LID_DOWN_STOP] = { "cc-lid-down-stop", 0.0, 2, NULL },
+	[DESK_SND_CC_POWER] = { "cc-power", 0.0, 1, NULL },
 	[DESK_SND_BEEP] = { "beep", 1.2, 1, s_beep },
 	[DESK_SND_TICK] = { "tick", 0.10, 2, s_tick },
 	[DESK_SND_TOCK] = { "tock", 0.12, 2, s_tock },
@@ -1428,6 +1747,18 @@ static const struct sfx_def SFX[DESK_SND_COUNT] = {
 	[DESK_SND_FW_BOOM] = { "firework-boom", 3.0, 3, s_fw_boom },
 	[DESK_SND_FW_CRACKLE] = { "firework-crackle", 1.8, 3, s_fw_crackle },
 	[DESK_SND_POPPER] = { "popper", 1.4, 2, s_popper },
+	[DESK_SND_SHUTTER] = { "shutter", 0.22, 3, s_shutter },
+	[DESK_SND_TAPE_IN] = { "tape-in", 0.75, 2, s_tape_in },
+	[DESK_SND_TAPE_OUT] = { "tape-out", 0.25, 2, s_tape_out },
+	[DESK_SND_REC_START] = { "rec-start", 0.6, 1, s_rec_start },
+	[DESK_SND_REC_STOP] = { "rec-stop", 0.45, 1, s_rec_stop },
+	[DESK_SND_FLASH] = { "flash", 1.25, 2, s_flash },
+	[DESK_SND_TYPE_STRIKE] = { "type-strike", 0.16, 4, s_type_strike },
+	[DESK_SND_TYPE_RELEASE] = { "type-release", 0.05, 3, s_type_release },
+	[DESK_SND_TYPE_SPACE] = { "type-space", 0.09, 3, s_type_space },
+	[DESK_SND_TYPE_SHIFT] = { "type-shift", 0.18, 2, s_type_shift },
+	[DESK_SND_TYPE_BELL] = { "type-bell", 0.9, 1, s_type_bell },
+	[DESK_SND_TYPE_RETURN] = { "type-return", 0.48, 2, s_type_return },
 };
 
 const char *desk_sound_name(enum desk_sound s)

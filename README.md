@@ -2,13 +2,13 @@
 
 # DEsk
 
-**v0.1.5 (BETA)** -- fixes: no more half-second stops every second and a half on some laptops, windows folded on a second screen stay there, screens turned off with a display tool come back on, games made on the whole screen open on it, drags between X11 programs, programs installed while logged in show up in the bookcase, emoji in notifications, and more. See [RELEASE-NOTES.md](RELEASE-NOTES.md).
+**v0.2 (BETA)** -- new things on the desk: a calculator, one notebook to type and write in, Print as a camera that also films, and picture-in-picture as an old phone; touch, an on-screen typewriter, a pen and handwriting, and a screen that turns with the machine; the Control Panel redesigned in four; woods, stains and desk mats; favourites, a clipboard and looks for the drawer. See [RELEASE-NOTES.md](RELEASE-NOTES.md).
+
+Homepage: https://fyzugx.github.io/DEsk/ -- the highlights, a desk you can try in your browser, the install steps and an FAQ.
 
 I've created a Discord server!
 You can also report bugs and submit ideas for new features here!
 link : https://discord.gg/bscPSCsram
-
-Homepage: https://fyzugx.github.io/DEsk/ -- the highlights, a desk you can try in your browser, the install steps and an FAQ.
 
 > **DEsk** is **D**esktop **E**nvironment and **desk** in one word -- a
 > name that came from the Reddit community. It used to be called DeskWM:
@@ -110,6 +110,8 @@ there -- its material, the light on it, its shadow and the wear of use.
   crumpled into a ball and tossed).
   Dragging an edge pulls more paper out from behind the sheet.
 - **The drawer is the dock.** Pull the brass handle (or press `Super+D`).
+  A window down over the handle? Click its bottom edge and it lifts off
+  the handle; click again to lay it back down.
   It holds the things you put in it: any app, or a folded window. Out of
   the box it holds DEsk's standard programs (below) and a screwdriver that
   opens Shell Settings.
@@ -193,7 +195,7 @@ browser, a file manager and a text editor. The drawer's things and
    `desk-mimeapps.list` installed with DEsk -- the same answers xdg-open
    and GIO give,
 3. the standard set, classic GTK programs first: Xfce Terminal, Firefox
-   ESR, Thunar, Mousepad (then MATE Terminal, Caja, Pluma, and so on),
+   ESR, Thunar, DEsk's Notepad (then MATE Terminal, Caja, Mousepad, and so on),
 4. any program filed under the right category.
 
 ## A tour
@@ -219,7 +221,7 @@ browser, a file manager and a text editor. The drawer's things and
   settings, borrowed programs, sounds, the room, things on the desk.
 - [docs/CONFIGURATION.md](docs/CONFIGURATION.md) -- every setting, file and
   environment variable.
-- [RELEASE-NOTES.md](RELEASE-NOTES.md) -- what is in v0.1.5 and what is known
+- [RELEASE-NOTES.md](RELEASE-NOTES.md) -- what is in v0.2 and what is known
   not to work yet.
 - [docs/design.md](docs/design.md) -- the full development log (in Japanese).
 
@@ -232,10 +234,12 @@ between what it makes and what it borrows:
 | | DEsk makes | both: DEsk draws it, something else does the work | borrowed |
 | --- | --- | --- | --- |
 | what | what is drawn as the room and handled as its things; what only the compositor can do | | programs, system settings panels, background helpers |
-| examples | windows as paper, the drawer, the bookcase, the clock, the Control Panel, the post box, the front door, the calendar and memo pad; keyboard, pointer and their keys (volume and media keys too), the screens and their power, remembering their arrangement, going idle, the lock; Shell Settings | volume knob and mute (PipeWire/PulseAudio), brightness (logind), Wi-Fi and Bluetooth levers, the post box (the desk is the notification daemon), the tray's slips (the applets' own items), the clock's MEDIA page (MPRIS), screenshots (grim), the input method (a bridge to IBus) | network connections, Bluetooth devices, sound devices, display arrangement, printers, the look of other programs, default programs, disks, polkit agent, keyring, portals -- and the programs themselves |
+| examples | windows as paper, the drawer, the bookcase, the clock, the Control Panel, the post box, the front door, the calendar and memo pad, the calculator, the notepad (a text editor); keyboard, pointer and their keys (volume and media keys too), the screens and their power, remembering their arrangement, going idle, the lock; Shell Settings | volume knob and mute (PipeWire/PulseAudio), brightness (logind), Wi-Fi and Bluetooth levers, the post box (the desk is the notification daemon), the tray's slips (the applets' own items), the clock's MEDIA page (MPRIS), screenshots (grim for the whole screen and the window in front; Print's camera cuts its own from the screens held still), films (the desk hands over the screen's frames; ffmpeg makes the film), the input method (a bridge to IBus) | network connections, Bluetooth devices, sound devices, display arrangement, printers, the look of other programs, default programs, disks, polkit agent, keyring, portals -- and the programs themselves |
 
-The rule for new cases: make only what is drawn as part of the room or can
-only be done inside the compositor; otherwise find an existing program that
+The rule for new cases: make what is drawn as part of the room, what can only
+be done inside the compositor, and a tool for the desk where it belongs in that
+world (the calculator, the notepad), leaving the borrowed ones to choose from;
+otherwise find an existing program that
 works as it is under a wlroots compositor, and make something only as a
 last resort. KDE's System Settings and kcmshell (which do not work outside
 Plasma), Xfce's and MATE's X11-only dialogs, and Xfce's display and
@@ -254,7 +258,7 @@ Ubuntu the same set is also one package:
 
 | For | What comes |
 | --- | --- |
-| terminal, files, text | Xfce Terminal, Thunar (with tumbler and thunar-volman), Mousepad |
+| terminal, files, text | Xfce Terminal, Thunar (with tumbler and thunar-volman), DEsk's Notepad (Mousepad is installed too) |
 | the web | Firefox (Firefox ESR on Debian, the snap on Ubuntu) |
 | pictures, documents, music and video | Ristretto, Atril, Parole |
 | tools | Engrampa, GNOME Disks |
@@ -264,7 +268,7 @@ Ubuntu the same set is also one package:
 | notices | udiskie (memory sticks mounted, with a letter), poweralertd (low battery; batsignal on Arch; none on Fedora), package-update-indicator (updates; Debian and Ubuntu) |
 | looking after the machine | QDirStat (disk usage), LXQt's date and time and users, Mugshot (your name and picture), Seahorse (passwords and keys), gnome-packagekit (adding and removing programs), Back In Time (backups), Xfce Task Manager, hardinfo2 (about this computer); baobab and Deja Dup on Arch; no Mugshot on Fedora |
 | passwords | MATE's polkit agent, GNOME Keyring |
-| plumbing | xdg-desktop-portal (wlr, gtk), Xwayland, xdg-user-dirs, xdg-utils, wl-clipboard, grim, curl |
+| plumbing | xdg-desktop-portal (wlr, gtk), Xwayland, xdg-user-dirs, xdg-utils, wl-clipboard, grim, ffmpeg, curl |
 | looks | Qt's GTK platform theme, so Qt programs match the GTK ones |
 | typing and fonts | IBus (and Mozc for Japanese), Noto (CJK, emoji), the URW base 35, Klee One (not on Arch or Fedora) |
 | `--extras` | LibreOffice (drawn with GTK), Thunderbird, Galculator, Xfce Task Manager, Simple Scan |
@@ -408,7 +412,7 @@ brings everything. To build it yourself:
 - Xwayland and xcb (optional): X11-only apps.
 - Fonts: the URW base 35 (`fonts-urw-base35`) and Noto CJK
   (`fonts-noto-cjk`); `fonts-klee` for the memo pad.
-- At run time: `grim` for screenshots, `curl` for the weather at the door.
+- At run time: `grim` for screenshots, `ffmpeg` for films, `curl` for the weather at the door.
 
 ### Minimum and recommended
 
@@ -416,14 +420,15 @@ Measured with the CPU, GPU and memory cut down (`systemd-run` CPUQuota and
 MemoryMax, `taskset`; nested, 1440x900, the same hand moves every run).
 Once the room is traced, even one core without a GPU dropped no frames; a
 frame costs about 2 ms. Only the first login traces the room: 6-9 s on a
-GPU, about 10 minutes on two cores without one (then it is cached).
+GPU, a few minutes without one, as the room is laid from pictures made in
+advance (then it is cached).
 
 | | minimum | recommended |
 | --- | --- | --- |
 | CPU | 2 x86-64 cores (1 works) | 4 cores or more |
 | memory | 4 GB (DEsk itself 200-450 MB) | 8 GB or more |
 | GPU | none needed (a long first login) | OpenGL ES 3.0 with GBM (Mesa Intel, AMD, Nouveau; VMware's SVGA3D) |
-| screen | 1366x768 | 1440x900 or more |
+| screen | 800x600 (the whole room shrinks; small labels get very small) | 1366x768 or more (1440x900 is the size it was designed at) |
 | disk | about 1 GB (`--bare`; `--no-apps` adds what Shell Settings opens) | 2-2.7 GB with the whole set |
 | system | Debian 13, Ubuntu 24.04 / 26.04 LTS, Arch Linux, Fedora 43 / 44 | the same |
 
@@ -503,13 +508,38 @@ GPU's to trace.
 | `Super+C` | the Control Panel |
 | `Super+N` | the post box |
 | `Super+F` | the focused window on the whole screen, and back (games) |
-| `Alt+Tab` / `Super+Tab` / `Alt+F1` | cycle windows (one on the whole screen goes back to its sheet first) |
+| `Super+Left` / `Super+Right` | the focused window on the left / right half of its screen; the same key again puts it back (or let go of a window at the left or right edge of the screen) |
+| `Alt+Tab` (Alt held) | every window spread out over the desk, the folded ones too, each labelled with its program's icon and name; `Tab` and `Shift+Tab` go round them last used first, the arrows go to the next one that way, or point at one. Let go of Alt (or `Enter`, or click) to go there, `Esc` (or click the desk) to put them back. A quick `Alt+Tab` goes back to the window before, without spreading them |
+| `Super+Tab` / `Alt+F1` | cycle windows (one on the whole screen goes back to its sheet first); folded ones, on the desk or in the drawer, are unfolded when their turn comes |
 | `Esc` | back to the desk |
 | brightness keys | the screen's backlight (or, with none, the lamp) |
 | volume, mute and media keys | the mixer and the player playing (as the clock's MEDIA page) |
-| `Print` / `Alt+Print` | screenshot of the screen / of the window in front |
+| `Print` | a camera put up to your eye, the screen held still as it was and seen through its viewfinder -- the screen a little smaller in the dark, its edge glass, the viewfinder's green display under it: drag out an area and the light falls on it, let go for the shutter. The camera at the foot of the screen has a mode dial (an area, a window, a screen: point at one and click), a self-timer (2 or 10 seconds, the screen yours meanwhile) and a power lever to put it down. `Enter` or the space bar is its shutter button; `Esc` or the right button gives up |
+| `Shift+Print` | a film: the camera put up with a tape in it (click the slot on its back to put one in or take it out). Its shutter starts recording the area, window or screen, sound and all, the clock showing how long it has run; Print again, or a click on the clock's face, stops. An .mp4 in Videos/Screencasts |
+| `Ctrl+Print` / `Alt+Print` | screenshot of the whole screen / of the window in front. While a film is being made, any Print stops it |
+| `Super+Shift+S` | the same as `Print`: the camera put up to your eye (the key other desktops use for a part of the screen) |
 | `Super+L` | lock the screen: the front door; type the password, Enter (or click the key) |
 | `Super+Esc` / `Alt+Esc` | log out (asking the windows to close first) |
+
+### What Ctrl does
+
+| Where | Keys | |
+| --- | --- | --- |
+| the calculator on the desk | `Ctrl` + wheel | larger / smaller, a tenth a notch (or pull its corner) |
+| typing on the calculator | `Ctrl+C` / `Ctrl+V` | copy the number shown / paste a number |
+| a print under the clear mat (its corner turned up first) | `Ctrl` + wheel | larger / smaller, 6% a notch; the wheel alone turns it 3 degrees a notch |
+| the same, on a touch screen | a second finger by the one holding the print | apart or together, larger or smaller; turned, the print turns |
+| anywhere | `Ctrl+Print` | a screenshot of the whole screen (`Alt+Print`: the window in front) |
+| the memo pad | `Ctrl+N` / `Ctrl+Home`, `Ctrl+End` | a clean sheet / the first, the last |
+| the notebook | `Ctrl+N` / `Ctrl+PageUp`, `Ctrl+PageDown` | a new page / turn the pages |
+| the notebook | `Ctrl+S` / `Ctrl+Shift+S` / `Ctrl+O` / `Ctrl+E` | save / save as / open / a PDF |
+| the notebook | `Ctrl+Z` / `Ctrl+Y` (`Ctrl+Shift+Z`) | undo / redo (what was typed and what was written, in one order) |
+| the notebook | `Ctrl+F` / `Ctrl+H` / `Ctrl+G` (`Ctrl+Shift+G`) | find / replace / find the next (the one before) |
+| the notebook | `Ctrl+T` / `Ctrl++`, `Ctrl+-`, `Ctrl+0` | typewriter letters or handwriting / letters larger, smaller, as they were |
+| the notebook | `Ctrl+W` / `Ctrl+Q` | close / close them all |
+| the front door | `Ctrl+U` | wipe the password typed |
+| anywhere | `Ctrl+Alt+Del` twice / three times | the desk set right again / log out |
+| a login session | `Ctrl+Alt+F1`..`F12` | switch VT |
 
 ## Reporting a problem
 

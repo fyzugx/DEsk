@@ -19,8 +19,8 @@
 # The ones named <name>_<name> are Ubuntu's snaps.
 
 [Default Applications]
-text/plain=org.xfce.mousepad.desktop;mousepad.desktop;pluma.desktop;featherpad.desktop;org.kde.kwrite.desktop;org.kde.kate.desktop;org.gnome.gedit.desktop;org.gnome.TextEditor.desktop;
-text/markdown=org.xfce.mousepad.desktop;mousepad.desktop;pluma.desktop;featherpad.desktop;org.kde.kwrite.desktop;org.kde.kate.desktop;org.gnome.gedit.desktop;org.gnome.TextEditor.desktop;
+text/plain=desk-notepad.desktop;org.xfce.mousepad.desktop;mousepad.desktop;pluma.desktop;featherpad.desktop;org.kde.kwrite.desktop;org.kde.kate.desktop;org.gnome.gedit.desktop;org.gnome.TextEditor.desktop;
+text/markdown=desk-notepad.desktop;org.xfce.mousepad.desktop;mousepad.desktop;pluma.desktop;featherpad.desktop;org.kde.kwrite.desktop;org.kde.kate.desktop;org.gnome.gedit.desktop;org.gnome.TextEditor.desktop;
 inode/directory=thunar.desktop;caja-folder-handler.desktop;pcmanfm.desktop;nemo.desktop;pcmanfm-qt.desktop;org.kde.dolphin.desktop;org.gnome.Nautilus.desktop;
 x-scheme-handler/http=firefox-esr.desktop;firefox.desktop;org.mozilla.firefox.desktop;firefox_firefox.desktop;chromium.desktop;chromium_chromium.desktop;org.kde.falkon.desktop;
 x-scheme-handler/https=firefox-esr.desktop;firefox.desktop;org.mozilla.firefox.desktop;firefox_firefox.desktop;chromium.desktop;chromium_chromium.desktop;org.kde.falkon.desktop;

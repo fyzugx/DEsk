@@ -186,7 +186,9 @@ The rules themselves are in `src/apps.c`: the Categories table, and
 
 ## 6. Sounds
 
-All sounds are synthesised (`src/sfx.c`). To add one:
+Sounds are synthesised (`src/sfx.c`), or made in Faust and baked
+(`art/sound/bake.py`: `<name>-<n>.wav`, read instead of sfx.c's where they
+are there). To add one:
 
 1. A name in `enum desk_sound` in `include/sound.h`, before
    `DESK_SND_COUNT`.
@@ -241,6 +243,9 @@ one:
    `server_cursor_button` in the right place in the order (ARCHITECTURE.md
    §4.4).
 5. Draw it in `desk-preview` too, so it can be checked without a compositor.
+
+Something you pick up and use, or a window that is not paper, is another
+matter: that is a **thing**, one file of its own. See [THINGS.md](THINGS.md).
 
 ## 9. Icons and theme
 

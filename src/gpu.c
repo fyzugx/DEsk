@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <ctype.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -417,6 +418,50 @@ bool desk_gl_name_software(const char *name)
 	};
 	for (size_t i = 0; name && i < sizeof SOFT / sizeof SOFT[0]; i++) {
 		if (strstr(name, SOFT[i])) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/* Graphics of its own, by the name the driver gives it: NVIDIA's, AMD's
+ * Radeon RX and Pro, Intel's Arc A and B cards. Not the graphics built into
+ * a processor (Intel's UHD, Iris and the Arc of Meteor Lake and after, AMD's
+ * "Radeon Graphics", "Radeon 780M", Vega 8), nor a virtual machine's: on a
+ * laptop they share its memory and its warmth with the processor, and what
+ * a desktop's card makes light of is heavy on them (2026-11-16, the owner on
+ * real machines: "here, where it all runs smoothly, is no measure at all"). */
+bool desk_gl_name_own(const char *name)
+{
+	char low[256];
+	size_t n = 0;
+	for (; name[n] && n + 1 < sizeof low; n++) {
+		low[n] = (char)tolower((unsigned char)name[n]);
+	}
+	low[n] = '\0';
+	if (strstr(low, "nvidia") || strstr(low, "geforce") || strstr(low, "quadro")) {
+		return true;
+	}
+	/* nouveau calls a card by its chip: NV174 */
+	if (low[0] == 'n' && low[1] == 'v' && isxdigit((unsigned char)low[2])
+		&& isxdigit((unsigned char)low[3])) {
+		return true;
+	}
+	if (strstr(low, "radeon") && (strstr(low, "radeon rx") || strstr(low, " rx ")
+		|| strstr(low, "radeon pro") || strstr(low, "radeon vii") || strstr(low, " r9 "))) {
+		return true;
+	}
+	if (strstr(low, "(dg2") || strstr(low, "(bmg")) {
+		return true;
+	}
+	const char *arc = strstr(low, "arc");
+	if (arc && strstr(low, "intel")) {
+		arc += 3;
+		if (!strncmp(arc, "(tm)", 4)) {
+			arc += 4;
+		}
+		if (arc[0] == ' ' && (((arc[1] == 'a' || arc[1] == 'b') && isdigit((unsigned char)arc[2]))
+			|| !strncmp(arc + 1, "pro", 3))) {
 			return true;
 		}
 	}

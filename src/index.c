@@ -680,6 +680,7 @@ struct rating {
 	double gpu_mpx;
 	int gpu_kind;
 	char gpu_name[128];
+	bool gpu_own;             /* graphics of its own, not built into the processor (desk_gl_name_own) */
 	double disk_w, disk_r;
 	bool disk_in_memory;
 	double busy;              /* how busy other programs kept the machine, 0..1 */
@@ -1336,19 +1337,19 @@ static bool draw_bench_make(struct draw_bench *b)
 	b->fold = desk_fold_new(b->letter, 7u, 120.0, NULL, "Letter");
 	b->ball = desk_crumple_new(b->letter, 11u);
 	static const char *const OPTS[] = { "Brisk", "Normal", "Gentle", NULL };
-	b->rows[0] = (struct desk_form_row){ DESK_FORM_SECTION, "WINDOWS", NULL, NULL, 0, NULL, NULL };
+	b->rows[0] = (struct desk_form_row){ DESK_FORM_SECTION, "WINDOWS", NULL, NULL, 0, NULL, NULL, 0, 0 };
 	b->rows[1] = (struct desk_form_row){ DESK_FORM_CHECK, "Lay every window on paper",
 		"Programs that draw their own frame and buttons get the shell's paper too.",
-		NULL, 1, NULL, NULL };
+		NULL, 1, NULL, NULL, 0, 0 };
 	b->rows[2] = (struct desk_form_row){ DESK_FORM_CHECK, "Screw up a closed window",
-		"Off, a window that is closed simply goes.", NULL, 0, NULL, NULL };
-	b->rows[3] = (struct desk_form_row){ DESK_FORM_SECTION, "DESK", NULL, NULL, 0, NULL, NULL };
+		"Off, a window that is closed simply goes.", NULL, 0, NULL, NULL, 0, 0 };
+	b->rows[3] = (struct desk_form_row){ DESK_FORM_SECTION, "DESK", NULL, NULL, 0, NULL, NULL, 0, 0 };
 	b->rows[4] = (struct desk_form_row){ DESK_FORM_CHOICE, "Motion",
-		"How long everything that moves takes.", OPTS, 1, NULL, NULL };
+		"How long everything that moves takes.", OPTS, 1, NULL, NULL, 0, 0 };
 	b->rows[5] = (struct desk_form_row){ DESK_FORM_CHECK, "Bring the lamp up slowly",
-		"The room starts dark and the lamp comes up as it is made.", NULL, 1, NULL, NULL };
+		"The room starts dark and the lamp comes up as it is made.", NULL, 1, NULL, NULL, 0, 0 };
 	b->rows[6] = (struct desk_form_row){ DESK_FORM_CHOICE, "Sounds",
-		"What each thing on the desk sounds like.", OPTS, 2, NULL, NULL };
+		"What each thing on the desk sounds like.", OPTS, 2, NULL, NULL, 0, 0 };
 	b->form.rows = b->rows;
 	b->form.n = 7;
 	b->form.hover = 4;
@@ -1603,6 +1604,7 @@ static bool measure_gpu(struct meter *m, struct rating *r)
 	struct desk_gpu *g = desk_gpu_open();
 	if (g) {
 		gpu_short(desk_gpu_name(g), r->gpu_name, sizeof r->gpu_name);
+		r->gpu_own = desk_gl_name_own(desk_gpu_name(g));
 		char err[2048];
 		float *band = malloc((size_t)FRAME_W * GPU_BAND_H * 4 * sizeof *band);
 		if (band && desk_gpu_program(g, MARCH_SRC, err, sizeof err)) {
@@ -4372,11 +4374,20 @@ static int run_text(void)
  * on the processor, 25 million and 161 s), and each level's share of that
  * (SUGGEST_COST). The highest level whose first room is ready within
  * SUGGEST_BUDGET_S is the one, as the memory allows; Ultra only with
- * graphics hardware, eight threads and 12 GB, and no more than Low where the
- * desk is drawn on the processor. A machine changes its mind in Shell
- * Settings. */
+ * graphics of its own (gpu.c desk_gl_name_own), eight threads and 12 GB, and no more than
+ * Low where the desk is drawn on the processor. Graphics built into the
+ * processor, or a virtual machine's, start at Medium, unless the looks say
+ * so by a wide margin: the paper folding within SUGGEST_SHARED_FOLD_MS and a
+ * High room within SUGGEST_SHARED_HIGH_S -- what these figures took for
+ * smooth was measured on a desktop's processor in a virtual machine, and
+ * laptops with the same figures were not (2026-11-16, on real machines: the
+ * Control Panel's key, the calendar, the memo pad and the ALL APPS book
+ * heavy at the level chosen, Medium better). A machine changes its mind in
+ * Shell Settings. */
 #define SUGGEST_HIGH_MPXS 4200.0
 #define SUGGEST_BUDGET_S 60.0
+#define SUGGEST_SHARED_FOLD_MS 3.0
+#define SUGGEST_SHARED_HIGH_S 10.0
 
 /* And what the processor makes of the paper moving, which the graphics have
  * nothing to do with: a letter the size of a window folded a frame at a
@@ -4459,7 +4470,7 @@ static int run_suggest(void)
 	double mpx = r.gpu_mpx > 0.0 ? r.gpu_mpx : 0.1;
 	double high_s = SUGGEST_HIGH_MPXS / mpx;
 	int top = hard ? 4 : 1;   /* drawn on the processor: Low at most */
-	if (top == 4 && (threads < 8 || ram < 12.0)) {
+	if (top == 4 && (!r.gpu_own || threads < 8 || ram < 12.0)) {
 		top = 3;
 	}
 	if (ram < 2.0) {
@@ -4474,6 +4485,11 @@ static int run_suggest(void)
 		moving--;
 	}
 	top = top < moving ? top : moving;
+	bool shared = hard && !r.gpu_own;
+	if (shared && top > 2 && !(fold > 0.0 && fold <= SUGGEST_SHARED_FOLD_MS
+		&& high_s <= SUGGEST_SHARED_HIGH_S)) {
+		top = 2;
+	}
 	int level = 0;
 	for (int i = top; i > 0; i--) {
 		if (high_s * SUGGEST_COST[i] <= SUGGEST_BUDGET_S) {
@@ -4481,11 +4497,11 @@ static int run_suggest(void)
 			break;
 		}
 	}
-	fprintf(stderr, "desk-index: graphics %s (%s, %.0f million a second); %d threads; "
+	fprintf(stderr, "desk-index: graphics %s (%s%s, %.0f million a second); %d threads; "
 		"%.1f GB; a High room in about %.0f s; a sheet folding %.1f ms a frame, "
 		"smooth up to %s -- %s\n", r.gpu_name,
-		GPU_KIND[r.gpu_kind], r.gpu_mpx, threads, ram, high_s, fold, LEVEL[moving],
-		LEVEL[level]);
+		GPU_KIND[r.gpu_kind], shared ? ", built in or virtual" : hard ? ", its own" : "",
+		r.gpu_mpx, threads, ram, high_s, fold, LEVEL[moving], LEVEL[level]);
 	printf("%s\n", LEVEL[level]);
 	return 0;
 }
