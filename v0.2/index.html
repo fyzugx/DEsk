@@ -18,6 +18,8 @@
    Discord:  https://discord.gg/bscPSCsram   */
 
 :root {
+  /* the noise textures: what WebKit draws for SVG feTurbulence, baked (it would work them out again for every
+     piece it paints) */
   --cream: #f3e7cf;
   --cream-2: #cdb894;
   --cream-3: #a28d6e;
@@ -40,10 +42,10 @@
   --wrap: 980px;
   --wide: 1180px;
 
-  --wood-grain: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='900' height='900'><filter id='g'><feTurbulence type='fractalNoise' baseFrequency='0.0035 0.11' numOctaves='4' seed='7' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.22  0 0 0 0 0.12  0 0 0 0 0.06  0 0 0 0.9 -0.15'/></filter><rect width='100%' height='100%' filter='url(%23g)'/></svg>");
-  --wood-v: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='700' height='700'><filter id='g'><feTurbulence type='fractalNoise' baseFrequency='0.12 0.004' numOctaves='4' seed='9' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.2  0 0 0 0 0.11  0 0 0 0 0.05  0 0 0 0.85 -0.12'/></filter><rect width='100%' height='100%' filter='url(%23g)'/></svg>");
-  --paper-fibre: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='240'><filter id='p'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' seed='3' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.35  0 0 0 0 0.28  0 0 0 0 0.18  0 0 0 0.2 0'/></filter><rect width='100%' height='100%' filter='url(%23p)'/></svg>");
-  --leather-grain: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='220' height='220'><filter id='l'><feTurbulence type='fractalNoise' baseFrequency='1.1' numOctaves='2' seed='5' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.06  0 0 0 0 0.03  0 0 0 0 0.01  0 0 0 0.6 -0.12'/></filter><rect width='100%' height='100%' filter='url(%23l)'/></svg>");
+  --wood-grain: url("../art/tex/wood-grain.webp");
+  --wood-v: url("../art/tex/wood-v.webp");
+  --paper-fibre: url("../art/tex/paper-fibre.webp");
+  --leather-grain: url("../art/tex/leather-grain.webp");
 }
 
 * { box-sizing: border-box; }
@@ -66,13 +68,15 @@ button { font-family: inherit; }
 .wide { width: min(var(--wide), 100% - 32px); margin-inline: auto; }
 
 /* The desk lamp's pool of light (follows the bulb), and the dark edges of the room */
-body::before, body::after { content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 0; }
-body::before {
+.pool, body::after { content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 0; }
+.pool { overflow: hidden; mix-blend-mode: screen; animation: lamp-on 2.4s .15s ease-out both; }
+.pool i { /* centred on the bulb, which the script moves it to (the light ends at 72% of 1000 x 780 each way), so
+             nothing is painted again as the lamp sways; its flicker is its opacity, these colours at its brightest (1.02) */
+  position: absolute; left: -720px; top: -562px; width: 1440px; height: 1124px;
+  transform: translate(50vw, 4vh); will-change: transform, opacity;
   background:
-    radial-gradient(ellipse 1000px 780px at var(--lx, 50%) var(--ly, 4%), rgba(255,200,125,calc(.32 * var(--li, 1))), rgba(255,170,90,calc(.12 * var(--li, 1))) 40%, transparent 72%),
-    radial-gradient(circle 320px at var(--lx, 50%) var(--ly, 4%), rgba(255,232,185,calc(.2 * var(--li, 1))), transparent);
-  mix-blend-mode: screen;
-  animation: lamp-on 2.4s .15s ease-out both;
+    radial-gradient(ellipse 1000px 780px at 50% 50%, rgba(255,200,125,.3264), rgba(255,170,90,.1224) 40%, transparent 72%),
+    radial-gradient(circle 320px at 50% 50%, rgba(255,232,185,.204), transparent);
 }
 body::after { background: radial-gradient(ellipse 120% 90% at 50% 30%, transparent 45%, rgba(5,2,0,.72) 100%); }
 @keyframes lamp-on { 0% { opacity: 0; } 30% { opacity: .55; } 36% { opacity: .15; } 46% { opacity: .8; } 52% { opacity: .5; } 100% { opacity: 1; } }
@@ -430,6 +434,7 @@ html:lang(ja) .chips .sticky { font-size: calc(var(--nw) * .102); }
     linear-gradient(180deg, #3b3a3d, #252427 45%, #141416);
   box-shadow: inset 0 0 0 1px #050505, inset 0 1px 0 rgba(255,255,255,.14), var(--sx, 0px) var(--sy, 18px) 26px rgba(0,0,0,.6);
   filter: brightness(.6) saturate(.95); /* kept back, out of the lamp's light: the tape comes first */
+  will-change: transform; /* its own layer: the filter is the compositor's, not painted again as the shadow moves */
 }
 .cass-body::after { /* the shade over it, deepest round the tape */
   content: ""; position: absolute; inset: 0; z-index: 1; border-radius: inherit; pointer-events: none;
@@ -452,7 +457,7 @@ html:lang(ja) .cs-title { font-size: calc(var(--u) * 14.5); } html:lang(ko) .cs-
 }
 .cs-small { font: 700 calc(var(--u) * 6) / 1.25 var(--font); letter-spacing: .12em; color: #6b4d2a; }
 .cs-len { font-size: calc(var(--u) * 9); }
-.cass-reels { position: relative; z-index: 1; filter: brightness(.6) saturate(.95); cursor: ew-resize; touch-action: pan-y; -webkit-user-select: none; user-select: none; outline: none; }
+.cass-reels { position: relative; z-index: 1; filter: brightness(.6) saturate(.95); will-change: transform; cursor: ew-resize; touch-action: pan-y; -webkit-user-select: none; user-select: none; outline: none; }
 .cass-reels:focus-visible .reels { outline: 2px solid #fff; outline-offset: -2px; border-radius: 999px; }
 .reels { display: block; width: 100%; height: auto; }
 .cass-grip { position: absolute; left: 19%; top: 43%; width: 62%; height: 52%; border-radius: 0 0 999px 999px; touch-action: none; } /* a finger turns the reels only over the window, so the page still scrolls */
@@ -966,6 +971,17 @@ html:lang(de) :is(p, .lead) { hyphens: auto; -webkit-hyphens: auto; }
   .reveal { opacity: 1; translate: none; }
   #dust { display: none; }
 }
+
+/* DEsk 0.2 is here: a ribbon under the header to its page */
+.tile .tile-new { align-self: flex-start; margin: 0 0 12px; }
+.soon-ribbon { position: relative; z-index: 5; display: flex; gap: 14px; align-items: center; justify-content: center; flex-wrap: wrap;
+  margin: 0; padding: 10px 20px; text-decoration: none; color: #f3e7cf; font-size: 14px; line-height: 1.4; text-align: center;
+  background: linear-gradient(#3a2614, #2a1a0c); border-bottom: 1px solid rgba(211,162,74,.45); box-shadow: 0 6px 16px rgba(0,0,0,.35); }
+.soon-ribbon:hover .soon-more { text-decoration: underline; }
+.soon-badge { padding: 3px 10px; border-radius: 999px; font-weight: 700; font-size: 11px; letter-spacing: .14em; text-transform: uppercase;
+  color: #3a2408; background: linear-gradient(#fbe6a6, #d3a24a 60%, #a8782f); box-shadow: inset 0 1px 0 rgba(255,255,255,.55); }
+.soon-more { color: #f2c46d; white-space: nowrap; }
+.soon-more::after { content: " \203A"; }
 </style>
 <style>
 /* ---------- DEsk 0.2: what is on this page and not on the home page ---------- */
@@ -1262,6 +1278,7 @@ html:is(:lang(ja), :lang(zh), :lang(ko)) .v2-chip-tag { letter-spacing: .08em; f
 </head>
 <body>
 
+<div class="pool" aria-hidden="true"><i></i></div>
 <div class="beam" aria-hidden="true"></div>
 <canvas id="dust" aria-hidden="true"></canvas>
 
@@ -1298,7 +1315,7 @@ html:is(:lang(ja), :lang(zh), :lang(ko)) .v2-chip-tag { letter-spacing: .08em; f
           <option value="de">Deutsch</option>
         </select>
       </label>
-      <a class="pill sm" href="#download" data-lit data-elev="4" data-i18n="nav.download">Coming soon</a>
+      <a class="pill sm" href="#download" data-lit data-elev="4" data-i18n="nav.download">Download</a>
     </nav>
   </div>
 </header>
@@ -1315,7 +1332,6 @@ html:is(:lang(ja), :lang(zh), :lang(ko)) .v2-chip-tag { letter-spacing: .08em; f
     </div></div>
 
     <span class="nameplate">DESK 0.2</span>
-    <p class="soon-tag" data-i18n="soon.tag">Coming soon</p>
     <h1 class="hero-title" id="title" data-i18n-aria="hero.title" aria-label="More on the desk."><span class="t-depth" aria-hidden="true" data-i18n="hero.title">More on<br>the desk.</span><span class="t-face sheen" aria-hidden="true" data-i18n="hero.title">More on<br>the desk.</span></h1>
 
     <div class="hero-stage" data-lit data-elev="46">
@@ -1333,13 +1349,13 @@ html:is(:lang(ja), :lang(zh), :lang(ko)) .v2-chip-tag { letter-spacing: .08em; f
     <div class="hero-cta wrap">
       <p class="hero-sub" data-i18n="hero.sub">Things to work with, a desk of your own, and room for your hands.</p>
       <div class="cta-row">
-        <span class="bezel" data-lit data-elev="6"><a class="pill lg" href="#download" data-i18n="hero.download">Coming soon</a></span>
+        <span class="bezel" data-lit data-elev="6"><a class="pill lg" href="https://github.com/fyzugx/DEsk/releases" target="_blank" rel="noopener" data-i18n="hero.download">Download 0.2</a></span>
       </div>
       <div class="cta-links">
         <a class="more" href="https://fyzugx.github.io/DEsk/" data-i18n="hero.about">About DEsk</a>
-        <a class="more" href="https://github.com/fyzugx/DEsk/releases" target="_blank" rel="noopener" data-i18n="hero.notes">Get 0.1.5 today</a>
+        <a class="more" href="https://github.com/fyzugx/DEsk/releases" target="_blank" rel="noopener" data-i18n="hero.notes">Release notes</a>
       </div>
-      <p class="fine" data-i18n="hero.fine">Free and open source under the MIT License. Version 0.2.0 (beta) for Debian, Ubuntu, Arch Linux and Fedora.</p>
+      <p class="fine" data-i18n="hero.fine">Free and open source under the MIT License. Version 0.2 (beta) for Debian, Ubuntu, Arch Linux and Fedora.</p>
     </div>
   </section>
 
@@ -1381,8 +1397,8 @@ html:is(:lang(ja), :lang(zh), :lang(ko)) .v2-chip-tag { letter-spacing: .08em; f
     <div class="wrap">
       <div class="tool reveal">
         <div class="tool-films">
-          <figure class="cp-film small" data-lit data-elev="18" data-tilt="3"><video class="autoloop" muted loop playsinline preload="none" poster="img/loops/calc-keys-m-poster.webp" aria-label="The calculator open on the desk, 6 × 7 = clicked with the mouse: the dot display shows the sum, the pad in the lid writes it down"><source src="img/loops/calc-keys-m.webm" type="video/webm"><source src="img/loops/calc-keys-m.mp4" type="video/mp4"></video></figure>
-          <figure class="cp-film small" data-lit data-elev="18" data-tilt="3"><video class="autoloop" muted loop playsinline preload="none" poster="img/loops/calc-keys-poster.webp" aria-label="The same by finger, and FOLD pressed: the lid closes into a smaller calculator that still works"><source src="img/loops/calc-keys.webm" type="video/webm"><source src="img/loops/calc-keys.mp4" type="video/mp4"></video></figure>
+          <figure class="cp-film small" data-lit data-elev="18" data-tilt="3"><video class="autoloop" muted loop playsinline preload="none" poster="img/loops/calc-keys-m-poster.webp" aria-label="The calculator open on the desk, 6 × 7 = clicked with the mouse: the dot display shows the sum, the pad in the lid writes it down"><source src="img/loops/calc-keys-m.mp4" type="video/mp4"><source src="img/loops/calc-keys-m.webm" type="video/webm"></video></figure>
+          <figure class="cp-film small" data-lit data-elev="18" data-tilt="3"><video class="autoloop" muted loop playsinline preload="none" poster="img/loops/calc-keys-poster.webp" aria-label="The same by finger, and FOLD pressed: the lid closes into a smaller calculator that still works"><source src="img/loops/calc-keys.mp4" type="video/mp4"><source src="img/loops/calc-keys.webm" type="video/webm"></video></figure>
         </div>
         <div class="tool-copy">
           <p class="eyebrow" data-i18n="tc.eyebrow">The calculator</p>
@@ -1401,8 +1417,8 @@ html:is(:lang(ja), :lang(zh), :lang(ko)) .v2-chip-tag { letter-spacing: .08em; f
       </div>
       <div class="tool flip reveal">
         <div class="tool-films">
-          <figure class="cp-film small" data-lit data-elev="18" data-tilt="3"><video class="autoloop" muted loop playsinline preload="none" poster="img/loops/nb-type-poster.webp" aria-label="The notebook's heading: Saturday typed as the title, today's date put in by a click, two lines typed on the page"><source src="img/loops/nb-type.webm" type="video/webm"><source src="img/loops/nb-type.mp4" type="video/mp4"></video></figure>
-          <figure class="cp-film small" data-lit data-elev="18" data-tilt="3"><video class="autoloop" muted loop playsinline preload="none" poster="img/loops/nb-pen-poster.webp" aria-label="A finger rolls the pen in the pencil case from blue to red, takes it, underlines a line, puts it back, and sweeps the page over to a new one"><source src="img/loops/nb-pen.webm" type="video/webm"><source src="img/loops/nb-pen.mp4" type="video/mp4"></video></figure>
+          <figure class="cp-film small" data-lit data-elev="18" data-tilt="3"><video class="autoloop" muted loop playsinline preload="none" poster="img/loops/nb-type-poster.webp" aria-label="The notebook's heading: Saturday typed as the title, today's date put in by a click, two lines typed on the page"><source src="img/loops/nb-type.mp4" type="video/mp4"><source src="img/loops/nb-type.webm" type="video/webm"></video></figure>
+          <figure class="cp-film small" data-lit data-elev="18" data-tilt="3"><video class="autoloop" muted loop playsinline preload="none" poster="img/loops/nb-pen-poster.webp" aria-label="A finger rolls the pen in the pencil case from blue to red, takes it, underlines a line, puts it back, and sweeps the page over to a new one"><source src="img/loops/nb-pen.mp4" type="video/mp4"><source src="img/loops/nb-pen.webm" type="video/webm"></video></figure>
         </div>
         <div class="tool-copy">
           <p class="eyebrow" data-i18n="tn.eyebrow">The notebook</p>
@@ -1426,7 +1442,7 @@ html:is(:lang(ja), :lang(zh), :lang(ko)) .v2-chip-tag { letter-spacing: .08em; f
     <div class="wrap">
       <div class="tool reveal">
         <div class="tool-films">
-          <figure class="cp-film small" data-lit data-elev="18" data-tilt="3"><video class="autoloop" muted loop playsinline preload="none" poster="img/loops/phone-poster.webp" aria-label="A video as the slider phone: the home button pauses and plays, the deck slides out, ten seconds on, the slider dragged, the deck slid back"><source src="img/loops/phone.webm" type="video/webm"><source src="img/loops/phone.mp4" type="video/mp4"></video></figure>
+          <figure class="cp-film small" data-lit data-elev="18" data-tilt="3"><video class="autoloop" muted loop playsinline preload="none" poster="img/loops/phone-poster.webp" aria-label="A video as the slider phone: the home button pauses and plays, the deck slides out, ten seconds on, the slider dragged, the deck slid back"><source src="img/loops/phone.mp4" type="video/mp4"><source src="img/loops/phone.webm" type="video/webm"></video></figure>
         </div>
         <div class="tool-copy">
           <p class="eyebrow" data-i18n="tp.eyebrow">Picture-in-picture</p>
@@ -1437,7 +1453,7 @@ html:is(:lang(ja), :lang(zh), :lang(ko)) .v2-chip-tag { letter-spacing: .08em; f
       </div>
       <div class="tool flip reveal">
         <div class="tool-films">
-          <figure class="cp-film small" data-lit data-elev="18" data-tilt="3"><video class="autoloop" muted loop playsinline preload="none" poster="img/loops/cam-poster.webp" aria-label="Print pressed: the camera comes up, the room darkens round the viewfinder, an area is dragged out over the calculator, the shutter goes, and a letter arrives in the post box"><source src="img/loops/cam.webm" type="video/webm"><source src="img/loops/cam.mp4" type="video/mp4"></video></figure>
+          <figure class="cp-film small" data-lit data-elev="18" data-tilt="3"><video class="autoloop" muted loop playsinline preload="none" poster="img/loops/cam-poster.webp" aria-label="Print pressed: the camera comes up, the room darkens round the viewfinder, an area is dragged out over the calculator, the shutter goes, and a letter arrives in the post box"><source src="img/loops/cam.mp4" type="video/mp4"><source src="img/loops/cam.webm" type="video/webm"></video></figure>
           <figure class="paper v2-print" style="--rot:1.2deg" data-lit data-elev="16" data-tilt="5"><img src="img/camera.webp" width="900" height="720" alt="The back of the camera, with a tape in its slot" loading="lazy"><figcaption data-i18n="t4.cap">A tape in, and it films</figcaption></figure>
         </div>
         <div class="tool-copy">
@@ -1461,7 +1477,7 @@ html:is(:lang(ja), :lang(zh), :lang(ko)) .v2-chip-tag { letter-spacing: .08em; f
       </div>
     </div>
     <figure class="cp-film reveal" data-lit data-elev="22" data-tilt="3">
-      <video class="autoloop" muted loop playsinline preload="none" poster="img/loops/lid-poster.webp" aria-label="A finger pressing Airplane, which drops both radio levers and lowers the antenna, then Power Save, which lights green; then both again"><source src="img/loops/lid.webm" type="video/webm"><source src="img/loops/lid.mp4" type="video/mp4"></video>
+      <video class="autoloop" muted loop playsinline preload="none" poster="img/loops/lid-poster.webp" aria-label="A finger pressing Airplane, which drops both radio levers and lowers the antenna, then Power Save, which lights green; then both again"><source src="img/loops/lid.mp4" type="video/mp4"><source src="img/loops/lid.webm" type="video/webm"></video>
     </figure>
     <div class="wrap">
       <div class="cp-points four reveal">
@@ -1481,7 +1497,7 @@ html:is(:lang(ja), :lang(zh), :lang(ko)) .v2-chip-tag { letter-spacing: .08em; f
       </div>
     </div>
     <figure class="cp-clock reveal" data-lit data-elev="18" data-tilt="2">
-      <video class="autoloop" muted loop playsinline preload="none" poster="img/loops/clock-poster.webp" aria-label="The desk clock tapped through its pages: the date, what is playing, and the PC page with battery, power, CPU, memory and network"><source src="img/loops/clock.webm" type="video/webm"><source src="img/loops/clock.mp4" type="video/mp4"></video>
+      <video class="autoloop" muted loop playsinline preload="none" poster="img/loops/clock-poster.webp" aria-label="The desk clock tapped through its pages: the date, what is playing, and the PC page with battery, power, CPU, memory and network"><source src="img/loops/clock.mp4" type="video/mp4"><source src="img/loops/clock.webm" type="video/webm"></video>
     </figure>
     <div class="wrap">
       <div class="cp-points two reveal">
@@ -1541,7 +1557,7 @@ html:is(:lang(ja), :lang(zh), :lang(ko)) .v2-chip-tag { letter-spacing: .08em; f
       <!-- The order for what the desk is made of: ticked, signed, the lamp down, traced again -->
       <div class="tool reveal">
         <div class="tool-films">
-          <figure class="cp-film small" data-lit data-elev="18" data-tilt="3"><video class="autoloop" muted loop playsinline preload="none" poster="img/loops/wood-poster.webp" aria-label="Shell Settings' MATERIAL order: oak and honey ticked from the fans of samples, the order signed; the lamp goes down, the desk is traced again in the dark, and the light comes up on oak"><source src="img/loops/wood.webm" type="video/webm"><source src="img/loops/wood.mp4" type="video/mp4"></video></figure>
+          <figure class="cp-film small" data-lit data-elev="18" data-tilt="3"><video class="autoloop" muted loop playsinline preload="none" poster="img/loops/wood-poster.webp" aria-label="Shell Settings' MATERIAL order: oak and honey ticked from the fans of samples, the order signed; the lamp goes down, the desk is traced again in the dark, and the light comes up on oak"><source src="img/loops/wood.mp4" type="video/mp4"><source src="img/loops/wood.webm" type="video/webm"></video></figure>
         </div>
         <div class="tool-copy">
           <p class="eyebrow" data-i18n="ty.eyebrow">Material</p>
@@ -1553,8 +1569,8 @@ html:is(:lang(ja), :lang(zh), :lang(ko)) .v2-chip-tag { letter-spacing: .08em; f
       <!-- The clear mat; leather and linoleum, unrolled -->
       <div class="tool flip reveal">
         <div class="tool-films">
-          <figure class="cp-film small" data-lit data-elev="18" data-tilt="3"><video class="autoloop" muted loop playsinline preload="none" poster="img/loops/mat-poster.webp" aria-label="The clear mat: its corner turns up under the pointer, the mat is lifted, a print carried, turned with the wheel and made larger, another put back in the envelope of photos, and the mat laid down"><source src="img/loops/mat.webm" type="video/webm"><source src="img/loops/mat.mp4" type="video/mp4"></video></figure>
-          <figure class="cp-film small" data-lit data-elev="18" data-tilt="3"><video class="autoloop" muted loop playsinline preload="none" poster="img/loops/unroll-poster.webp" aria-label="A green leather mat unrolls across the desk, rolls up again, and a linoleum one unrolls in its place"><source src="img/loops/unroll.webm" type="video/webm"><source src="img/loops/unroll.mp4" type="video/mp4"></video></figure>
+          <figure class="cp-film small" data-lit data-elev="18" data-tilt="3"><video class="autoloop" muted loop playsinline preload="none" poster="img/loops/mat-poster.webp" aria-label="The clear mat: its corner turns up under the pointer, the mat is lifted, a print carried, turned with the wheel and made larger, another put back in the envelope of photos, and the mat laid down"><source src="img/loops/mat.mp4" type="video/mp4"><source src="img/loops/mat.webm" type="video/webm"></video></figure>
+          <figure class="cp-film small" data-lit data-elev="18" data-tilt="3"><video class="autoloop" muted loop playsinline preload="none" poster="img/loops/unroll-poster.webp" aria-label="A green leather mat unrolls across the desk, rolls up again, and a linoleum one unrolls in its place"><source src="img/loops/unroll.mp4" type="video/mp4"><source src="img/loops/unroll.webm" type="video/webm"></video></figure>
         </div>
         <div class="tool-copy">
           <p class="eyebrow" data-i18n="tm.eyebrow">The mat</p>
@@ -1567,7 +1583,7 @@ html:is(:lang(ja), :lang(zh), :lang(ko)) .v2-chip-tag { letter-spacing: .08em; f
       <!-- The drawer's looks -->
       <div class="tool reveal">
         <div class="tool-films">
-          <figure class="cp-film small" data-lit data-elev="18" data-tilt="3"><video class="autoloop" muted loop playsinline preload="none" poster="img/loops/looks-poster.webp" aria-label="A right-click on GIMP in the drawer: the card of looks, the paint box chosen; then Pluma, and the typewriter"><source src="img/loops/looks.webm" type="video/webm"><source src="img/loops/looks.mp4" type="video/mp4"></video></figure>
+          <figure class="cp-film small" data-lit data-elev="18" data-tilt="3"><video class="autoloop" muted loop playsinline preload="none" poster="img/loops/looks-poster.webp" aria-label="A right-click on GIMP in the drawer: the card of looks, the paint box chosen; then Pluma, and the typewriter"><source src="img/loops/looks.mp4" type="video/mp4"><source src="img/loops/looks.webm" type="video/webm"></video></figure>
         </div>
         <div class="tool-copy">
           <p class="eyebrow" data-i18n="tl.eyebrow">Looks</p>
@@ -1601,7 +1617,7 @@ html:is(:lang(ja), :lang(zh), :lang(ko)) .v2-chip-tag { letter-spacing: .08em; f
         <h3 class="v2-h3" data-i18n="g.title">Every move, by hand.</h3>
         <p class="lead" data-i18n="g.lead">Nothing jumps to its place. What you touch comes with your finger, one to one, and when you let go it carries on at the speed you gave it.</p>
       </div>
-      <div class="loop-grid reveal"><figure class="paper loop" data-lit data-elev="16" data-tilt="5"><div class="loop-frame"><video muted loop playsinline preload="none" poster="img/loops/shelf-poster.webp" aria-label="A finger drawn down the desk; the view tilts up to the bookcase"><source src="img/loops/shelf.webm" type="video/webm"><source src="img/loops/shelf.mp4" type="video/mp4"></video><div class="gest g-down" aria-hidden="true"><div class="pad"><span class="trail"></span><i class="f f0"></i></div></div></div><figcaption data-i18n="g.down"><strong>Down</strong> — look up at the bookcase</figcaption></figure><figure class="paper loop" data-lit data-elev="16" data-tilt="5"><div class="loop-frame"><video muted loop playsinline preload="none" poster="img/loops/drawer-poster.webp" aria-label="A finger drawing the drawer up and taking out the calculator"><source src="img/loops/drawer.webm" type="video/webm"><source src="img/loops/drawer.mp4" type="video/mp4"></video><div class="gest g-up" aria-hidden="true"><div class="pad"><span class="trail"></span><i class="f f0"></i></div></div></div><figcaption data-i18n="g.up"><strong>Up</strong> — the drawer slides out</figcaption></figure><figure class="paper loop" data-lit data-elev="16" data-tilt="5"><div class="loop-frame"><video muted loop playsinline preload="none" poster="img/loops/panelswipe-poster.webp" aria-label="A finger drawn across the desk; the view turns to the Control Panel"><source src="img/loops/panelswipe.webm" type="video/webm"><source src="img/loops/panelswipe.mp4" type="video/mp4"></video><div class="gest g-right" aria-hidden="true"><div class="pad"><span class="trail"></span><i class="f f0"></i></div></div></div><figcaption data-i18n="g.right"><strong>Right</strong> — turn to the Control Panel</figcaption></figure><figure class="paper loop" data-lit data-elev="16" data-tilt="5"><div class="loop-frame"><video muted loop playsinline preload="none" poster="img/loops/carry-poster.webp" aria-label="A letter carried by a finger and let go, sliding on the desk"><source src="img/loops/carry.webm" type="video/webm"><source src="img/loops/carry.mp4" type="video/mp4"></video><div class="gest g-flick" aria-hidden="true"><div class="pad"><span class="trail"></span><i class="f f0"></i></div></div></div><figcaption data-i18n="g.flick"><strong>Flick a sheet</strong> — it slides and stops on the wood</figcaption></figure><figure class="paper loop" data-lit data-elev="16" data-tilt="5"><div class="loop-frame"><video muted loop playsinline preload="none" poster="img/loops/fold-poster.webp" aria-label="Three fingers drawing down over a sheet, which folds up"><source src="img/loops/fold.webm" type="video/webm"><source src="img/loops/fold.mp4" type="video/mp4"></video><div class="gest g-three" aria-hidden="true"><div class="pad"><span class="trail"></span><i class="f f0"></i><i class="f f1"></i><i class="f f2"></i></div></div></div><figcaption data-i18n="g.three"><strong>Three fingers down</strong> — the sheet folds</figcaption></figure><figure class="paper loop" data-lit data-elev="16" data-tilt="5"><div class="loop-frame"><video muted loop playsinline preload="none" poster="img/loops/ring-poster.webp" aria-label="A finger swinging a binder’s sheets round its ring"><source src="img/loops/ring.webm" type="video/webm"><source src="img/loops/ring.mp4" type="video/mp4"></video><div class="gest g-ring" aria-hidden="true"><div class="pad"><span class="trail"></span><i class="f f0"></i></div></div></div><figcaption data-i18n="g.ring"><strong>Round the ring</strong> — a binder, a sheet at a time</figcaption></figure><figure class="paper loop" data-lit data-elev="16" data-tilt="5"><div class="loop-frame"><video muted loop playsinline preload="none" poster="img/loops/pages-poster.webp" aria-label="A finger turning the pages of the ALL APPS book"><source src="img/loops/pages.webm" type="video/webm"><source src="img/loops/pages.mp4" type="video/mp4"></video><div class="gest g-page" aria-hidden="true"><div class="pad"><span class="trail"></span><i class="f f0"></i></div></div></div><figcaption data-i18n="g.page"><strong>Across a page</strong> — it follows the finger over</figcaption></figure><figure class="paper loop" data-lit data-elev="16" data-tilt="5"><div class="loop-frame"><video muted loop playsinline preload="none" poster="img/loops/write-poster.webp" aria-label="Hello written by finger in the notebook"><source src="img/loops/write.webm" type="video/webm"><source src="img/loops/write.mp4" type="video/mp4"></video><div class="gest g-write" aria-hidden="true"><div class="pad"><span class="trail"></span><i class="f f0"></i></div></div></div><figcaption data-i18n="g.write"><strong>Write</strong> — by finger, in the notebook</figcaption></figure></div>
+      <div class="loop-grid reveal"><figure class="paper loop" data-lit data-elev="16" data-tilt="5"><div class="loop-frame"><video muted loop playsinline preload="none" poster="img/loops/shelf-poster.webp" aria-label="A finger drawn down the desk; the view tilts up to the bookcase"><source src="img/loops/shelf.mp4" type="video/mp4"><source src="img/loops/shelf.webm" type="video/webm"></video><div class="gest g-down" aria-hidden="true"><div class="pad"><span class="trail"></span><i class="f f0"></i></div></div></div><figcaption data-i18n="g.down"><strong>Down</strong> — look up at the bookcase</figcaption></figure><figure class="paper loop" data-lit data-elev="16" data-tilt="5"><div class="loop-frame"><video muted loop playsinline preload="none" poster="img/loops/drawer-poster.webp" aria-label="A finger drawing the drawer up and taking out the calculator"><source src="img/loops/drawer.mp4" type="video/mp4"><source src="img/loops/drawer.webm" type="video/webm"></video><div class="gest g-up" aria-hidden="true"><div class="pad"><span class="trail"></span><i class="f f0"></i></div></div></div><figcaption data-i18n="g.up"><strong>Up</strong> — the drawer slides out</figcaption></figure><figure class="paper loop" data-lit data-elev="16" data-tilt="5"><div class="loop-frame"><video muted loop playsinline preload="none" poster="img/loops/panelswipe-poster.webp" aria-label="A finger drawn across the desk; the view turns to the Control Panel"><source src="img/loops/panelswipe.mp4" type="video/mp4"><source src="img/loops/panelswipe.webm" type="video/webm"></video><div class="gest g-right" aria-hidden="true"><div class="pad"><span class="trail"></span><i class="f f0"></i></div></div></div><figcaption data-i18n="g.right"><strong>Right</strong> — turn to the Control Panel</figcaption></figure><figure class="paper loop" data-lit data-elev="16" data-tilt="5"><div class="loop-frame"><video muted loop playsinline preload="none" poster="img/loops/carry-poster.webp" aria-label="A letter carried by a finger and let go, sliding on the desk"><source src="img/loops/carry.mp4" type="video/mp4"><source src="img/loops/carry.webm" type="video/webm"></video><div class="gest g-flick" aria-hidden="true"><div class="pad"><span class="trail"></span><i class="f f0"></i></div></div></div><figcaption data-i18n="g.flick"><strong>Flick a sheet</strong> — it slides and stops on the wood</figcaption></figure><figure class="paper loop" data-lit data-elev="16" data-tilt="5"><div class="loop-frame"><video muted loop playsinline preload="none" poster="img/loops/fold-poster.webp" aria-label="Three fingers drawing down over a sheet, which folds up"><source src="img/loops/fold.mp4" type="video/mp4"><source src="img/loops/fold.webm" type="video/webm"></video><div class="gest g-three" aria-hidden="true"><div class="pad"><span class="trail"></span><i class="f f0"></i><i class="f f1"></i><i class="f f2"></i></div></div></div><figcaption data-i18n="g.three"><strong>Three fingers down</strong> — the sheet folds</figcaption></figure><figure class="paper loop" data-lit data-elev="16" data-tilt="5"><div class="loop-frame"><video muted loop playsinline preload="none" poster="img/loops/ring-poster.webp" aria-label="A finger swinging a binder’s sheets round its ring"><source src="img/loops/ring.mp4" type="video/mp4"><source src="img/loops/ring.webm" type="video/webm"></video><div class="gest g-ring" aria-hidden="true"><div class="pad"><span class="trail"></span><i class="f f0"></i></div></div></div><figcaption data-i18n="g.ring"><strong>Round the ring</strong> — a binder, a sheet at a time</figcaption></figure><figure class="paper loop" data-lit data-elev="16" data-tilt="5"><div class="loop-frame"><video muted loop playsinline preload="none" poster="img/loops/pages-poster.webp" aria-label="A finger turning the pages of the ALL APPS book"><source src="img/loops/pages.mp4" type="video/mp4"><source src="img/loops/pages.webm" type="video/webm"></video><div class="gest g-page" aria-hidden="true"><div class="pad"><span class="trail"></span><i class="f f0"></i></div></div></div><figcaption data-i18n="g.page"><strong>Across a page</strong> — it follows the finger over</figcaption></figure><figure class="paper loop" data-lit data-elev="16" data-tilt="5"><div class="loop-frame"><video muted loop playsinline preload="none" poster="img/loops/write-poster.webp" aria-label="Hello written by finger in the notebook"><source src="img/loops/write.mp4" type="video/mp4"><source src="img/loops/write.webm" type="video/webm"></video><div class="gest g-write" aria-hidden="true"><div class="pad"><span class="trail"></span><i class="f f0"></i></div></div></div><figcaption data-i18n="g.write"><strong>Write</strong> — by finger, in the notebook</figcaption></figure></div>
       <p class="gest-more" data-i18n="g.more"><strong>And more:</strong> left to the post box, three fingers apart to open a sheet out, three fingers in to crumple it and throw it away, three fingers up for every window at once.</p>
     </div>
   </section>
@@ -1620,7 +1636,7 @@ html:is(:lang(ja), :lang(zh), :lang(ko)) .v2-chip-tag { letter-spacing: .08em; f
       <!-- The favourites binder, and the clipboard in the drawer -->
       <div class="tool reveal">
         <div class="tool-films">
-          <figure class="cp-film small" data-lit data-elev="18" data-tilt="3"><video class="autoloop" muted loop playsinline preload="none" poster="img/loops/fav-poster.webp" aria-label="ALL APPS: the Internet binder taken down, a flag stuck on its Akregator sheet; the binder put back and the slim mustard favourites binder taken down, Akregator in it by GIMP"><source src="img/loops/fav.webm" type="video/webm"><source src="img/loops/fav.mp4" type="video/mp4"></video></figure>
+          <figure class="cp-film small" data-lit data-elev="18" data-tilt="3"><video class="autoloop" muted loop playsinline preload="none" poster="img/loops/fav-poster.webp" aria-label="ALL APPS: the Internet binder taken down, a flag stuck on its Akregator sheet; the binder put back and the slim mustard favourites binder taken down, Akregator in it by GIMP"><source src="img/loops/fav.mp4" type="video/mp4"><source src="img/loops/fav.webm" type="video/webm"></video></figure>
         </div>
         <div class="tool-copy">
           <p class="eyebrow" data-i18n="tf.eyebrow">Favourites</p>
@@ -1631,7 +1647,7 @@ html:is(:lang(ja), :lang(zh), :lang(ko)) .v2-chip-tag { letter-spacing: .08em; f
       </div>
       <div class="tool flip reveal">
         <div class="tool-films">
-          <figure class="cp-film small" data-lit data-elev="18" data-tilt="3"><video class="autoloop" muted loop playsinline preload="none" poster="img/loops/clip-poster.webp" aria-label="Super+V: the clipboard out of the drawer; a line of the letter selected and copied, a new slip clipped on; the photo slip pressed and brought to the front; one slip torn off; Super+V puts it away"><source src="img/loops/clip.webm" type="video/webm"><source src="img/loops/clip.mp4" type="video/mp4"></video></figure>
+          <figure class="cp-film small" data-lit data-elev="18" data-tilt="3"><video class="autoloop" muted loop playsinline preload="none" poster="img/loops/clip-poster.webp" aria-label="Super+V: the clipboard out of the drawer; a line of the letter selected and copied, a new slip clipped on; the photo slip pressed and brought to the front; one slip torn off; Super+V puts it away"><source src="img/loops/clip.mp4" type="video/mp4"><source src="img/loops/clip.webm" type="video/webm"></video></figure>
         </div>
         <div class="tool-copy">
           <p class="eyebrow" data-i18n="cb.eyebrow">Clipboard</p>
@@ -1690,12 +1706,11 @@ html:is(:lang(ja), :lang(zh), :lang(ko)) .v2-chip-tag { letter-spacing: .08em; f
   <section class="download" id="download">
     <div class="wrap center">
       <div class="reveal">
-        <p class="soon-tag" data-i18n="soon.tag">Coming soon</p>
-        <h2 class="headline"><span class="grad sheen" data-i18n="dl.title">DEsk 0.2 is nearly here.</span></h2>
+        <h2 class="headline"><span class="grad sheen" data-i18n="dl.title">Get DEsk 0.2.</span></h2>
         <p class="lead" style="margin:20px auto 0;max-width:640px" data-i18n="dl.lead">It is being tried on real machines now. Until it comes, <strong>DEsk 0.1.5 is the one to install</strong> &mdash; and 0.2 will carry your settings forward.</p>
         <div class="dl-cta">
-          <span class="bezel" data-lit data-elev="6"><a class="pill lg" href="https://github.com/fyzugx/DEsk/releases" target="_blank" rel="noopener" data-i18n="dl.btn">Get 0.1.5 today</a></span>
-          <a class="more" href="https://github.com/fyzugx/DEsk" target="_blank" rel="noopener" data-i18n="dl.watch">Watch the project on GitHub</a>
+          <span class="bezel" data-lit data-elev="6"><a class="pill lg" href="https://github.com/fyzugx/DEsk/releases" target="_blank" rel="noopener" data-i18n="dl.btn">Download v0.2</a></span>
+          <a class="more" href="https://github.com/fyzugx/DEsk/releases" target="_blank" rel="noopener" data-i18n="dl.notes">Everything that changed</a>
         </div>
         <div class="cta-links">
           <a class="more" href="https://fyzugx.github.io/DEsk/#download" data-i18n="dl.how">How to install</a>
@@ -1727,7 +1742,7 @@ html:is(:lang(ja), :lang(zh), :lang(ko)) .v2-chip-tag { letter-spacing: .08em; f
       <button type="button" data-setlang="fr" lang="fr">Français</button>
       <button type="button" data-setlang="de" lang="de">Deutsch</button>
     </div>
-    <div class="legal"><span data-i18n="ft.legal">Copyright © 2026 The DEsk authors. Released under the MIT License.</span><span data-i18n="soon.ver">0.2 — coming soon</span></div>
+    <div class="legal"><span data-i18n="ft.legal">Copyright © 2026 The DEsk authors. Released under the MIT License.</span><span data-i18n="soon.ver">v0.2 (beta)</span></div>
   </div>
 </footer>
 
@@ -1743,7 +1758,7 @@ const I18N = {
     "hero.title": "More on<br>the desk.",
     "hero.sub": "Things to work with, a desk of your own, and room for your hands.",
     "hero.download": "Download 0.2", "hero.about": "About DEsk", "hero.notes": "Release notes",
-    "hero.fine": "Free and open source under the MIT License. Version 0.2.0 (beta) for Debian, Ubuntu, Arch Linux and Fedora.",
+    "hero.fine": "Free and open source under the MIT License. Version 0.2 (beta) for Debian, Ubuntu, Arch Linux and Fedora.",
     "things.eyebrow": "New things", "things.title": "Things to work with,<br>not windows.",
     "things.lead": "Some tools are better as things. They lie on the desk among your papers, and work the way they look.",
     "t1.cap": "Opened out on the desk", "t1.h": "A calculator.",
@@ -1792,7 +1807,7 @@ const I18N = {
     "thanks.p2": "And thank you to everyone who reported, tested and asked, on GitHub and on Discord.",
     "thanks.sign": "Thank you!",
     "dl.title": "Get DEsk 0.2.", "dl.lead": "One installer per distribution brings everything DEsk needs. <strong>Your settings and data are carried forward.</strong>",
-    "dl.btn": "Download v0.2.0", "dl.notes": "Everything that changed", "dl.how": "How to install",
+    "dl.btn": "Download v0.2", "dl.notes": "Everything that changed", "dl.how": "How to install",
     "hero.github": "View on GitHub", "hero.discord": "Join Discord",
     "ft.n1": "DEsk is in beta. It is used day to day on its author's machines, but expect rough edges, and expect things to change. Your settings and data are carried forward.",
     "ft.n2": "Every picture on this page was drawn by DEsk itself. The sizes and times are DEsk's own measurements.",
@@ -1806,7 +1821,7 @@ const I18N = {
     "hero.title": "机の上に、<br>もっと。",
     "hero.sub": "手に取って使う道具、好みの机、そして指とペン。",
     "hero.download": "0.2 をダウンロード", "hero.about": "DEsk について", "hero.notes": "リリースノート",
-    "hero.fine": "MIT ライセンスの無料オープンソース。バージョン 0.2.0（ベータ）。Debian、Ubuntu、Arch Linux、Fedora に対応。",
+    "hero.fine": "MIT ライセンスの無料オープンソース。バージョン 0.2（ベータ）。Debian、Ubuntu、Arch Linux、Fedora に対応。",
     "things.eyebrow": "新しい道具", "things.title": "ウィンドウではなく、<br>道具として。",
     "things.lead": "道具のままのほうが使いやすいものがあります。紙と一緒に机の上に置かれ、見たとおりに使えます。",
     "t1.cap": "机の上で開いたところ", "t1.h": "電卓。",
@@ -1855,7 +1870,7 @@ const I18N = {
     "thanks.p2": "GitHub と Discord で報告し、試し、尋ねてくれたみなさんにも感謝します。",
     "thanks.sign": "ありがとう！",
     "dl.title": "DEsk 0.2 を手に入れよう。", "dl.lead": "ディストリビューションごとのインストーラーが、必要なものをすべて揃えます。<strong>設定とデータは引き継がれます。</strong>",
-    "dl.btn": "v0.2.0 をダウンロード", "dl.notes": "変わったことのすべて", "dl.how": "インストール方法",
+    "dl.btn": "v0.2 をダウンロード", "dl.notes": "変わったことのすべて", "dl.how": "インストール方法",
     "hero.github": "GitHub で見る", "hero.discord": "Discord に参加",
     "ft.n1": "DEsk はベータ版です。作者のマシンで日常的に使われていますが、粗い部分や変更があることをご了承ください。設定とデータは引き継がれます。",
     "ft.n2": "このページの絵は、すべて DEsk 自身が描いたものです。大きさと時間は DEsk で計ったものです。",
@@ -1869,7 +1884,7 @@ const I18N = {
     "hero.title": "书桌上，<br>更多。",
     "hero.sub": "拿来就用的物件，属于你的书桌，还有给双手的空间。",
     "hero.download": "下载 0.2", "hero.about": "关于 DEsk", "hero.notes": "发行说明",
-    "hero.fine": "基于 MIT 许可证的免费开源软件。版本 0.2.0（测试版），支持 Debian、Ubuntu、Arch Linux 和 Fedora。",
+    "hero.fine": "基于 MIT 许可证的免费开源软件。版本 0.2（测试版），支持 Debian、Ubuntu、Arch Linux 和 Fedora。",
     "things.eyebrow": "新物件", "things.title": "是物件，<br>而不是窗口。",
     "things.lead": "有些工具做成物件更好用。它们和你的纸张一起放在桌上，看起来怎样，用起来就怎样。",
     "t1.cap": "在桌上打开", "t1.h": "计算器。",
@@ -1918,7 +1933,7 @@ const I18N = {
     "thanks.p2": "也感谢在 GitHub 和 Discord 上报告问题、测试和提问的每一个人。",
     "thanks.sign": "谢谢！",
     "dl.title": "获取 DEsk 0.2。", "dl.lead": "每个发行版都有一个安装程序，带来 DEsk 所需的一切。<strong>你的设置和数据会被保留。</strong>",
-    "dl.btn": "下载 v0.2.0", "dl.notes": "所有改动", "dl.how": "安装方法",
+    "dl.btn": "下载 v0.2", "dl.notes": "所有改动", "dl.how": "安装方法",
     "hero.github": "在 GitHub 上查看", "hero.discord": "加入 Discord",
     "ft.n1": "DEsk 目前处于测试阶段。作者日常在自己的机器上使用它，但仍可能有不完善之处，也会有变化。你的设置和数据会被保留。",
     "ft.n2": "本页所有图片都由 DEsk 自己绘制。大小和时间是 DEsk 自己测得的。",
@@ -1932,7 +1947,7 @@ const I18N = {
     "hero.title": "책상 위에,<br>더 많이.",
     "hero.sub": "손에 쥐고 쓰는 물건, 나만의 책상, 그리고 손을 위한 자리.",
     "hero.download": "0.2 다운로드", "hero.about": "DEsk 소개", "hero.notes": "릴리스 노트",
-    "hero.fine": "MIT 라이선스의 무료 오픈 소스. 버전 0.2.0(베타), Debian, Ubuntu, Arch Linux, Fedora 지원.",
+    "hero.fine": "MIT 라이선스의 무료 오픈 소스. 버전 0.2(베타), Debian, Ubuntu, Arch Linux, Fedora 지원.",
     "things.eyebrow": "새 물건", "things.title": "창이 아니라,<br>물건으로.",
     "things.lead": "어떤 도구는 물건일 때 더 쓰기 좋습니다. 종이들과 함께 책상 위에 놓이고, 보이는 그대로 작동합니다.",
     "t1.cap": "책상 위에 펼친 모습", "t1.h": "계산기.",
@@ -1981,7 +1996,7 @@ const I18N = {
     "thanks.p2": "GitHub와 Discord에서 알려 주고, 시험하고, 물어봐 주신 모든 분께도 감사드립니다.",
     "thanks.sign": "고맙습니다!",
     "dl.title": "DEsk 0.2 받기.", "dl.lead": "배포판마다 하나의 설치 프로그램이 DEsk에 필요한 모든 것을 가져옵니다. <strong>설정과 데이터는 그대로 이어집니다.</strong>",
-    "dl.btn": "v0.2.0 다운로드", "dl.notes": "바뀐 모든 것", "dl.how": "설치 방법",
+    "dl.btn": "v0.2 다운로드", "dl.notes": "바뀐 모든 것", "dl.how": "설치 방법",
     "hero.github": "GitHub에서 보기", "hero.discord": "Discord 참여하기",
     "ft.n1": "DEsk는 베타 버전입니다. 제작자의 컴퓨터에서 매일 사용되고 있지만, 다듬어지지 않은 부분과 변경 사항이 있을 수 있습니다. 설정과 데이터는 그대로 이어집니다.",
     "ft.n2": "이 페이지의 그림은 모두 DEsk가 직접 그린 것입니다. 크기와 시간은 DEsk에서 잰 것입니다.",
@@ -1995,7 +2010,7 @@ const I18N = {
     "hero.title": "Más sobre<br>el escritorio.",
     "hero.sub": "Cosas con las que trabajar, un escritorio a tu gusto y sitio para tus manos.",
     "hero.download": "Descargar 0.2", "hero.about": "Sobre DEsk", "hero.notes": "Notas de la versión",
-    "hero.fine": "Libre y de código abierto bajo la licencia MIT. Versión 0.2.0 (beta) para Debian, Ubuntu, Arch Linux y Fedora.",
+    "hero.fine": "Libre y de código abierto bajo la licencia MIT. Versión 0.2 (beta) para Debian, Ubuntu, Arch Linux y Fedora.",
     "things.eyebrow": "Novedades", "things.title": "Cosas para trabajar,<br>no ventanas.",
     "things.lead": "Algunas herramientas funcionan mejor como cosas. Están sobre el escritorio entre tus papeles y funcionan tal como se ven.",
     "t1.cap": "Abierta sobre el escritorio", "t1.h": "Una calculadora.",
@@ -2044,7 +2059,7 @@ const I18N = {
     "thanks.p2": "Y gracias a todas las personas que informaron, probaron y preguntaron, en GitHub y en Discord.",
     "thanks.sign": "¡Gracias!",
     "dl.title": "Consigue DEsk 0.2.", "dl.lead": "Un instalador por distribución trae todo lo que DEsk necesita. <strong>Tus ajustes y datos se conservan.</strong>",
-    "dl.btn": "Descargar v0.2.0", "dl.notes": "Todo lo que ha cambiado", "dl.how": "Cómo instalar",
+    "dl.btn": "Descargar v0.2", "dl.notes": "Todo lo que ha cambiado", "dl.how": "Cómo instalar",
     "hero.github": "Ver en GitHub", "hero.discord": "Únete a Discord",
     "ft.n1": "DEsk está en beta. Se usa a diario en los equipos de su autor, pero espera asperezas y cambios. Tus ajustes y datos se conservan.",
     "ft.n2": "Todas las imágenes de esta página las ha dibujado el propio DEsk. Los tamaños y los tiempos son mediciones de DEsk.",
@@ -2058,7 +2073,7 @@ const I18N = {
     "hero.title": "Encore plus<br>sur le bureau.",
     "hero.sub": "Des objets pour travailler, un bureau à vous, et de la place pour vos mains.",
     "hero.download": "Télécharger la 0.2", "hero.about": "À propos de DEsk", "hero.notes": "Notes de version",
-    "hero.fine": "Libre et open source sous licence MIT. Version 0.2.0 (bêta) pour Debian, Ubuntu, Arch Linux et Fedora.",
+    "hero.fine": "Libre et open source sous licence MIT. Version 0.2 (bêta) pour Debian, Ubuntu, Arch Linux et Fedora.",
     "things.eyebrow": "Nouveautés", "things.title": "Des objets,<br>pas des fenêtres.",
     "things.lead": "Certains outils sont meilleurs en objets. Ils sont posés sur le bureau parmi vos papiers, et fonctionnent comme ils en ont l'air.",
     "t1.cap": "Ouverte sur le bureau", "t1.h": "Une calculatrice.",
@@ -2107,7 +2122,7 @@ const I18N = {
     "thanks.p2": "Et merci à toutes celles et ceux qui ont signalé, testé et demandé, sur GitHub et sur Discord.",
     "thanks.sign": "Merci !",
     "dl.title": "Obtenez DEsk 0.2.", "dl.lead": "Un installateur par distribution apporte tout ce dont DEsk a besoin. <strong>Vos réglages et vos données sont conservés.</strong>",
-    "dl.btn": "Télécharger la v0.2.0", "dl.notes": "Tout ce qui a changé", "dl.how": "Installation",
+    "dl.btn": "Télécharger la v0.2", "dl.notes": "Tout ce qui a changé", "dl.how": "Installation",
     "hero.github": "Voir sur GitHub", "hero.discord": "Rejoindre Discord",
     "ft.n1": "DEsk est en bêta. Il est utilisé au quotidien sur les machines de son auteur, mais attendez-vous à quelques aspérités et à des changements. Vos réglages et vos données sont conservés.",
     "ft.n2": "Toutes les images de cette page ont été dessinées par DEsk lui-même. Les tailles et les temps sont mesurés par DEsk.",
@@ -2121,7 +2136,7 @@ const I18N = {
     "hero.title": "Mehr auf dem<br>Schreibtisch.",
     "hero.sub": "Dinge zum Arbeiten, ein Schreibtisch nach deinem Geschmack und Platz für deine Hände.",
     "hero.download": "0.2 herunterladen", "hero.about": "Über DEsk", "hero.notes": "Versionshinweise",
-    "hero.fine": "Frei und quelloffen unter der MIT-Lizenz. Version 0.2.0 (Beta) für Debian, Ubuntu, Arch Linux und Fedora.",
+    "hero.fine": "Frei und quelloffen unter der MIT-Lizenz. Version 0.2 (Beta) für Debian, Ubuntu, Arch Linux und Fedora.",
     "things.eyebrow": "Neue Dinge", "things.title": "Dinge zum Arbeiten,<br>keine Fenster.",
     "things.lead": "Manche Werkzeuge sind als Dinge besser. Sie liegen zwischen deinen Papieren auf dem Schreibtisch und funktionieren so, wie sie aussehen.",
     "t1.cap": "Aufgeklappt auf dem Schreibtisch", "t1.h": "Ein Taschenrechner.",
@@ -2170,7 +2185,7 @@ const I18N = {
     "thanks.p2": "Und danke an alle, die auf GitHub und Discord gemeldet, getestet und gefragt haben.",
     "thanks.sign": "Danke!",
     "dl.title": "Hol dir DEsk 0.2.", "dl.lead": "Ein Installationsprogramm pro Distribution bringt alles mit, was DEsk braucht. <strong>Deine Einstellungen und Daten werden übernommen.</strong>",
-    "dl.btn": "v0.2.0 herunterladen", "dl.notes": "Alles, was sich geändert hat", "dl.how": "Installation",
+    "dl.btn": "v0.2 herunterladen", "dl.notes": "Alles, was sich geändert hat", "dl.how": "Installation",
     "hero.github": "Auf GitHub ansehen", "hero.discord": "Discord beitreten",
     "ft.n1": "DEsk ist in der Beta. Es wird bereits täglich genutzt, aber rechne mit Ecken und Kanten und mit Änderungen. Deine Einstellungen und Daten werden übernommen.",
     "ft.n2": "Jedes Bild auf dieser Seite hat DEsk selbst gezeichnet. Größen und Zeiten hat DEsk selbst gemessen.",
@@ -2266,6 +2281,10 @@ const SOON = {
     "dl.btn": "0.1.5 jetzt holen", "dl.watch": "Das Projekt auf GitHub verfolgen"
   }
 };
+// 0.2 is out (build.py --released): the words for before the release give way to the page's own; what SOON added stays
+const BEFORE = ["soon.tag", "nav.download", "hero.download", "hero.notes", "hero.fine", "meta.title", "dl.title", "dl.lead", "dl.btn", "dl.watch"];
+const VER = { en: "v0.2 (beta)", ja: "v0.2（ベータ）", zh: "v0.2（测试版）", ko: "v0.2(베타)", es: "v0.2 (beta)", fr: "v0.2 (bêta)", de: "v0.2 (Beta)" };
+for (const l in SOON) { for (const k of BEFORE) delete SOON[l][k]; SOON[l]["soon.ver"] = VER[l]; }
 for (const l in SOON) Object.assign(I18N[l], SOON[l]);
 
 // ---------- the Control Panel and the clock (2026-11-13) ----------
@@ -2757,8 +2776,7 @@ $$("[data-tilt]").forEach(el => {
 
 // ---------- The lamp: it sways, and the page is lit and shadowed from its bulb ----------
 (() => {
-  const root = document.documentElement;
-  const lampWrap = $(".lamp-wrap"), lamp = $(".lamp", lampWrap), bulbGlow = $("#bulb-glow"), chain = $("#lamp-chain"), beam = $(".beam");
+  const lampWrap = $(".lamp-wrap"), lamp = $(".lamp", lampWrap), bulbGlow = $("#bulb-glow"), chain = $("#lamp-chain"), beam = $(".beam"), pool = $(".pool i");
   const heroShot = $("#hero-shot"), title = $("#title"), titleDepth = $(".t-depth", title);
   const DEPTH = ["#7a5520", "#6b4718", "#5e3e14", "#513510", "#452c0c", "#3a2408", "#2f1d06", "#261704"];
   const lit = new Set();
@@ -2768,13 +2786,18 @@ $$("[data-tilt]").forEach(el => {
   addEventListener("pointermove", e => { px = e.clientX / innerWidth; py = e.clientY / innerHeight; }, { passive: true });
 
   const dust = $("#dust"), ctx = dust.getContext("2d");
-  function sizeDust() { const d = Math.min(devicePixelRatio || 1, 2); dust.width = innerWidth * d; dust.height = innerHeight * d; ctx.setTransform(d, 0, 0, d, 0, 0); }
+  let dirty = null;   // where the motes were drawn last frame: x0, y0, x1, y1
+  function sizeDust() { const d = Math.min(devicePixelRatio || 1, 2); dust.width = innerWidth * d; dust.height = innerHeight * d; ctx.setTransform(d, 0, 0, d, 0, 0); dirty = null; }
   sizeDust(); addEventListener("resize", sizeDust);
   const motes = Array.from({ length: 80 }, () => ({ u: Math.random() * 2 - 1, v: Math.random(), z: Math.random(), ph: Math.random() * 6.28, sv: (Math.random() - .45) * .0007 }));
   const setVar = (el, n, v) => { if (el["_" + n] !== v) { el["_" + n] = v; el.style.setProperty(n, v); } };
+  const setStyle = (el, n, v) => { if (el["_" + n] !== v) { el["_" + n] = v; el.style[n] = v; } };
 
   function frame(now) {
     const t = now / 1000;
+    // Everything read first, then everything written: a read after a write lays the page out again.
+    const r = lampWrap.getBoundingClientRect(), tb = title.getBoundingClientRect();
+    const boxes = [...lit].map(el => [el, el.getBoundingClientRect()]);
     const sway = REDUCE ? 0 : Math.sin(t * .7) * 2.2 + Math.sin(t * 1.9) * .5 + (px - .5) * 4;
     const li = REDUCE ? 1 : 1 + Math.sin(t * 13) * Math.sin(t * 7.3) * .02;
     lamp.style.transform = `rotate(${sway.toFixed(2)}deg)`;
@@ -2782,22 +2805,19 @@ $$("[data-tilt]").forEach(el => {
     chain.style.transform = `rotate(${(-sway * .85).toFixed(2)}deg)`;
 
     // Where the bulb is on screen (render/lamp3d.c: the bulb .481 of the picture's width down, the open bottom .570 and .934 wide).
-    const r = lampWrap.getBoundingClientRect();
     const a = sway * Math.PI / 180, len = r.width * .481, rim = r.width * .570, rw = r.width * .934;
     const Lx = r.left + r.width / 2 - Math.sin(a) * len, Ly = r.top + Math.cos(a) * len;
     const Rx = r.left + r.width / 2 - Math.sin(a) * rim, Ry = r.top + Math.cos(a) * rim;
     const Lys = Math.max(Ly, -240);
-    setVar(root, "--lx", Lx.toFixed(0) + "px");
-    setVar(root, "--ly", Math.max(Ly, -80).toFixed(0) + "px");
-    setVar(root, "--li", li.toFixed(3));
+    setStyle(pool, "transform", `translate(${Lx.toFixed(0)}px, ${Math.max(Ly, -80).toFixed(0)}px)`);
+    setStyle(pool, "opacity", (li / 1.02).toFixed(3));
     const beamOp = clamp((Ly + 200) / 300, 0, 1);
     setVar(beam, "--rw", rw.toFixed(0) + "px");
     beam.style.transform = `translate(${(Rx - rw / 2 - 400).toFixed(1)}px, ${(Ry - 6).toFixed(1)}px) rotate(${sway.toFixed(2)}deg)`;
     beam.style.opacity = (beamOp * li).toFixed(3);
 
     // Shadows fall away from the bulb, longer the further away and the higher off the desk.
-    for (const el of lit) {
-      const b = el.getBoundingClientRect();
+    for (const [el, b] of boxes) {
       const dx = b.left + b.width / 2 - Lx, dy = b.top + b.height / 2 - Lys, d = Math.hypot(dx, dy) || 1;
       const elev = (+el.dataset.elev || 16) * (el._hover ? 1.7 : 1);
       const k = elev * (.45 + Math.min(d, 1400) / 1400 * .9);
@@ -2817,7 +2837,6 @@ $$("[data-tilt]").forEach(el => {
     // The brass title leans toward the pointer; its edge points away from the bulb.
     if (!REDUCE && FINE) { tx += ((py - .35) * -8 - tx) * .06; ty += ((px - .5) * 10 - ty) * .06; }
     setVar(title, "--trx", tx.toFixed(2) + "deg"); setVar(title, "--try", ty.toFixed(2) + "deg");
-    const tb = title.getBoundingClientRect();
     if (tb.bottom > 0) {
       let ex = tb.left + tb.width / 2 - Lx, ey = tb.top + tb.height / 2 - Lys;
       const ed = Math.hypot(ex, ey) || 1; ex /= ed; ey /= ed;
@@ -2829,7 +2848,7 @@ $$("[data-tilt]").forEach(el => {
     }
 
     // Dust drifting through the cone of light.
-    ctx.clearRect(0, 0, innerWidth, innerHeight);
+    if (dirty) { ctx.clearRect(dirty[0], dirty[1], dirty[2] - dirty[0], dirty[3] - dirty[1]); dirty = null; }
     if (!REDUCE && beamOp > .01) {
       const cos = Math.cos(a), sin = Math.sin(a);
       ctx.globalCompositeOperation = "lighter";
@@ -2844,6 +2863,8 @@ $$("[data-tilt]").forEach(el => {
         if (alpha < .02) continue;
         ctx.fillStyle = `rgba(255,226,170,${alpha.toFixed(3)})`;
         ctx.beginPath(); ctx.arc(x, y, .6 + m.z * 1.5, 0, 6.283); ctx.fill();
+        dirty = dirty ? [Math.min(dirty[0], x - 3), Math.min(dirty[1], y - 3), Math.max(dirty[2], x + 3), Math.max(dirty[3], y + 3)]
+          : [x - 3, y - 3, x + 3, y + 3];
       }
       ctx.globalCompositeOperation = "source-over";
     }
