@@ -203,8 +203,9 @@ int desk_console_hit_lid(int w, int h, double px, double py, double open);
  * drawn rather than baked), and whether what is under it has been traced
  * yet -- until it has, the lid stays down. */
 bool desk_console_guard_hit(int w, int h, double px, double py, double open);
-/* The middle of the lid's free edge on the screen, opened that far: what a finger lifting it holds. */
-bool desk_console_lid_grip(int w, int h, double open, double *x, double *y);
+/* A point down the middle of the lid on the screen, opened that far: along 0 at the hinge, 1 the
+ * middle of its free edge. What a finger lifting it holds. */
+bool desk_console_lid_point(int w, int h, double open, double along, double *x, double *y);
 bool desk_console_lid_ready(int w, int h);
 /* Is the pointer on the set as it stands on the desk, seen from the desk's
  * own camera? This is what sends you over to it. */

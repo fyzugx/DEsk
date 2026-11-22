@@ -857,6 +857,12 @@ struct desk_server {
 	int snd_slide[2], slide_of;
 	double slide_v, slide_x, slide_y, slide_at;
 	struct wl_event_source *slide_timer;
+	/* the drawer on a finger, or let go of by one (drawer_snd_*): the same, its runs out or in,
+	 * how far out it was last (pixels) and which way it was going */
+	int snd_drun[2], drun_of;
+	double drun_v, drun_lift, drun_at;
+	bool drun_out;
+	struct wl_event_source *drun_timer;
 	unsigned post_seen;
 	bool post_seen_set;
 	/* sheets being folded away or opened out, over the windows; over the
@@ -1816,9 +1822,12 @@ struct desk_server {
 	double sheets_a0, sheets_a, sheets_round, sheets_fx, sheets_fy;
 	/* a slip's card on it: where the finger and the card were when it took hold */
 	double card_y0, card_pull0;
-	/* the lid on it: where its edge is on the screen, at each twentieth of the way up, and how
-	 * far the finger was from the edge when it took hold */
+	/* the lid on it: where the place on it the finger holds is on the screen, at each twentieth
+	 * of the way up, and how far the finger was from it when it took hold */
 	double lid_y[21], lid_off;
+	/* a finger on one of the Control Panel's buttons that slid a little and did nothing else: let
+	 * go on the same button, it pressed it (hand_slid_tap) */
+	bool hand_may_tap;
 	bool hand_edge;
 	bool hand_across, hand_axis;
 	double hand_x0, hand_y0, hand_fed, hand_t0;
@@ -2922,12 +2931,24 @@ static double smoothstep01(double a, double b, double x)
 /* A drawer, which is a different thing from a head: no wind-up, because
  * you have hold of it, and a knock at the end, because it arrives against
  * a stop and the things inside it keep going for a moment. */
+#define DRAWER_EASE_Z 0.80   /* (art/sound/bake.py makes the drawer's sounds for these) */
+#define DRAWER_EASE_W 12.0
 static double drawer_ease(double u)
 {
-	const double Z = 0.80, W = 12.0;
+	const double Z = DRAWER_EASE_Z, W = DRAWER_EASE_W;
 	u = clampf_d(u, 0.0, 1.0);
 	double wd = W * sqrt(1.0 - Z * Z);
 	return 1.0 - exp(-Z * W * u) * (cos(wd * u) + (Z * W / wd) * sin(wd * u));
+}
+
+/* How far through drawer_ease the drawer is first where it was going -- at its stop, or home:
+ * a third of the way through (0.347); the rest is its coming back off it and settling. That is
+ * where the stop is heard (2026-11-20, the owner: 引き出しの動きと効果音があっていない -- it was
+ * heard at the end, a third of a second after the drawer had got there). */
+static double drawer_ease_hit(void)
+{
+	double wd = DRAWER_EASE_W * sqrt(1.0 - DRAWER_EASE_Z * DRAWER_EASE_Z);
+	return (3.14159265358979 - atan(wd / (DRAWER_EASE_Z * DRAWER_EASE_W))) / wd;
 }
 
 /* ---- how the camera moves ----------------------------------------
@@ -8889,6 +8910,44 @@ static void cc_follow(struct desk_server *server, int dx, int dy)
 #define CC_PAINT_FROM 0.30   /* how far into the move to the set its pieces start to be drawn */
 #define CC_PAINT_MS 5.0      /* and how long a frame they may take, the rest left to the next */
 
+/* The lid, and the eight drawn with it: the four printed on it, the four under it. */
+static bool cc_with_lid(int p)
+{
+	return p == DESK_CCP_GUARD || p == DESK_CC_PW_OFF || p == DESK_CC_PW_BOOT
+		|| p == DESK_CC_PW_OUT || p == DESK_CC_PW_SUSPEND || p == DESK_CC_AIR
+		|| p == DESK_CC_SAVE || p == DESK_CC_NIGHT || p == DESK_CC_DISPLAY;
+}
+
+/* The meters, which go on by themselves: the tube's trace and words, the battery, the network. */
+static bool cc_by_itself(int p)
+{
+	return p == DESK_CC_CRT || p == DESK_CC_BATT || p == DESK_CC_NET;
+}
+
+/* The order the pieces are drawn in when there is not time for all of them in a frame: the lid
+ * and its eight first, then everything a hand moves, and the meters last -- they are drawn again
+ * on the next tick in any case. The tube, first and drawn again on every tick, could take the
+ * whole of a frame's time on a slower machine, and the key, behind it, was not drawn until the
+ * lid moved (2026-11-20, the owner: 鍵が蓋が動いたタイミングしか動かない). */
+static int cc_paint_order(int k)
+{
+	static int order[DESK_CCP_COUNT];
+	static bool made;
+	if (!made) {
+		int n = 0;
+		for (int pass = 0; pass < 3; pass++) {
+			for (int p = 0; p < DESK_CCP_COUNT; p++) {
+				int in = cc_with_lid(p) ? 0 : cc_by_itself(p) ? 2 : 1;
+				if (in == pass) {
+					order[n++] = p;
+				}
+			}
+		}
+		made = true;
+	}
+	return order[k];
+}
+
 static void paint_console_body(struct desk_server *server)
 {
 	int w = server->desk_w, h = server->desk_h;
@@ -8965,13 +9024,26 @@ static void paint_console_body(struct desk_server *server)
 		}
 		double t0 = real_sec();
 		bool more = false;
-		for (int p = 0; p < DESK_CCP_COUNT; p++) {
+		/* The lid and the eight that go with it (the four on it, the four under it) all in one
+		 * frame, however long it takes, while the lid is up or on its way, or was: drawn a few at
+		 * a time, the four had gone from the panel before the lid that carries them was there
+		 * (2026-11-20, the owner: 蓋を開けたときの描画がおかしくなる). */
+		struct desk_sprite *gsp = &server->cc_sprite[DESK_CCP_GUARD];
+		bool lid_live = st.guard > 0.0005 || (gsp->node && gsp->node->node.enabled);
+		/* And moving, on a finger or on its own, it is drawn as finely as things in motion are
+		 * (motion_res), and whole again where it comes to rest. */
+		bool lid_moving = st.guard > 0.0005 && st.guard < 0.999
+			&& (server->cc_guard_moving || (server->hand_on && server->hand_work == HAND_LID));
+		for (int k = 0; k < DESK_CCP_COUNT; k++) {
+			int p = cc_paint_order(k);
 			struct desk_sprite *sp = &server->cc_sprite[p];
-			uint64_t key = desk_console_piece_key(p, &st, server->cc_hover, &m);
+			bool shrunk = p == DESK_CCP_GUARD && lid_moving;
+			uint64_t key = desk_console_piece_key(p, &st, server->cc_hover, &m)
+				^ (shrunk ? 0x9e3779b97f4a7c15ull : 0);
 			if (sp->drawn && sp->key == key) {
 				continue;
 			}
-			if ((real_sec() - t0) * 1000.0 > CC_PAINT_MS) {
+			if (!(lid_live && cc_with_lid(p)) && (real_sec() - t0) * 1000.0 > CC_PAINT_MS) {
 				/* the rest the next frame */
 				more = true;
 				break;
@@ -8990,7 +9062,12 @@ static void paint_console_body(struct desk_server *server)
 			double box[4];
 			bool known = desk_console_piece_box(w, h, p, box);
 			struct cc_piece_args a = { p, &st, server->cc_hover, &m };
+			double was = server->sprite_shrink;
+			if (shrunk) {
+				server->sprite_shrink = motion_res();
+			}
 			sprite_paint(server, sp, server->cc_live, known ? box : NULL, cc_piece_draw, &a);
+			server->sprite_shrink = was;
 		}
 		if (more) {
 			server_schedule_frames(server);
@@ -9422,7 +9499,8 @@ static int console_live_cb(void *data)
 		 * so does the aerial */
 		wl_event_source_timer_update(server->cc_timer,
 			console_dying(server) || server->cc_ant_moving || server->cc_push >= 0
-			|| server->cc_then >= 0 || server->cc_guard_moving ? 16 : cc_live_ms());
+			|| server->cc_then >= 0 || server->cc_guard_moving || server->cc_key_moving
+			? 16 : cc_live_ms());
 	}
 	return 0;
 }
@@ -10631,6 +10709,98 @@ static void post_tick(struct desk_server *server)
 	server_schedule_frames(server);
 }
 
+/* The drawer on a finger, or let go of by one: its runs going round as fast as it goes, out or in,
+ * as a sheet slid is (2026-11-20, the owner: 引き出しの動きと効果音があっていない -- the run was played
+ * once as the finger took it, whatever the finger then did with it). The two runs' own speeds, as
+ * drawer.dsp's speed (1 is 1200 points a second), and how quickly what is heard follows. */
+#define DRUN_SLOW (0.20 * 1200.0)
+#define DRUN_QUICK (0.75 * 1200.0)
+#define DRUN_TAU 0.05
+
+static double drawer_lift_at(const struct desk_server *server, double t);
+
+static void drawer_snd_end(struct desk_server *server, double fade)
+{
+	for (int k = 0; k < 2; k++) {
+		desk_sound_stop(server->snd_drun[k], fade);
+		server->snd_drun[k] = 0;
+	}
+	server->drun_of = -1;
+	server->drun_v = 0.0;
+	server->drun_at = 0.0;
+	if (server->drun_timer) {
+		wl_event_source_timer_update(server->drun_timer, 0);
+	}
+}
+
+static void drawer_snd_set(struct desk_server *server)
+{
+	double v = fmin(server->drun_v, 1.5 * 1200.0);
+	/* as loud as drawer.dsp makes the run for the speed, from whichever is nearer */
+	double a = pow(v / 1200.0, 0.8);
+	double w = clampf_d(log(fmax(v, 1.0) / DRUN_SLOW) / log(DRUN_QUICK / DRUN_SLOW), 0, 1);
+	double g[2] = { (1.0 - w) * a / pow(DRUN_SLOW / 1200.0, 0.8),
+		w * a / pow(DRUN_QUICK / 1200.0, 0.8) };
+	int of = server->drun_out ? DESK_SND_DRAWER_RUN_OUT_SLOW : DESK_SND_DRAWER_RUN_IN_SLOW;
+	if (of != server->drun_of) {
+		for (int k = 0; k < 2; k++) {
+			desk_sound_stop(server->snd_drun[k], 0.06);
+			server->snd_drun[k] = 0;
+		}
+		server->drun_of = of;
+	}
+	for (int k = 0; k < 2; k++) {
+		if (!server->snd_drun[k] && g[k] > 0.002) {
+			/* (in at nothing, and up to where it is: no click) */
+			server->snd_drun[k] = desk_sound_loop((enum desk_sound)(of + k), 0.0, 0.0);
+		}
+		desk_sound_set(server->snd_drun[k], 0.0, g[k]);
+	}
+}
+
+/* the drawer moved: how fast, and which way */
+static void drawer_snd_motion(struct desk_server *server)
+{
+	double now = monotonic_sec();
+	double lift = drawer_lift_at(server, server->drawer_t);
+	if (server->drun_at > 0.0) {
+		double dt = now - server->drun_at;
+		if (dt < 1e-4) {
+			return;   /* (two at once: the next one has it) */
+		}
+		double d = (lift - server->drun_lift) / desk_px_per_pt(server->desk_w);
+		if (fabs(d) > 0.5) {
+			server->drun_out = d > 0.0;
+		}
+		server->drun_v += (fmin(fabs(d) / dt, 3000.0) - server->drun_v)
+			* (1.0 - exp(-dt / DRUN_TAU));
+	}
+	server->drun_lift = lift;
+	server->drun_at = now;
+	drawer_snd_set(server);
+	if (server->drun_timer) {
+		wl_event_source_timer_update(server->drun_timer, 30);
+	}
+}
+
+static int drun_timer_cb(void *data)
+{
+	struct desk_server *server = data;
+	double idle = monotonic_sec() - server->drun_at;
+	bool going = server->drawer_moving && (server->drawer_held || server->drawer_free);
+	if (!going || server->drun_at <= 0.0 || idle > 0.4) {
+		drawer_snd_end(server, 0.08);
+		return 0;
+	}
+	if (idle > 0.025) {
+		/* the finger has stopped, or nearly: dying away */
+		server->drun_v *= exp(-0.03 / DRUN_TAU);
+		drawer_snd_set(server);
+	}
+	wl_event_source_timer_update(server->drun_timer, 30);
+	return 0;
+}
+
 /* Out, or home, from where it has got to. */
 static void drawer_go(struct desk_server *server, double to)
 {
@@ -10652,13 +10822,16 @@ static void drawer_go(struct desk_server *server, double to)
 	}
 	server->drawer_dur = 0.54 * span;
 	server->drawer_moving = 1;
-	/* along the runners, for as long as it moves (the stop, if it was on
-	 * its way to one, is not reached now) */
+	/* along the runners, until it is at its stop (the stop, if it was on its way to one, is not
+	 * reached now): the run is made for the whole way, and a shorter one is cut where it gets
+	 * there, dying away as the stop is heard */
 	desk_sound_stop(server->snd_drawer, 0.04);
+	drawer_snd_end(server, 0.04);
 	snd_forget(&server->snd_drawer_stop);
 	server->snd_drawer = desk_sound_play(server->drawer_to > 0.5 ? DESK_SND_DRAWER_OUT
 		: DESK_SND_DRAWER_IN, 0.0, 0.55 + 0.45 * fmin(span, 1.0), 0.0);
-	desk_sound_stop_after(server->snd_drawer, real_secs(server->drawer_dur) + SND_SEEN, 0.05);
+	desk_sound_stop_after(server->snd_drawer,
+		real_secs(server->drawer_dur * drawer_ease_hit()) + SND_SEEN, 0.10);
 	server_schedule_frames(server);
 	drawer_compose(server);
 	fullscreen_layer_order(server);
@@ -10734,6 +10907,7 @@ static void drawer_free_step(struct desk_server *server)
 				/* at its stop, or home: as hard as it got there */
 				desk_sound_stop(server->snd_drawer, 0.03);
 				server->snd_drawer = 0;
+				drawer_snd_end(server, 0.03);
 				server->snd_drawer_stop = desk_sound_play(out ? DESK_SND_DRAWER_STOP_OUT
 					: DESK_SND_DRAWER_STOP_IN, 0.0, fmin(0.35 + hit / 1400.0, 1.0), 0.0);
 			}
@@ -10751,6 +10925,11 @@ static void drawer_free_step(struct desk_server *server)
 		server->drawer_x = stop_at;
 	}
 	server->drawer_t = drawer_t_of_lift(server, server->drawer_x);
+	/* (on its way: its runs as fast as it goes; once at its stop, what it does coming back off
+	 * it is in the stop) */
+	if (!server->snd_drawer_stop) {
+		drawer_snd_motion(server);
+	}
 }
 
 static void drawer_tick(struct desk_server *server)
@@ -10780,8 +10959,9 @@ static void drawer_tick(struct desk_server *server)
 	double u = clampf_d((monotonic_sec() - server->drawer_start) / server->drawer_dur, 0, 1);
 	server->drawer_t = server->drawer_from
 		+ (server->drawer_to - server->drawer_from) * drawer_ease(u);
-	/* at its stop, or home (the slide has been cut to end there) */
-	snd_end(&server->snd_drawer_stop, server->drawer_start, server->drawer_dur,
+	/* at its stop, or home: the first time it gets there (the run has been cut to end there) */
+	snd_end(&server->snd_drawer_stop, server->drawer_start,
+		server->drawer_dur * drawer_ease_hit(),
 		server->drawer_to > 0.5 ? DESK_SND_DRAWER_STOP_OUT : DESK_SND_DRAWER_STOP_IN,
 		0.0, 1.0, 0.0);
 	if (u >= 1.0) {
@@ -29904,10 +30084,13 @@ static void hand_drawer_begin(struct desk_server *server, struct desk_finger *f)
 	server->drawer_free = false;
 	server->drawer_moving = 1;
 	server->drawer_to = server->drawer_t > 0.5 ? 0.0 : 1.0;
+	/* its runs as fast as the finger takes it (drawer_snd_motion), from nothing */
 	desk_sound_stop(server->snd_drawer, 0.04);
+	server->snd_drawer = 0;
 	snd_forget(&server->snd_drawer_stop);
-	server->snd_drawer = desk_sound_play(server->drawer_to > 0.5 ? DESK_SND_DRAWER_OUT
-		: DESK_SND_DRAWER_IN, 0.0, 0.45, 0.0);
+	drawer_snd_end(server, 0.04);
+	server->drun_out = server->drawer_to > 0.5;
+	drawer_snd_motion(server);
 	server->drw_dirty = true;
 	drawer_compose(server);
 	fullscreen_layer_order(server);
@@ -29924,6 +30107,7 @@ static void hand_drawer_move(struct desk_server *server, const struct desk_finge
 	} else {
 		server->drawer_t = drawer_t_of_lift(server, want);
 	}
+	drawer_snd_motion(server);
 	server_schedule_frames(server);
 }
 
@@ -30392,11 +30576,26 @@ static struct desk_toplevel *paper_under_finger(struct desk_server *server, doub
  * 1：1のタッチへの最適化): taken by its edge, with the key home, it comes up as far as the finger
  * goes -- its edge stays under the finger -- and let go, it goes the rest of the way up, or back
  * down, as the finger was going. */
-static bool hand_lid_begin(struct desk_server *server, double fy)
+/* (not right at the hinge, where every pixel the finger went would be the lid's whole swing) */
+#define LID_ALONG_MIN 0.35
+
+static bool hand_lid_begin(struct desk_server *server, double fx, double fy)
 {
+	int w = server->desk_w, h = server->desk_h;
+	/* Where on the lid the finger is, from the hinge to the free edge, and that place, not the
+	 * edge, on the finger (2026-11-20, the owner: 蓋の感度が悪い -- held half way down, the edge
+	 * went as far as the finger and the place under it half as far). */
+	double hx, hy, ex, ey;
+	if (!desk_console_lid_point(w, h, server->cc_guard, 0.0, &hx, &hy)
+		|| !desk_console_lid_point(w, h, server->cc_guard, 1.0, &ex, &ey)) {
+		return false;
+	}
+	double dx = ex - hx, dy = ey - hy, len2 = dx * dx + dy * dy;
+	double along = len2 > 1.0 ? ((fx - hx) * dx + (fy - hy) * dy) / len2 : 1.0;
+	along = clampf_d(along, LID_ALONG_MIN, 1.0);
 	for (int i = 0; i <= 20; i++) {
 		double x, y;
-		if (!desk_console_lid_grip(server->desk_w, server->desk_h, i / 20.0, &x, &y)) {
+		if (!desk_console_lid_point(w, h, i / 20.0, along, &x, &y)) {
 			return false;
 		}
 		server->lid_y[i] = y;
@@ -30440,9 +30639,12 @@ static void hand_lid_move(struct desk_server *server, double fy)
 		t = want < top ? top_i / 20.0 : 0.0;
 	}
 	server->cc_guard = server->cc_guard_to = clampf_d(t, 0.0, 1.0);
-	console_live(server, true);
-	paint_console(server);
-	server_schedule_frames(server);
+	/* drawn on the set's next tick, a millisecond on, as far as the finger has got by then: a
+	 * picture of the lid for every touch the screen reported was more than a Surface Pro could
+	 * draw, and the lid fell further and further behind the finger (2026-11-20) */
+	if (server->cc_timer) {
+		wl_event_source_timer_update(server->cc_timer, 1);
+	}
 }
 
 static void hand_lid_lift(struct desk_server *server, double vy)
@@ -30496,9 +30698,15 @@ static enum hand_work hand_what_it_does(struct desk_server *server, struct desk_
 			server->cc_guard);
 		bool on_lid = which == DESK_CC_LID || (server->cc_guard > 0.0005
 			&& desk_console_guard_hit(server->desk_w, server->desk_h, cx, cy, server->cc_guard));
-		if (on_lid && server->cc_key >= 0.999 && !server->cc_key_moving
+		/* The four buttons on the lid are the lid too, to a finger pulling it up or down: they
+		 * are most of it, and one set down on them and pulled did nothing (2026-11-20, the owner:
+		 * 蓋の感度が悪い). Tapped, they are still pressed. */
+		double fdx = f->x - server->hand_x0, fdy = f->y - server->hand_y0;
+		bool lid_face = on_lid || (fabs(fdy) > fabs(fdx)
+			&& desk_console_guard_hit(server->desk_w, server->desk_h, cx, cy, server->cc_guard));
+		if (lid_face && server->cc_key >= 0.999 && !server->cc_key_moving
 			&& desk_console_lid_ready(server->desk_w, server->desk_h)
-			&& hand_lid_begin(server, server->hand_y0)) {
+			&& hand_lid_begin(server, server->hand_x0, server->hand_y0)) {
 			return HAND_LID;
 		}
 		return which == DESK_CC_VOL || which == DESK_CC_BRIGHT || which == DESK_CC_SCREEN
@@ -30767,6 +30975,7 @@ static void hand_swipes(struct desk_server *server, struct desk_finger *f, uint3
 			hand_look_begin(server, f, DESK_VIEW_CONSOLE);
 		} else {
 			server->hand_work = HAND_DONE;
+			server->hand_may_tap = true;
 		}
 	} else if (post_up(server)) {
 		if (across && dx > 0.0) {
@@ -31297,6 +31506,7 @@ static void hand_begin(struct desk_server *server, struct desk_finger *f, bool e
 	server->hand_x0 = f->x;
 	server->hand_y0 = f->y;
 	server->hand_fed = 0.0;
+	server->hand_may_tap = false;
 	if (!edge && hand_catches(server, f)) {
 		return;
 	}
@@ -31563,6 +31773,27 @@ static void server_touch_motion(struct wl_listener *listener, void *data)
 	}
 }
 
+/* A finger on one of the Control Panel's buttons that rolled or slid a little as it pressed,
+ * further than a tap, into no way of going that does anything there: let go on the same button,
+ * not far off, it pressed it, as a finger on a button does (2026-11-20, the owner: タッチ感度が変;
+ * the key, upright and narrow, mostly did nothing). The pointer is still where it went down. */
+#define TOUCH_SLID_TAP_PT 24.0
+static bool hand_slid_tap(struct desk_server *server, const struct desk_finger *f)
+{
+	if (!server->hand_may_tap || server->hand_work != HAND_DONE || !console_up(server)
+		|| server->cc_t < 0.9995) {
+		return false;
+	}
+	if (hypot(f->x - server->hand_x0, f->y - server->hand_y0)
+		> TOUCH_SLID_TAP_PT * desk_ui_scale()) {
+		return false;
+	}
+	int w = server->desk_w, h = server->desk_h;
+	int down = desk_console_hit_lid(w, h, server->hand_x0, server->hand_y0, server->cc_guard);
+	int up = desk_console_hit_lid(w, h, f->x, f->y, server->cc_guard);
+	return down >= 0 && down == up;
+}
+
 static void finger_off(struct desk_server *server, struct desk_finger *f)
 {
 	f->on = false;
@@ -31593,7 +31824,8 @@ static void server_touch_up(struct wl_listener *listener, void *data)
 	if (f->goes == FINGER_PROGRAM) {
 		wlr_seat_touch_notify_up(server->seat, event->time_msec, f->id);
 	} else if (f->goes == FINGER_HAND && server->hand_on) {
-		if (server->hand_work == HAND_WAITING && said.what == DESK_TOUCH_TAP) {
+		if ((server->hand_work == HAND_WAITING && said.what == DESK_TOUCH_TAP)
+			|| hand_slid_tap(server, f)) {
 			hand_button(server, BTN_LEFT, true, event->time_msec);
 			hand_button(server, BTN_LEFT, false, event->time_msec);
 		} else if (server->hand_work == HAND_HOLDS) {
@@ -35786,6 +36018,8 @@ int main(int argc, char **argv)
 	server.cc_timer = wl_event_loop_add_timer(loop, console_live_cb, &server);
 	server.slide_timer = wl_event_loop_add_timer(loop, slide_timer_cb, &server);
 	server.slide_of = -1;
+	server.drun_timer = wl_event_loop_add_timer(loop, drun_timer_cb, &server);
+	server.drun_of = -1;
 	/* the wait for the screen to go dark, counted from now */
 	server.idle_timer = wl_event_loop_add_timer(loop, idle_cb, &server);
 	server.idle_at = real_sec();

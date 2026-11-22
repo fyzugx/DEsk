@@ -2,7 +2,7 @@
 
 # DEsk
 
-**v0.2 (BETA)** -- new things on the desk: a calculator, one notebook to type and write in, Print as a camera that also films, and picture-in-picture as an old phone; touch, an on-screen typewriter, a pen and handwriting, and a screen that turns with the machine; the Control Panel redesigned in four; woods, stains and desk mats; favourites, a clipboard and looks for the drawer. See [RELEASE-NOTES.md](RELEASE-NOTES.md).
+**v0.2.1 (BETA)** -- fixes for v0.2: the Control Panel's key and lid on a slower machine and on a touch screen, the top edge of the opened lid, and the drawer's sounds in time with the drawer. v0.2 brought new things to the desk: a calculator, one notebook to type and write in, Print as a camera that also films, and picture-in-picture as an old phone; touch, an on-screen typewriter, a pen and handwriting, and a screen that turns with the machine; the Control Panel redesigned in four; woods, stains and desk mats; favourites, a clipboard and looks for the drawer. See [RELEASE-NOTES.md](RELEASE-NOTES.md).
 
 Homepage: https://fyzugx.github.io/DEsk/ -- the highlights, a desk you can try in your browser, the install steps and an FAQ.
 
@@ -221,8 +221,8 @@ browser, a file manager and a text editor. The drawer's things and
   settings, borrowed programs, sounds, the room, things on the desk.
 - [docs/CONFIGURATION.md](docs/CONFIGURATION.md) -- every setting, file and
   environment variable.
-- [RELEASE-NOTES.md](RELEASE-NOTES.md) -- what is in v0.2 and what is known
-  not to work yet.
+- [RELEASE-NOTES.md](RELEASE-NOTES.md) -- what is in v0.2.1 and v0.2, and what
+  is known not to work yet.
 - [docs/design.md](docs/design.md) -- the full development log (in Japanese).
 
 ## As a desktop

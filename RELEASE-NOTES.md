@@ -1,8 +1,45 @@
 **English** | [日本語](RELEASE-NOTES.ja.md)
 
-# DEsk v0.2 (BETA)
+# DEsk v0.2.1 (BETA)
 
-## What changed since v0.1.5
+## What changed since v0.2
+
+- **Fixed: on a slower machine, the Control Panel's key did not seem to turn
+  until the lid moved.** The Control Panel draws a little of itself in each
+  frame, and the tube and the meters, which change all the time, came first;
+  on a slow machine the frame's time ran out before the key. It turned, but
+  was only seen turning when the lid made the whole set draw. The lid and its
+  buttons are drawn first now, then what a hand moves, then the meters, and
+  while the key turns the Control Panel is drawn in every frame. The lid and
+  the buttons on and under it are drawn in the same frame, so they no longer
+  come up a step apart.
+- **Fixed: the Control Panel's lid on a touch screen.** It could be taken only
+  by its edge, not from the buttons on it; taken, it was its edge that went
+  with the finger, a little behind it, and it was drawn again for every move
+  of the finger, so on a slower machine it went on moving after the finger
+  had stopped. Now it can be pulled up or down from anywhere on it, its
+  buttons too (a tap still presses the button), the place you took stays
+  under your finger, and it stops when your finger does.
+- **Fixed: a finger that slides a little as it presses a button on the
+  Control Panel still presses it.** A press that moved a few points became a
+  swipe and did nothing; the key, which a finger tends to turn as it presses,
+  was the one it caught most. A press that starts and ends on the same
+  button, a short way apart, presses it now.
+- **Fixed: the opened lid of the Control Panel looked cut off along its top
+  edge**, with the knob behind it showing through, and had a step at its foot
+  by the hinge. When the opened lid was cut out of the room's picture, its
+  top edge and a strip by the hinge were taken for what is behind the lid;
+  everything inside the raised lid's outline is the lid now.
+- **Fixed: the drawer's sounds keep time with it.** Clicked or opened with a
+  key, the drawer reaches its stop in about a fifth of a second and then only
+  settles, but its knock came at half a second; it comes as the drawer
+  reaches its stop now, and the sliding sound before it slows as the drawer
+  does. Moved by a finger, the drawer played its sliding sound once as the
+  finger took it, whatever the finger did after; now the sound runs as fast as
+  the finger moves the drawer and stops when it stops, as a sheet slid over
+  the desk does.
+
+## What changed in v0.2
 
 - **New: the Control Panel in four.** The tube and the meters at the top left, the volume
   knob and the two faders at the top right, the wireless and Bluetooth switches with LOCK
@@ -171,6 +208,15 @@
   down onto the lower screen stay there instead of going into the drawer, a window flicked
   downwards stops at the bottom of the lowest screen instead of sliding off it, and a
   finger turns the index book a spread at a time.
+- **Fixed: right-click menus ran off the bottom of the screen** (#69). A menu
+  that would run past an edge of the screen is moved back onto it, for every
+  program. Thanks to picarica for the report.
+- **New: a program in front can have every key** (#70). Programs that ask for
+  all the keys while they are in front (Moonlight, remote desktops, virtual
+  machines; keyboard-shortcuts-inhibit) get Alt+Tab, Super, Print and the
+  volume keys too, and `Super+Esc` takes them back to the desk. Switching VTs,
+  Ctrl+Alt+Del, the front door and the brightness keys stay with the desk.
+  Thanks to picarica for the report.
 - **The level the desk starts at is chosen with more care.** With graphics built into the
   processor, or a virtual machine's, it starts at Medium (the installer's look lets it go
   higher only for a machine well over what High needs), and Ultra is chosen only with
@@ -557,7 +603,7 @@ lights a ray-traced room.
 
 ## Installing
 
-Unpack the release (`DEsk-v0.2-BETA.zip` or `.tar.gz`), go into its folder
+Unpack the release (`DEsk-v0.2.1-BETA.zip` or `.tar.gz`), go into its folder
 and run the line for your system:
 
 ```sh
@@ -628,14 +674,19 @@ fed in for the fingers, and a real kernel's DRM in QEMU where it needed one),
 many under AddressSanitizer and UndefinedBehaviorSanitizer; touch, pen and the
 small screen on a Surface Pro 7; the release build has no warnings and
 `meson test` passes.
+For v0.2.1, the fixed parts were tried against v0.2 in a desk run inside
+another: the Control Panel at a Surface Pro 7's size on a processor slowed
+down, the drawer with its sounds recorded and timed; then all of them again
+under AddressSanitizer and UndefinedBehaviorSanitizer. The four
+configurations build with no warnings and `meson test` passes.
 
 ## Checking your copy
 
 The folder carries `SHA256SUMS`, which the installer checks before it builds.
-The archive comes with `DEsk-v0.2-BETA.tar.gz.sha256`:
+The archive comes with `DEsk-v0.2.1-BETA.tar.gz.sha256`:
 
 ```sh
-sha256sum -c DEsk-v0.2-BETA.tar.gz.sha256
+sha256sum -c DEsk-v0.2.1-BETA.tar.gz.sha256
 ```
 
 ## License

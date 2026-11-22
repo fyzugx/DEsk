@@ -90,28 +90,54 @@ def put(name, xs):
 
 
 # ---- the drawer (聞き比べ 4, 開ける・閉める「重く はっきり」: set 1's new 1, struck heavier and softer, the
-# weight where it is heard). As wm.c moves it, clicked: the run at 1, its stop at 1.
+# weight where it is heard).
+#
+# As wm.c moves it, clicked (drawer_go): on drawer_ease, a spring, DRAWER_S for the whole way, and at its stop
+# the first time the spring gets there, DRAWER_HIT_U of the way through (0.19 s). The run is made for that --
+# off at once, slowing as it comes, as loud at its fastest as the run chosen was -- and the stop there, as hard
+# as the one chosen. (2026-11-20, the owner: 引き出しの動きと効果音があっていない. They had been made for a drawer
+# let go of from rest, speeding up to its stop at 0.55 s: heard a third of a second after the drawer was
+# there.) Moved by a finger, it is two runs going round, slowly and quickly, out or in, faded between by how
+# fast it goes, as a sheet slid is (wm.c drawer_snd_*).
+
+EASE_Z, EASE_W, DRAWER_S = 0.80, 12.0, 0.54     # wm.c: DRAWER_EASE_Z, DRAWER_EASE_W, drawer_go
+RUN_SLOW, RUN_QUICK = 0.20, 0.75                # the two that go round, as drawer.dsp's speed (x 1200 pt/s)
+
 
 def drawer_path():
+    """the drawer let go of from rest (what was made first): only its stop's hardness is used now"""
     v = x = t = 0.0
-    pts = []
     while x < 265.0:
         for _ in range(48):
             v += (2600.0 - 2.2 * v) / 4800.0
             x += v / 4800.0
             t += 1.0 / 4800.0
-        pts.append((t, v / 1200.0))
-    return pts, t, min(0.35 + v / 1400.0, 1.0)
+    return min(0.35 + v / 1400.0, 1.0), v / 1200.0
+
+
+def drawer_click_path():
+    """drawer_ease's speed, to its first time at the stop, the fastest at the run chosen's fastest"""
+    wd = EASE_W * math.sqrt(1.0 - EASE_Z * EASE_Z)
+    u_hit = (math.pi - math.atan(wd / (EASE_Z * EASE_W))) / wd
+    sp = lambda u: math.exp(-EASE_Z * EASE_W * u) * math.sin(wd * u)
+    u_top = math.atan(wd / (EASE_Z * EASE_W)) / wd
+    hard, fastest = drawer_path()
+    pts, n = [], 64
+    for i in range(1, n + 1):
+        u = u_hit * i / n
+        pts.append((u * DRAWER_S, fastest * sp(u) / sp(u_top)))
+    return pts, u_hit * DRAWER_S, hard
 
 
 def drawer(name, out, hitk, jf, pre, weight, g):
-    pts, t_stop, hard = drawer_path()
+    pts, t_stop, hard = drawer_click_path()
+    head = ('0 dir %d\n0 hit %.3f\n0 jf %.4f\n0 heavy 1.00\n0 cb 1.63\n0 ba 1.11\n0 weight %.4f\n0 don %.4f\n'
+            % (out, hard * hitk, jf, weight, 1.7 * weight))
     ramp, prev = '', (0.0, 0.0)
     for t, s in pts:
         ramp += '%.4f %.4f speed %.4f %.4f\n' % (prev[0], t, prev[1], s)
         prev = (t, s)
-    sc = ('0 dir %d\n0 hit %.3f\n0 jf %.4f\n0 heavy 1.00\n0 cb 1.63\n0 ba 1.11\n0 weight %.4f\n0 don %.4f\n'
-          % (out, hard * hitk, jf, weight, 1.7 * weight) + ramp + '%.4f speed 0\n' % t_stop)
+    sc = head + ramp + '%.4f speed 0\n' % t_stop
     runs, stops = [], []
     for p in takes(pre, 3):
         run = render('drawer', sc, t_stop + 0.9, p)
@@ -122,6 +148,9 @@ def drawer(name, out, hitk, jf, pre, weight, g):
         stops.append(trim(mono((stop[0][at:], stop[1][at:]), g)))
     put('drawer-' + name, runs)
     put('drawer-stop-' + name, stops)
+    for how, speed, p in (('slow', RUN_SLOW, pre), ('quick', RUN_QUICK, (pre + 7919) % SR)):
+        x = mono(render('drawer', head + '0 speed %.3f\n' % speed, 2.3, p), g)
+        put('drawer-run-%s-%s' % (name, how), [loop(x, int(0.4 * SR), int(1.6 * SR), int(0.15 * SR))])
 
 
 drawer('out', 1, 1.0026, 0.9883, 4664, 1.7384, 1.55993)

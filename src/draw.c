@@ -25867,9 +25867,11 @@ bool desk_console_guard_hit(int screen_w, int screen_h, double px, double py,
 		|| cc_in_quad(ex, ey, px, py);
 }
 
-/* Where the middle of the lid's free edge is on the screen, opened that far (0 shut, 1 all the
- * way): what a finger lifting the lid by its edge holds on to (2026-11-12). */
-bool desk_console_lid_grip(int screen_w, int screen_h, double open, double *x, double *y)
+/* A point down the middle of the lid's top on the screen, opened that far (0 shut, 1 all the way):
+ * along 0 is its end at the hinge, 1 the middle of its free edge. What a finger lifting the lid
+ * holds on to (2026-11-12, by its edge; 2026-11-20, wherever the finger was put down on it). */
+bool desk_console_lid_point(int screen_w, int screen_h, double open, double along, double *x,
+	double *y)
 {
 	struct room_render *rr;
 	double ox, oy, scale;
@@ -25877,13 +25879,15 @@ bool desk_console_lid_grip(int screen_w, int screen_h, double open, double *x, d
 		return false;
 	}
 	double aspect = (double)rr->w / (double)(rr->h > 0 ? rr->h : 1);
-	double tx[4], ty[4];
-	if (!cc_lid_points(&rr->console_cam, open, CC_LID_N1, aspect, ox, oy, rr->w * scale,
-		rr->h * scale, tx, ty)) {
+	vec3 q[4];
+	cc_lid_corners(open, CC_LID_N1, 1.0, aspect, q);
+	vec3 hinge = vmul(vadd(q[0], q[1]), 0.5), edge = vmul(vadd(q[2], q[3]), 0.5);
+	double u, v;
+	if (!room_project(&rr->console_cam, vmix(hinge, edge, along), &u, &v)) {
 		return false;
 	}
-	*x = (tx[2] + tx[3]) * 0.5;
-	*y = (ty[2] + ty[3]) * 0.5;
+	*x = ox + u * rr->w * scale;
+	*y = oy + v * rr->h * scale;
 	return true;
 }
 
@@ -28131,6 +28135,25 @@ static double cc_px_lum(const uint32_t *row, int x)
 	return 0.30 * ((c >> 16) & 255) + 0.59 * ((c >> 8) & 255) + 0.11 * (c & 255);
 }
 
+/* Is a point of the second sheet inside the lid's outline, all the way up: its top, its underside
+ * and its four edges, the corners projected (tx/ty at CC_LID_N1, bx/by at CC_LID_N0). */
+static bool cc_in_lid_up(const double tx[4], const double ty[4], const double bx[4],
+	const double by[4], double x, double y)
+{
+	static const int SIDE[4][2] = { { 0, 1 }, { 2, 3 }, { 0, 2 }, { 1, 3 } };
+	if (cc_in_quad(tx, ty, x, y) || cc_in_quad(bx, by, x, y)) {
+		return true;
+	}
+	for (int k = 0; k < 4; k++) {
+		int a = SIDE[k][0], b = SIDE[k][1];
+		double qx[4] = { tx[a], tx[b], bx[a], bx[b] }, qy[4] = { ty[a], ty[b], by[a], by[b] };
+		if (cc_in_quad(qx, qy, x, y)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 static bool cc_lid_up(struct room_render *rr)
 {
 	cairo_surface_t *up;
@@ -28194,12 +28217,48 @@ static bool cc_lid_up(struct room_render *rr)
 	g_lidup.fx1 = fx1;
 	g_lidup.fy1 = fy1;
 
-	/* the lid up */
+	/* The lid up: what the second sheet's owners say is the lid, and everything inside its
+	 * outline besides. The end grain of its free edge lies on the very edge of the box that says
+	 * what is the lid, and near its foot the knob's and the fader's boxes, asked before the
+	 * lid's, reach out over it: a strip along its top and lines across its foot were left out of
+	 * it, and the knob showed through them under the lid's shadow (2026-11-20, the owner:
+	 * 開けたときに上のほうが描画切れ). The sheet itself has the lid there; it is only which
+	 * pixels are the lid's that was wrong. */
+	unsigned char *in = calloc((size_t)w * h, 1);
+	if (!in) {
+		free(mask);
+		return false;
+	}
+	double aspect = (double)w / (double)(h > 0 ? h : 1);
+	double tx[4], ty[4], bx[4], by[4];
+	if (cc_lid_points(&rr->console_cam, 1.0, CC_LID_N1, aspect, 0.0, 0.0, w, h, tx, ty)
+		&& cc_lid_points(&rr->console_cam, 1.0, CC_LID_N0, aspect, 0.0, 0.0, w, h, bx, by)) {
+		double hx0 = 1e9, hy0 = 1e9, hx1 = -1e9, hy1 = -1e9;
+		for (int k = 0; k < 4; k++) {
+			hx0 = fmin(hx0, fmin(tx[k], bx[k]));
+			hy0 = fmin(hy0, fmin(ty[k], by[k]));
+			hx1 = fmax(hx1, fmax(tx[k], bx[k]));
+			hy1 = fmax(hy1, fmax(ty[k], by[k]));
+		}
+		int ix0 = (int)fmax(0.0, floor(hx0)), iy0 = (int)fmax(0.0, floor(hy0));
+		int ix1 = (int)fmin((double)w, ceil(hx1)), iy1 = (int)fmin((double)h, ceil(hy1));
+		for (int y = iy0; y < iy1; y++) {
+			for (int x = ix0; x < ix1; x++) {
+				if (cc_in_lid_up(tx, ty, bx, by, x + 0.5, y + 0.5)) {
+					in[(size_t)y * w + x] = 1;
+				}
+			}
+		}
+	}
 	int lx0 = w, ly0 = h, lx1 = -1, ly1 = -1;
 	for (int y = 0; y < h; y++) {
 		const unsigned char *row = up_ids + (size_t)y * w;
+		unsigned char *inr = in + (size_t)y * w;
 		for (int x = 0; x < w; x++) {
 			if (row[x] == LID) {
+				inr[x] = 1;
+			}
+			if (inr[x]) {
 				lx0 = x < lx0 ? x : lx0;
 				lx1 = x > lx1 ? x : lx1;
 				ly0 = y < ly0 ? y : ly0;
@@ -28208,6 +28267,7 @@ static bool cc_lid_up(struct room_render *rr)
 		}
 	}
 	if (lx1 < lx0) {
+		free(in);
 		free(mask);
 		cc_lid_up_drop();
 		return false;
@@ -28221,7 +28281,7 @@ static bool cc_lid_up(struct room_render *rr)
 		const uint32_t *src = (const uint32_t *)(ud + (size_t)y * us);
 		uint32_t *dst = (uint32_t *)(ld + (size_t)(y - ly0) * ls);
 		for (int x = lx0; x < lx1; x++) {
-			dst[x - lx0] = up_ids[(size_t)y * w + x] == LID ? src[x] : 0u;
+			dst[x - lx0] = in[(size_t)y * w + x] ? src[x] : 0u;
 		}
 	}
 	cairo_surface_mark_dirty(g_lidup.lid);
@@ -28240,6 +28300,7 @@ static bool cc_lid_up(struct room_render *rr)
 	int bx0 = w, by0 = h, bx1 = -1, by1 = -1;
 	unsigned char *veil = calloc((size_t)(sx1 - sx0) * (sy1 - sy0), 1);
 	if (!veil) {
+		free(in);
 		free(mask);
 		return false;
 	}
@@ -28248,7 +28309,7 @@ static bool cc_lid_up(struct room_render *rr)
 		const uint32_t *ur = (const uint32_t *)(ud + (size_t)y * us);
 		for (int x = sx0; x < sx1; x++) {
 			size_t k = (size_t)y * w + x;
-			if (ids[k] != up_ids[k] || up_ids[k] == LID
+			if (ids[k] != up_ids[k] || in[k]
 				|| (x >= fx0 && x < fx1 && y >= fy0 && y < fy1
 					&& mask[(size_t)(y - fy0) * fw + (x - fx0)])) {
 				continue;
@@ -28266,6 +28327,7 @@ static bool cc_lid_up(struct room_render *rr)
 		}
 	}
 	free(mask);
+	free(in);
 	if (bx1 >= bx0) {
 		bx1++;
 		by1++;

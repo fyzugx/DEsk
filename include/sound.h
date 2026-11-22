@@ -51,6 +51,12 @@ enum desk_sound {
 	DESK_SND_SLIDE_SOFT_QUICK,
 	DESK_SND_SLIDE_CLEAR_SLOW,
 	DESK_SND_SLIDE_CLEAR_QUICK,
+	/* the drawer on a finger, going round for as long as it moves (desk_sound_loop): out and in,
+	 * slowly and quickly, faded between by how fast it goes (baked) */
+	DESK_SND_DRAWER_RUN_OUT_SLOW,
+	DESK_SND_DRAWER_RUN_OUT_QUICK,
+	DESK_SND_DRAWER_RUN_IN_SLOW,
+	DESK_SND_DRAWER_RUN_IN_QUICK,
 	/* the post box */
 	DESK_SND_POST_OPEN,        /* its door, on its hinge */
 	DESK_SND_POST_CLOSE,
