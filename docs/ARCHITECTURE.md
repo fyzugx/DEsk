@@ -2,7 +2,7 @@
 
 # DEsk architecture
 
-This is the technical overview of DEsk v0.1 (BETA): what the programs are,
+This is the technical overview of DEsk v0.2.1 (BETA): what the programs are,
 how the compositor is put together, how the room is drawn, which threads
 exist and what they own, and where everything is kept. It is meant for
 people reading or changing the code. For what DEsk looks like and how to use
@@ -39,7 +39,7 @@ These decide most questions about where code goes and what it does.
   at 60 fps. Every level (Ultra, High, Medium, Low, 2D Fallback) is the same
   code with less work done, never a second implementation.
 - **English first, then the world.** UI words are written in English in the
-  code and translated through a table (seven languages in v0.1). Seasonal
+  code and translated through a table (seven languages in v0.2.1). Seasonal
   touches are ones every culture shares (a birthday, the new year).
 
 ## 2. The programs

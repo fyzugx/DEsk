@@ -1,6 +1,6 @@
 # DEsk configuration reference
 
-Everything DEsk reads and writes, for v0.1 (BETA). Shell Settings
+Everything DEsk reads and writes, for v0.2.1 (BETA). Shell Settings
 (`desk-settings`) edits `shell.conf` for you; everything here can also be
 edited by hand, and DEsk picks up a changed `shell.conf` within a second.
 Unknown keys and bad values are reported in the session log
