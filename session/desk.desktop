@@ -9,3 +9,5 @@ Type=Application
 DesktopNames=DEsk
 Keywords=wayland;compositor;desktop;desk;
 X-LightDM-DesktopName=DEsk
+X-GDM-SessionRegisters=true
+X-GDM-CanRunHeadless=true

@@ -23978,6 +23978,57 @@ static bool om_try(struct desk_server *server, struct wlr_output_configuration_v
 
 static void displays_keep(struct desk_server *server);
 
+/* The kernel can report physical outputs in a different order from the one
+ * the user arranged them in another desktop.  Until a display tool has
+ * saved a layout, keep the backend's discovery order (which reflects the
+ * physical connector topology) and put the built-in panel first.  A saved
+ * displays.conf layout still wins whenever it contains this set of screens. */
+static void displays_default(struct desk_server *server)
+{
+	struct desk_output *ordered[8];
+	size_t n = 0;
+	struct desk_output *o;
+	wl_list_for_each(o, &server->outputs, link) {
+		if (!output_is_window(o->wlr_output) && !o->off && n < 8) {
+			ordered[n++] = o;
+		}
+	}
+	if (n < 2) {
+		return;
+	}
+	/* wl_list_insert puts newest outputs first; reverse it to recover the
+	 * backend's discovery order. */
+	for (size_t i = 0; i < n / 2; i++) {
+		struct desk_output *swap = ordered[i];
+		ordered[i] = ordered[n - i - 1];
+		ordered[n - i - 1] = swap;
+	}
+	size_t builtin = n;
+	for (size_t i = 0; i < n; i++) {
+		const char *name = ordered[i]->wlr_output->name;
+		if ((name && !strncmp(name, "eDP", 3))
+			|| (name && !strncmp(name, "LVDS", 4))
+			|| (name && !strncmp(name, "DSI", 3))) {
+			builtin = i;
+			break;
+		}
+	}
+	if (builtin > 0 && builtin < n) {
+		struct desk_output *home = ordered[builtin];
+		memmove(ordered + 1, ordered, builtin * sizeof ordered[0]);
+		ordered[0] = home;
+	}
+	int x = 0;
+	for (size_t i = 0; i < n; i++) {
+		struct wlr_output *out = ordered[i]->wlr_output;
+		wlr_output_layout_add(server->output_layout, out, x, 0);
+		int w, h;
+		wlr_output_effective_resolution(out, &w, &h);
+		x += w > 0 ? w : out->width;
+	}
+	wlr_log(WLR_INFO, "displays.conf: no saved layout; arranged screens by connector");
+}
+
 /* ---- the screen turned the way the machine is held -------------------------------
  *
  * (2026-11-12, the owner: 後は自動回転ぐらいかな) A tablet's screen -- the built-in one, eDP,
@@ -24641,6 +24692,11 @@ static void displays_put_back(struct desk_server *server)
 		if (disp_same_set(&sets[i], &now)) {
 			kept = &sets[i];
 		}
+	}
+	if (!kept) {
+		displays_default(server);
+		free(sets);
+		return;
 	}
 	struct wlr_output_configuration_v1 *config = kept ? wlr_output_configuration_v1_create()
 		: NULL;
