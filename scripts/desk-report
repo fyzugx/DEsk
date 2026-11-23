@@ -152,7 +152,7 @@ report() {
 	section "The journal since this boot: DEsk and the login screen"
 	if command -v journalctl >/dev/null 2>&1; then
 		journalctl -b -q --no-pager -o short-monotonic 2>/dev/null \
-			| grep -E '[ /]desk(-session|-session-helper)?(\[|:)|gdm-wayland-session|gdm-session-worker|gdm-password|sddm-helper|lightdm' \
+			| grep -E '[ /]desk(-session|-session-helper)?(\[|:)|gdm-wayland-session|gdm-session-worker|gdm-password|sddm-helper|lightdm|plasmalogin' \
 			| grep -vE '\((II|\*\*|==|--|WW)\) ' | tail -n 80
 	else
 		echo "(journalctl not found)"
