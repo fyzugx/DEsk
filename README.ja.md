@@ -42,7 +42,7 @@ sudo sh scripts/install_debian.sh
 sudo sh scripts/install_ubuntu.sh
 ```
 
-**Arch Linux**（EndeavourOS、Manjaro も）
+**Arch Linux**（EndeavourOS、Manjaro、CachyOS も）
 
 ```sh
 sudo sh scripts/install_arch.sh
@@ -1302,7 +1302,7 @@ Shell Settings の「Camera bounce」（カメラの揺れ）で低く、また�
 
 ## インストール（Wayland セッション）
 
-Linux でシステムに入れて、GDM / SDDM / LightDM のログイン画面から選びます。
+Linux でシステムに入れて、GDM / SDDM / LightDM / Plasma Login Manager のログイン画面から選びます。
 手に入れたフォルダで、使っているシステムのインストーラを実行します（上の「インストール」）。
 四つとも同じオプションです:
 
@@ -1316,7 +1316,7 @@ sudo sh scripts/install_debian.sh --prefix /opt/desk   # 入れる場所（既�
 
 `sh scripts/install_session.sh` は `/etc/os-release` を見て、次のどれかに自分で渡し
 （同じオプション）、言ったことを `~/.local/state/desk/install.log` にも残します。
-Linux Mint・Pop!_OS は Ubuntu、EndeavourOS・Manjaro は Arch、Nobara などは Fedora として扱います。
+Linux Mint・Pop!_OS は Ubuntu、EndeavourOS・Manjaro・CachyOS は Arch、Nobara などは Fedora として扱います。
 
 | 配布 | スクリプト | wlroots 0.18 |
 | --- | --- | --- |

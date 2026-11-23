@@ -50,7 +50,7 @@ sudo sh scripts/install_debian.sh
 sudo sh scripts/install_ubuntu.sh
 ```
 
-**Arch Linux** (and EndeavourOS, Manjaro)
+**Arch Linux** (and EndeavourOS, Manjaro, CachyOS)
 
 ```sh
 sudo sh scripts/install_arch.sh
@@ -447,9 +447,9 @@ Inside your current session, as a window:
 ./build/desk -s foot
 ```
 
-As a session of its own, picked from the login screen (GDM, SDDM, LightDM),
-use the installer for your system ([Install](#install)). All four take the
-same options:
+As a session of its own, picked from the login screen (GDM, SDDM, LightDM,
+Plasma Login Manager), use the installer for your system
+([Install](#install)). All four take the same options:
 
 ```sh
 sudo sh scripts/install_debian.sh              # or install_ubuntu.sh, install_arch.sh, install_fedora.sh
@@ -460,7 +460,7 @@ sudo sh scripts/install_debian.sh --prefix /opt/desk
 
 `sh scripts/install_session.sh` picks the right one by itself and keeps what
 it says in `~/.local/state/desk/install.log`. Each installer does the same
-(derivatives such as Mint, Pop!_OS, EndeavourOS, Manjaro and Nobara are recognised):
+(derivatives such as Mint, Pop!_OS, EndeavourOS, Manjaro, CachyOS and Nobara are recognised):
 packages, a release build in `build-install`, the PAM file, the login entry,
 and the removal of what the old name, DeskWM, left behind (after asking).
 Every program Shell Settings' System tab opens is installed, `--no-apps` or
