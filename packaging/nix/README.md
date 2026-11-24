@@ -59,6 +59,10 @@ including `wdisplays`, `nwg-look`, NetworkManager applet/editor, `udiskie` and
 Core services remain enabled, but excluded tools must be installed separately
 if wanted; having another desktop installed does not replace every helper.
 
+GNOME Keyring provides password storage, but DEsk does not enable the GCR SSH
+agent by default. The host or another desktop can enable it if needed; it cannot
+be enabled alongside `programs.ssh.startAgent`.
+
 ## DEsk settings
 
 Use Shell Settings or the existing `desk/shell.conf` configuration; see
